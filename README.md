@@ -146,4 +146,4 @@ Agent configurations are persisted in the OS data directory:
 
 ## 📄 License
 
-[MIT](LICENSE)
+[Apache](LICENSE)
