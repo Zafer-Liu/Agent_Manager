@@ -1,7 +1,7 @@
 # 智管-Agent Manager
 
 <p align="center">
-  <img src="./logo/Banner.png" alt="智管-Agent Manager Banner" width="100%" />
+  <img src="./Logo/Banner.png" alt="智管-Agent Manager Banner" width="100%" />
 </p>
 
 <p align="right"><a href="./README_EN.md">English</a></p>
@@ -241,7 +241,7 @@ brew install cloudflared
 
 ### 下载预构建安装包（推荐）
 
-从 [Releases](https://github.com/Zafer-Liu/Agent_MCP_Manager/releases) 下载最新版本：
+从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/tree/main/Releases) 下载最新版本：
 
 | 平台 | 文件 |
 |------|------|
