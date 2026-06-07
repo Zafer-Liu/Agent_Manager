@@ -1,149 +1,602 @@
-# Agent MCP Manager
+# 智管-Agent Manager
 
-<div align="center">
+<p align="center">
+  <img src="./logo/Banner.png" alt="智管-Agent Manager Banner" width="100%" />
+</p>
 
-![Agent MCP Manager](frontend/src/assets/hero.png)
+<p align="right"><a href="./README_EN.md">English</a></p>
 
-[![License](https://img.shields.io/github/license/Zafer-Liu/Agent_MCP_Manager?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/Zafer-Liu/Agent_MCP_Manager?style=flat-square)](https://github.com/Zafer-Liu/Agent_MCP_Manager/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue?style=flat-square)](#)
-[![Build](https://img.shields.io/github/actions/workflow/status/Zafer-Liu/Agent_MCP_Manager/release.yml?style=flat-square)](https://github.com/Zafer-Liu/Agent_MCP_Manager/actions)
-[![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB?style=flat-square&logo=tauri)](https://tauri.app)
+![版本](https://img.shields.io/badge/版本-v0.2.0-blue.svg)
+![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)
+[![Platform](https://img.shields.io/badge/平台-Windows%20%7C%20macOS-blue?style=flat-square)](#)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react)](https://react.dev)
 [![Rust](https://img.shields.io/badge/Rust-stable-CE422B?style=flat-square&logo=rust)](https://www.rust-lang.org)
 
-**A cross-platform desktop application for managing AI Agents and MCP (Model Context Protocol) Servers**
+> 本地 AI Agent 的统一管理中心。  
+> 添加 Agent 后，用户可在这里实现：
+>
+> - 一键启动 / 停止，实时查看日志
+> - 内嵌 Web UI 与交互式终端
+> - 用自然语言指挥所有 Agent
+> - 一键生成临时公网分享链接
 
-Built with Tauri 2 · React 19 · Rust
+<p align="center">
+  <a href="#features">✨ 项目亮点</a> ·
+  <a href="#install">⚙️ 快速安装</a> ·
+  <a href="#quickstart">🚀 快速上手</a> ·
+  <a href="#llm-config">🤖 LLM 配置</a> ·
+  <a href="#share">🌐 分享 Agent</a> ·
+  <a href="#faq">❓ FAQ</a>
+</p>
 
-[English](README.md) · [中文](README.zh.md)
+<details>
+<summary><strong>📚 完整目录</strong></summary>
 
-</div>
+<br>
+
+- [项目亮点](#features)
+- [核心功能](#capabilities)
+  - [Dashboard 教室视图](#dashboard)
+  - [Manager Agent 自然语言指挥官](#manager)
+  - [Agent 管理](#agents)
+  - [MCP Agent 工具对话](#mcp)
+  - [代理发布与临时分享](#share)
+  - [Port Manager 端口管理](#ports)
+- [安装方式](#install)
+- [快速上手](#quickstart)
+- [LLM 配置说明](#llm-config)
+- [支持的项目类型](#project-types)
+- [数据存储路径](#data-paths)
+- [版本更新](#roadmap)
+- [FAQ](#faq)
+- [参与贡献](#contributing)
+- [License](#license)
+
+</details>
 
 ---
 
-## ✨ Features
+<a id="features"></a>
 
-- **Agent Manager** — Add, configure, start/stop, and monitor AI agents; real-time log streaming (stdout + stderr); drag-and-drop reorder
-- **MCP Server Manager** — Visually manage Claude Desktop's `claude_desktop_config.json`; add/edit/remove MCP servers without touching JSON
-- **Port Manager** — Scan and display all listening ports on your machine; kill processes by port with one click
-- **Smart Project Detection** — Point to a project folder and auto-detect Python / Node.js / Rust / Go entry points, package manager, and default port
-- **In-App UI Preview** — Open agent web UIs directly inside the app as browser-style tabs (via iframe)
-- **Resizable Sidebar** — Drag the divider to adjust layout
-- **Dark Mode** — Full dark mode support
+# ✨ 项目亮点
 
-## 🖥️ Tech Stack
+**智管-Agent Manager** 是一个基于 Tauri 2 + React 19 的桌面应用，专门解决"本机跑了一堆 AI Agent，管理混乱"的问题。
 
-| Layer | Technology |
-|-------|-----------|
-| Desktop Shell | [Tauri 2](https://tauri.app) |
-| Frontend | React 19 + TypeScript + Tailwind CSS v4 |
-| Backend | Rust (process management, file I/O) |
-| State | Zustand |
-| Drag & Drop | @dnd-kit |
-| Icons | Lucide React |
-| Build Tool | Vite 8 |
+核心理念：**所有 Agent，一个窗口管到底。**
 
-## 📦 Installation
+- 不用开多个终端
+- 不用记各种启动命令
+- 不用手动打开浏览器找端口
+- 用自然语言就能操控所有 Agent
 
-### Pre-built Binaries
+---
 
-Download the latest installer from [Releases](https://github.com/Zafer-Liu/Agent_MCP_Manager/releases):
+<a id="capabilities"></a>
 
-| Platform | File |
-|----------|------|
-| Windows | `Agent_MCP_Manager_x.x.x_x64-setup.exe` |
-| macOS (Intel) | `Agent_MCP_Manager_x.x.x_x64.dmg` |
-| macOS (Apple Silicon) | `Agent_MCP_Manager_x.x.x_aarch64.dmg` |
-| Linux | `agent-mcp-manager_x.x.x_amd64.AppImage` |
+# 🧠 核心功能
 
-### Build from Source
+<a id="dashboard"></a>
 
-**Prerequisites:**
-- [Node.js](https://nodejs.org) ≥ 20
-- [Rust](https://rustup.rs) (stable)
-- [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your OS
+## 1️⃣ Dashboard — 教室视图
+
+所有 Agent 以可视化展示：**Manager Agent 在讲台**，其他 Agent 坐在学生座位上。
+
+![classroom](Images/classroom.png)
+
+一眼看清所有 Agent 的状态，悬停在 Agent 座位上，可直接：
+- 启动 / 停止
+- 查看详情
+- 打开 UI 界面
+
+点击讲台的 Manager Agent，直接跳转到自然语言指挥界面。
+
+---
+
+## 2️⃣ Manager Agent — 自然语言指挥官
+
+用一句话控制所有 Agent，无需手动操作界面。
+
+![manager](Images/manager.png)
+
+```text
+帮我启动 Business Analytics Agent，然后打开它的界面
+```
+
+```text
+把 Mindmap 停掉，顺便告诉我它是干什么的
+```
+
+```text
+现在有哪些 Agent 在运行？
+```
+
+Manager Agent 会理解意图 → 自动调用工具 → 完成操作，并向你汇报结果。
+
+**支持的操作：**
+
+| 自然语言描述 | 实际行为 |
+|------------|---------|
+| 启动 / 停止某个 Agent | 调用 start/stop 接口 |
+| 打开某个 Agent 的界面 | 自动在标签栏打开 UI |
+| 打开某个 Agent 的终端 | 自动在标签栏打开 PTY 终端 |
+| 查看所有 Agent 状态 | 返回实时状态汇总表 |
+| 了解某个 Agent 的功能 | 读取该 Agent 目录下的 README |
+| 跳转到某个页面 | 自动导航 |
+
+**会话持久化：** 切换到其他页面再回来，对话历史不丢失。
+
+> 需要配置 LLM 提供商才能使用，详见 [LLM 配置说明](#llm-config)。
+
+---
+
+<a id="agents"></a>
+
+## 3️⃣ Agent 管理
+
+### 自动识别项目类型
+
+选择项目目录后，自动检测并填写启动命令，无需手动填写。详见[支持的项目类型](#project-types)。
+
+### 启动与监控
+![Agent1](Images/Agent1.png)
+- 一键启动 / 停止 Agent 进程
+- 实时流式日志（stdout + stderr），支持自动滚动
+- 查看 PID、端口状态、启动时间
+- 侧边栏支持拖拽排序
+
+### 内嵌 Web UI
+![Agent2](Images/Agent2.png)
+有 Web 界面的 Agent（如 Streamlit、Flask、FastAPI）可以直接在应用内打开，不用切换浏览器：
+
+- 多标签页同时打开多个 Agent UI
+- 标签栏高度可拖拽调整
+- 支持一键全屏
+- 支持 WebSocket Token 自动填充（openclaw 类型 Agent）
+
+
+---
+
+<a id="mcp"></a>
+
+## 4️⃣ MCP Agent — AI 工具对话
+
+![mcp](Images/mcp.png)
+
+通过 MCP（Model Context Protocol）连接本地工具服务，与 AI 进行多轮工具调用对话。
+
+**MCP 服务器添加方式：**
+
+- **本地扫描**：自动检测 npm 全局安装的 MCP 包
+- **智能解析**：粘贴任意文本（官方文档、安装说明等），AI 自动提取配置
+- **手动添加**：填写 stdio / SSE 配置
+
+---
+
+<a id="share"></a>
+
+## 5️⃣ 代理发布 — 临时分享与公网访问
+
+### 🔗 临时分享（推荐 · 适合开会场景）
+![agency](Images/Agency.png)
+
+无需固定 IP，无需域名，无需服务器。一键生成临时公网链接：
+
+```
+你的电脑 localhost:5001
+        ↓ Cloudflare Tunnel
+https://abc-xyz.trycloudflare.com  ← 发给同事
+```
+
+**使用流程：**
+
+1. 安装 cloudflared（见下方）
+2. 确认 Agent 已启动
+3. 在"代理发布"页找到目标 Agent → 点击 **生成链接**
+4. 等待约 5–15 秒，出现 `https://xxx.trycloudflare.com`
+5. 复制链接发给同事
+6. 会后点 **关闭**，链接立即失效
+
+**安装 cloudflared：**
+
+```powershell
+# Windows（推荐用 Scoop）
+scoop install cloudflared
+
+# macOS
+brew install cloudflared
+```
+
+或从 [GitHub Releases](https://github.com/cloudflare/cloudflared/releases/latest) 直接下载 exe。
+
+> ⚠️ 临时链接无访问控制，请仅在需要时开启，会后立即关闭。
+
+### 🛡️ Caddy 反向代理（长期发布）
+
+适合需要固定域名、持续开放访问的场景：
+
+- 绑定自定义域名（自动申请 HTTPS 证书）
+- 用户名 / 密码访问控制（bcrypt 加密存储）
+- 多用户权限精细管理（每条规则可独立设置允许哪些用户访问）
+- 一键生成 Caddyfile + 启动/重载 Caddy
+
+---
+
+<a id="ports"></a>
+
+## 6️⃣ Port Manager — 端口管理
+![/port](Images/port.png)
+
+查看当前机器上所有正在监听的端口：
+
+- 显示端口号、协议、PID、进程名
+- 一键终止占用指定端口的进程
+- 方便排查 Agent 启动失败（端口被占用）的问题
+
+---
+
+<a id="install"></a>
+
+# ⚙️ 安装方式
+
+### 下载预构建安装包（推荐）
+
+从 [Releases](https://github.com/Zafer-Liu/Agent_MCP_Manager/releases) 下载最新版本：
+
+| 平台 | 文件 |
+|------|------|
+| Windows | `Agent-Manager.exe` |
+| macOS（Intel） | `Agent-Manager.dmg` |
+
+双击安装包，按提示安装即可。
+
+### 从源码构建
+
+**前置依赖：**
+
+- [Node.js](https://nodejs.org) ≥ 18
+- [Rust](https://rustup.rs)（stable）
+- [Tauri 前置依赖](https://tauri.app/start/prerequisites/)（Windows 需要 VS C++ 生成工具）
 
 ```bash
-# Clone the repository
 git clone https://github.com/Zafer-Liu/Agent_MCP_Manager.git
 cd Agent_MCP_Manager
 
-# Install root dependencies
+# 安装依赖
 npm install
-
-# Install frontend dependencies
 cd frontend && npm install && cd ..
 
-# Run in development mode
+# 开发模式运行
 npm run dev
 
-# Build for production
+# 生产构建
 npm run build
 ```
 
-## 🚀 Quick Start
+构建产物在 `src-tauri/target/release/bundle/` 下。
 
-### Adding an Agent
+---
 
-1. Click **New Agent** in the sidebar
-2. Fill in the name, command, working directory, and optional environment variables
-3. Or click the **📁 folder icon** to auto-detect configuration from a project directory
-4. Click **Save**, then hit ▶ to start
+<a id="quickstart"></a>
 
-### Managing MCP Servers
+# 🚀 快速上手
 
-1. Navigate to **MCP Servers** in the left nav
-2. Add servers — they will be written directly to Claude Desktop's config file
-3. Restart Claude Desktop for changes to take effect
+## 第一步：添加 Agent
 
-> **Config file path:**
-> - Windows: `%AppData%\Claude\claude_desktop_config.json`
-> - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+1. 侧边栏点击 **Agents** → 右上角 **＋ New Agent**
+2. 点击 📁 选择 Agent 的项目目录
+3. 应用自动识别项目类型，填写启动命令
+4. 填写名称，确认端口号（有 Web UI 的 Agent 需要）→ **保存**
+5. 点击 ▶ 启动
 
-### Port Manager
+## 第二步：查看 Agent 界面
 
-1. Navigate to **Port Manager**
-2. View all active listening ports
-3. Click **Kill** to terminate a process occupying a port
+- 有 Web UI 的 Agent（Streamlit / Flask 等）：点击 **Open UI** → 在应用内嵌标签页打开
+- TUI 类 Agent（Claude Code 等）：点击 **Open Terminal** → 在应用内嵌终端打开
 
-## 📁 Project Structure
+## 第三步：使用 Manager Agent（可选）
 
+1. 在 **MCP Agent → LLM 设置** 中添加 LLM 提供商（见[LLM 配置说明](#llm-config)）
+2. 点击侧边栏 **Manager**
+3. 选择 LLM 提供商
+4. 用自然语言发送指令
+
+## 第四步：开会时分享 Agent（可选）
+
+1. 安装 cloudflared
+2. 打开**代理发布**页面
+3. 找到目标 Agent → **生成链接** → 复制发送
+
+---
+
+<a id="llm-config"></a>
+
+# 🤖 LLM 配置说明
+
+Manager Agent 和 MCP Agent 都需要 LLM 驱动。在 **MCP Agent → LLM 设置** 中添加：
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| 名称 | 自定义，随便填 | DeepSeek |
+| Base URL | OpenAI 兼容的 API 地址 | `https://api.deepseek.com/v1` |
+| API Key | 对应的 API Key | `sk-xxx` |
+| 模型 | 模型名称 | `deepseek-chat` |
+
+点击**测试连接**，显示绿色即配置成功。
+
+**内置支持的提供商：**
+
+| 提供商 | Base URL | 推荐模型 |
+|--------|----------|---------|
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| 任意兼容 API | 自定义 | 自定义 |
+
+---
+
+<a id="project-types"></a>
+
+# 🔍 支持的项目类型
+
+选择项目目录后，自动检测并填写以下配置：
+
+| 项目类型 | 识别条件 | 自动生成的命令 |
+|---------|---------|--------------|
+| Python · uv | `pyproject.toml` + `uv.lock` | `uv run python main.py` |
+| Python · FastAPI | requirements 含 `fastapi` | `uvicorn main:app --reload --port PORT` |
+| Python · Django | `manage.py` 存在 | `python manage.py runserver 0.0.0.0:8000` |
+| Python · Streamlit | requirements 含 `streamlit` | `streamlit run app.py --server.port 8501` |
+| Python · Flask | requirements 含 `flask` | `python app.py` |
+| Python · 通用 | `main.py` / `app.py` 等 | `python main.py` |
+| Node.js | `package.json` | `npm run dev` |
+| Rust | `Cargo.toml` | `cargo run` |
+| Go | `go.mod` | `go run .` |
+| npm 全局命令 | `%APPDATA%\npm\*.cmd` | 交互式 PowerShell + 自动输入命令 |
+| 可执行文件 | `.exe` / `.bat` / `.cmd` / `.sh` | 直接运行 |
+
+端口号也会自动检测：扫描 `.env` 文件、`pyproject.toml` 脚本、源码中的 `port=` 配置。
+
+---
+
+<a id="data-paths"></a>
+
+# 📁 数据存储路径
+
+| 数据 | Windows | macOS |
+|------|---------|-------|
+| Agent 配置 | `%APPDATA%\agent-manager\agents.json` | `~/Library/Application Support/agent-manager/agents.json` |
+| LLM 提供商 | `%APPDATA%\agent-manager\llm_config.json` | 同左 |
+| 代理 / 用户配置 | `%APPDATA%\agent-manager\proxy.json` | 同左 |
+| 生成的 Caddyfile | `%APPDATA%\agent-manager\Caddyfile` | 同左 |
+| MCP 服务器配置 | `%APPDATA%\Claude\claude_desktop_config.json` | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+
+---
+
+<a id="roadmap"></a>
+
+# 🗺️ 版本更新
+
+> **当前版本 `v0.2.0`** · 2026 年 6 月
+
+## v0.2.0 主要更新
+
+**新功能：**
+
+- ✅ **Manager Agent**：自然语言指挥所有 Agent，支持启动/停止/打开 UI/读取 README
+- ✅ **Dashboard 教室视图**：所有 Agent 状态一眼可见，悬停操作
+- ✅ **代理发布**：一键 Cloudflare Tunnel 临时分享 + Caddy 反向代理长期发布
+- ✅ **PTY 终端**：真实交互式终端，支持 Claude Code 等 TUI 工具
+- ✅ **Python 自动识别增强**：支持 FastAPI/Django/Streamlit/uv/pyproject.toml
+- ✅ **会话持久化**：Manager Agent 切换页面不丢失对话历史
+
+**修复：**
+
+- 修复从 Dashboard 启动 Agent 后全屏卡死问题
+- 修复 Mindmap（Node.js）启动进入 REPL 的问题
+- 修复开发端口与其他 Vite 项目冲突（改为 1420）
+
+---
+
+<a id="faq"></a>
+
+# ❓ FAQ
+
+<details>
+<summary><b>🤖 Manager Agent 相关</b></summary>
+
+<br>
+
+<details>
+<summary><b>Manager Agent 没有反应 / 提示未选择提供商？</b></summary>
+
+1. 前往 **MCP Agent → LLM 设置**，添加 LLM 提供商
+2. 点击"测试连接"，确认绿色通过
+3. 回到 Manager 页面，在顶部下拉框选择该提供商
+
+</details>
+
+<details>
+<summary><b>Manager Agent 说"找不到 Agent"？</b></summary>
+
+LLM 使用的是 Agent 的名称，确认你说的名称和 Agent 配置中的名称一致（支持模糊匹配，不区分大小写，也支持用下划线替代空格）。
+
+</details>
+
+<details>
+<summary><b>切换页面后 Manager Agent 对话历史消失了？</b></summary>
+
+这是 v0.2.0 已修复的问题。Manager Agent 组件始终在后台保持挂载，只是通过 CSS 隐藏。如果仍然消失，请确认使用的是 v0.2.0 版本。
+
+</details>
+
+</details>
+
+---
+
+<details>
+<summary><b>🤖 Agent 管理相关</b></summary>
+
+<br>
+
+<details>
+<summary><b>Agent 启动后状态显示"错误"？</b></summary>
+
+查看 Agent 详情页的日志，通常是：
+
+- 端口被占用：在 Port Manager 找到占用该端口的进程并终止
+- 依赖未安装：在终端手动运行一次启动命令，查看具体报错
+- 工作目录不对：确认 Agent 配置中的工作目录路径正确
+
+</details>
+
+<details>
+<summary><b>Agent 有 Web UI 但打开后是空白？</b></summary>
+
+Agent 可能还在启动中（端口尚未监听）。等待几秒后，点击 UI 面板工具栏的刷新按钮。
+
+</details>
+
+<details>
+<summary><b>Claude Code 终端打开后是空白？</b></summary>
+
+这是正常现象。应用会自动启动 PowerShell，然后等待约 800ms 后向 stdin 写入 `claude` 命令。稍等 1–2 秒，Claude Code 的 TUI 界面会渲染出来。
+
+</details>
+
+<details>
+<summary><b>Python Agent 识别出的命令不对？</b></summary>
+
+自动识别基于文件扫描，边缘情况可能判断有误。在 Agent 编辑界面手动修改命令和参数即可，修改后保存立即生效。
+
+</details>
+
+<details>
+<summary><b>Agent 列表顺序能调整吗？</b></summary>
+
+可以。在 Agents 页面，按住 Agent 左侧的拖动把手（悬停后出现的 ⠿ 图标），拖拽到目标位置即可。顺序自动保存。
+
+</details>
+
+</details>
+
+---
+
+<details>
+<summary><b>🌐 代理发布相关</b></summary>
+
+<br>
+
+<details>
+<summary><b>点击"生成链接"后一直没有 URL 出现？</b></summary>
+
+可能原因：
+
+1. cloudflared 未安装或不在 PATH 中 → 点击"重新检测"按钮，确认路径已识别
+2. 网络问题 → cloudflared 需要能访问 Cloudflare，确认没有代理或防火墙拦截
+3. Agent 未启动 → 临时链接会转发到本机端口，Agent 需处于运行状态
+
+</details>
+
+<details>
+<summary><b>同事打开链接显示"无法访问此网站"？</b></summary>
+
+确认：
+
+1. Agent 在你本机正在运行（不是停止状态）
+2. 隧道还没有关闭（应用里还显示绿色 URL）
+3. 链接是完整的 `https://xxx.trycloudflare.com` 格式
+
+</details>
+
+<details>
+<summary><b>多个同事同时访问对话内容混在一起？</b></summary>
+
+这是 Agent 本身的限制，对话历史存在 Agent 进程的内存里，Agent Manager 无法从外部隔离。
+
+如需隔离，需在 Agent 代码中加 session 支持（如 Streamlit 使用 `st.session_state` 天然隔离）。
+
+</details>
+
+<details>
+<summary><b>Caddy 找不到 / proxy_apply 失败？</b></summary>
+
+安装 Caddy：
+
+```powershell
+# Windows
+scoop install caddy
+
+# macOS
+brew install caddy
 ```
-Agent_MCP_Manager/
-├── frontend/                 # React + TypeScript frontend
-│   └── src/
-│       ├── components/       # AgentList, AgentDetail, AgentForm, LogViewer
-│       ├── pages/            # McpManager, PortManager
-│       ├── store/            # Zustand state (agentStore)
-│       └── types/            # TypeScript types
-├── src-tauri/                # Rust backend
-│   └── src/
-│       ├── agent.rs          # Agent state & process store
-│       ├── commands.rs       # Tauri commands (start/stop/logs/scan)
-│       ├── mcp.rs            # MCP config read/write
-│       ├── ports.rs          # Port scanning & kill
-│       └── lib.rs            # Tauri app entry
-└── .github/workflows/        # CI/CD (multi-platform release)
+
+安装后在代理发布页点击刷新按钮。
+
+</details>
+
+</details>
+
+---
+
+<details>
+<summary><b>⚙️ 安装与运行相关</b></summary>
+
+<br>
+
+<details>
+<summary><b>Windows 安装包提示"未知发布者"？</b></summary>
+
+点击"更多信息" → "仍要运行"。这是因为安装包未经过 Microsoft 代码签名，属于正常现象。
+
+</details>
+
+<details>
+<summary><b>macOS 提示"无法打开，因为无法验证开发者"？</b></summary>
+
+在终端执行：
+
+```bash
+xattr -d com.apple.quarantine /Applications/智管-Agent\ Manager.app
 ```
 
-## 🔧 Configuration
+或右键点击应用 → 选择"打开" → 再次点击"打开"。
 
-Agent configurations are persisted in the OS data directory:
+</details>
 
-| Platform | Path |
-|----------|------|
-| Windows | `%AppData%\agent-manager\agents.json` |
-| macOS | `~/Library/Application Support/agent-manager/agents.json` |
-| Linux | `~/.local/share/agent-manager/agents.json` |
+<details>
+<summary><b>开发模式 npm run dev 报端口占用？</b></summary>
 
-## 🤝 Contributing
+本项目开发端口为 **1420**（避免与 Mindmap 等 Vite 项目的 5173 冲突）。如 1420 被占用：
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feat/your-feature`
-3. Commit your changes: `git commit -m "feat: add your feature"`
-4. Push and open a Pull Request
+```powershell
+# 查找占用进程
+netstat -ano | findstr :1420
+# 终止该进程（把 PID 替换为实际值）
+taskkill /PID <PID> /F
+```
 
-## 📄 License
+</details>
 
-[Apache](LICENSE)
+</details>
+
+---
+
+<a id="contributing"></a>
+
+# 🤝 参与贡献
+
+欢迎提交 PR 或 Issue！
+
+---
+
+<a id="license"></a>
+
+# 📄 License
+
+[Apache 2.0](LICENSE)
+
+---
+
+# ⭐ 项目目标
+
+把所有 Agent 的管理交给智管，把时间留给真正重要的事。

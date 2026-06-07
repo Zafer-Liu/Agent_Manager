@@ -2,15 +2,25 @@ mod agent;
 mod commands;
 mod mcp;
 mod ports;
+mod llm;
+mod mcp_agent;
+mod pty;
+mod proxy;
 
 use commands::*;
 use mcp::*;
 use ports::*;
+use llm::*;
+use mcp_agent::*;
+use pty::*;
+use proxy::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(agent::AgentStore::new())
+        .manage(pty::PtyStore::new())
+        .manage(proxy::TunnelStore::new())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
@@ -29,9 +39,43 @@ pub fn run() {
             save_mcp_server,
             delete_mcp_server,
             get_mcp_config_path,
+            scan_mcp_local,
+            parse_mcp_text,
             // Ports
             list_listening_ports,
             kill_port,
+            // LLM config
+            list_llm_providers,
+            save_llm_provider,
+            delete_llm_provider,
+            test_llm_provider,
+            // MCP Agent
+            run_mcp_agent,
+            chat_with_mcp,
+            manager_chat,
+            // PTY terminal
+            pty_start,
+            pty_write,
+            pty_resize,
+            pty_stop,
+            pty_resolve_debug,
+            // Proxy (Caddy)
+            proxy_get_config,
+            proxy_save_config,
+            proxy_check_caddy,
+            proxy_hash_password,
+            proxy_apply,
+            proxy_stop,
+            proxy_status,
+            proxy_get_caddyfile,
+            proxy_preview_caddyfile,
+            // Cloudflare Tunnel
+            tunnel_check_cloudflared,
+            tunnel_start,
+            tunnel_stop,
+            tunnel_stop_all,
+            tunnel_list,
+            tunnel_alive,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,0 +1,960 @@
+import { useEffect, useRef, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import {
+  Send, Loader2, Bot, Wrench, ChevronDown, ChevronRight,
+  AlertCircle, Settings, Plug, MessageSquare, Trash2,
+  CheckCircle, XCircle, Eye, EyeOff, Plus, Minus, FolderOpen,
+} from 'lucide-react'
+import { open } from '@tauri-apps/plugin-dialog'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface LlmProvider {
+  id: string; name: string; model: string; base_url: string
+  api_key: string; is_custom: boolean; enabled: boolean
+  context_window?: number; max_output_tokens?: number
+}
+
+interface McpServer {
+  name: string; command: string; args: string[]; env: Record<string, string>
+  transport?: string; url?: string; headers?: Record<string, string>; description?: string
+}
+
+interface AgentStep {
+  kind: 'thought' | 'toolcall' | 'toolresult' | 'answer' | 'error'
+  content: string; tool?: string; tool_input?: unknown
+}
+
+interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  steps?: AgentStep[]   // tool calls that happened before this reply
+}
+
+type Tab = 'chat' | 'mcp' | 'llm'
+
+// ── Main component ───────────────────────────────────────────────────────────
+
+export function McpAgent() {
+  const [tab, setTab] = useState<Tab>('chat')
+  const [providers, setProviders] = useState<LlmProvider[]>([])
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([])
+  const [selectedProvider, setSelectedProvider] = useState('')
+  const [enabledServers, setEnabledServers] = useState<string[]>([])
+
+  async function reload() {
+    const [ps, ms] = await Promise.all([
+      invoke<LlmProvider[]>('list_llm_providers'),
+      invoke<McpServer[]>('list_mcp_servers'),
+    ])
+    setProviders(ps)
+    setMcpServers(ms)
+    if (!selectedProvider) {
+      const active = ps.find(p => p.enabled && p.api_key)
+      if (active) setSelectedProvider(active.id)
+    }
+  }
+
+  useEffect(() => { reload() }, [])
+
+  const activeProvider = providers.find(p => p.id === selectedProvider) ?? null
+  const selectedMcpServers = mcpServers.filter(s => enabledServers.includes(s.name))
+
+  const TABS = [
+    { id: 'chat' as Tab, label: 'Chat', icon: <MessageSquare className="h-3.5 w-3.5" /> },
+    { id: 'mcp'  as Tab, label: 'MCP Servers', icon: <Plug className="h-3.5 w-3.5" /> },
+    { id: 'llm'  as Tab, label: 'LLM Settings', icon: <Settings className="h-3.5 w-3.5" /> },
+  ]
+
+  return (
+    <div className="flex h-full flex-col bg-white dark:bg-gray-900">
+      {/* Header + tabs */}
+      <div className="border-b border-gray-200 dark:border-gray-700 px-6 py-3">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Bot className="h-5 w-5 text-purple-500" />
+            <span className="text-base font-semibold text-gray-900 dark:text-gray-100">MCP Agent</span>
+          </div>
+          {/* Quick status */}
+          <div className="flex items-center gap-3 text-xs text-gray-500">
+            {activeProvider
+              ? <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-green-400" />{activeProvider.name} · {activeProvider.model}</span>
+              : <span className="flex items-center gap-1 text-yellow-600"><AlertCircle className="h-3 w-3" />No LLM</span>
+            }
+            <span>{enabledServers.length} MCP tool{enabledServers.length !== 1 ? 's' : ''}</span>
+          </div>
+        </div>
+        <div className="flex gap-1">
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                tab === t.id
+                  ? 'bg-purple-50 text-purple-600 dark:bg-purple-900/20 dark:text-purple-400'
+                  : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
+              }`}>
+              {t.icon}{t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab content */}
+      <div className="flex-1 overflow-hidden">
+        {tab === 'chat' && (
+          <ChatPanel
+            provider={activeProvider}
+            mcpServers={selectedMcpServers}
+            allProviders={providers.filter(p => p.enabled && p.api_key)}
+            selectedProvider={selectedProvider}
+            onSelectProvider={setSelectedProvider}
+            enabledServers={enabledServers}
+            allServers={mcpServers}
+            onToggleServer={name => setEnabledServers(s => s.includes(name) ? s.filter(n => n !== name) : [...s, name])}
+          />
+        )}
+        {tab === 'mcp' && <McpTab servers={mcpServers} onReload={reload} activeProvider={activeProvider} />}
+        {tab === 'llm' && <LlmTab providers={providers} onReload={reload} />}
+      </div>
+    </div>
+  )
+}
+
+// ── Chat panel ───────────────────────────────────────────────────────────────
+
+function ChatPanel({ provider, mcpServers, allProviders, selectedProvider, onSelectProvider, enabledServers, allServers, onToggleServer }: {
+  provider: LlmProvider | null
+  mcpServers: McpServer[]
+  allProviders: LlmProvider[]
+  selectedProvider: string
+  onSelectProvider: (id: string) => void
+  enabledServers: string[]
+  allServers: McpServer[]
+  onToggleServer: (name: string) => void
+}) {
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [input, setInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, sending])
+
+  async function send() {
+    if (!input.trim() || !provider || sending) return
+    const userMsg: ChatMessage = { role: 'user', content: input.trim() }
+    setMessages(m => [...m, userMsg])
+    setInput('')
+    setSending(true)
+
+    try {
+      const history = [...messages, userMsg].map(m => ({ role: m.role, content: m.content }))
+      const result = await invoke<{ steps: AgentStep[]; reply: string; success: boolean; error?: string }>('chat_with_mcp', {
+        request: { history, provider, mcp_servers: mcpServers, max_iterations: 10 }
+      })
+      setMessages(m => [...m, {
+        role: 'assistant',
+        content: result.reply || (result.error ?? ''),
+        steps: result.steps.length ? result.steps : undefined,
+      }])
+    } catch (e) {
+      setMessages(m => [...m, { role: 'assistant', content: `Error: ${e}` }])
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Toolbar: provider + server toggles */}
+      <div className="flex items-center gap-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 px-4 py-2 flex-wrap">
+        {allProviders.length > 0 ? (
+          <select value={selectedProvider} onChange={e => onSelectProvider(e.target.value)}
+            className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 outline-none">
+            {allProviders.map(p => <option key={p.id} value={p.id}>{p.name} · {p.model}</option>)}
+          </select>
+        ) : (
+          <span className="text-xs text-yellow-600">⚠ Configure an LLM in the LLM Settings tab</span>
+        )}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {allServers.map(s => (
+            <button key={s.name} onClick={() => onToggleServer(s.name)}
+              className={`rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
+                enabledServers.includes(s.name)
+                  ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'
+                  : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
+              }`}>
+              🔌 {s.name}
+            </button>
+          ))}
+          {allServers.length === 0 && <span className="text-xs text-gray-400">No MCP servers — add them in MCP Servers tab</span>}
+        </div>
+        {messages.length > 0 && (
+          <button onClick={() => setMessages([])} className="ml-auto flex items-center gap-1 text-xs text-gray-400 hover:text-red-500">
+            <Trash2 className="h-3 w-3" /> Clear
+          </button>
+        )}
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+        {messages.length === 0 && (
+          <div className="flex h-full items-center justify-center">
+            <div className="text-center space-y-2 text-gray-400">
+              <Bot className="h-12 w-12 opacity-20 mx-auto" />
+              <p className="text-sm">Start a conversation</p>
+              <p className="text-xs">MCP tools will be called automatically when needed</p>
+            </div>
+          </div>
+        )}
+
+        {messages.map((msg, i) => (
+          <div key={i}>
+            {/* Tool call steps (before assistant reply) */}
+            {msg.role === 'assistant' && msg.steps && msg.steps.length > 0 && (
+              <div className="mb-2 space-y-1.5">
+                {msg.steps.map((step, j) => <InlineStep key={j} step={step} />)}
+              </div>
+            )}
+            <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm ${
+                msg.role === 'user'
+                  ? 'bg-purple-600 text-white rounded-br-sm'
+                  : 'bg-gray-50 text-gray-900 dark:bg-gray-800 dark:text-gray-100 rounded-bl-sm'
+              }`}>
+                {msg.role === 'user'
+                  ? <p className="whitespace-pre-wrap">{msg.content}</p>
+                  : <MdContent content={msg.content} />
+                }
+              </div>
+            </div>
+          </div>
+        ))}
+
+        {sending && (
+          <div className="flex justify-start">
+            <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm bg-gray-100 px-4 py-3 dark:bg-gray-800">
+              <Loader2 className="h-4 w-4 animate-spin text-purple-500" />
+              <span className="text-sm text-gray-500">Thinking...</span>
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input */}
+      <div className="border-t border-gray-200 dark:border-gray-700 p-4">
+        <div className="flex gap-2">
+          <textarea
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+            placeholder="Message... (Enter to send, Shift+Enter for newline)"
+            rows={2}
+            disabled={sending || !provider}
+            className="field-input flex-1 resize-none"
+          />
+          <button onClick={send} disabled={sending || !input.trim() || !provider}
+            className="self-end rounded-xl bg-purple-600 p-2.5 text-white hover:bg-purple-500 disabled:opacity-50">
+            {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Inline step (tool call / result in chat) ─────────────────────────────────
+
+function InlineStep({ step }: { step: AgentStep }) {
+  const [expanded, setExpanded] = useState(false)
+
+  if (step.kind === 'toolcall') {
+    return (
+      <button onClick={() => setExpanded(e => !e)}
+        className="flex items-start gap-2 w-full rounded-xl border border-orange-200 bg-orange-50 dark:border-orange-800 dark:bg-orange-900/10 px-3 py-2 text-left">
+        <Wrench className="h-3.5 w-3.5 text-orange-500 shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <span className="text-xs font-semibold text-orange-700 dark:text-orange-400 font-mono">{step.tool}</span>
+          {expanded && step.tool_input != null && (
+            <pre className="mt-1 overflow-x-auto text-xs text-gray-600 dark:text-gray-300">
+              {JSON.stringify(step.tool_input as object, null, 2)}
+            </pre>
+          )}
+        </div>
+        {expanded ? <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" /> : <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />}
+      </button>
+    )
+  }
+
+  if (step.kind === 'toolresult') {
+    return (
+      <button onClick={() => setExpanded(e => !e)}
+        className="flex items-start gap-2 w-full rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800/50 px-3 py-2 text-left">
+        <span className="text-xs text-gray-400 font-mono shrink-0 mt-0.5">↩</span>
+        <div className="flex-1 min-w-0">
+          <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">{step.tool}</span>
+          {expanded ? (
+            <p className="mt-1 text-xs text-gray-600 dark:text-gray-300 whitespace-pre-wrap">{step.content}</p>
+          ) : (
+            <p className="text-xs text-gray-400 truncate">{step.content.slice(0, 80)}{step.content.length > 80 ? '…' : ''}</p>
+          )}
+        </div>
+        {expanded ? <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" /> : <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />}
+      </button>
+    )
+  }
+
+  if (step.kind === 'error') {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-900/10 px-3 py-2">
+        <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0" />
+        <p className="text-xs text-red-600 dark:text-red-400">{step.content}</p>
+      </div>
+    )
+  }
+
+  return null
+}
+
+// ── MCP Servers tab ──────────────────────────────────────────────────────────
+
+const EMPTY_SERVER: McpServer = {
+  name: '', command: '', args: [], env: {},
+  transport: 'stdio', url: '', headers: {}, description: '',
+}
+
+type AddMode = 'local' | 'text' | 'manual'
+
+interface ScanResult {
+  transport: string; name: string; command: string; args: string[]
+  env: Record<string, string>; url: string; headers: Record<string, string>
+  description: string; warnings: string[]; confidence: number
+}
+
+function McpTab({ servers, onReload, activeProvider }: {
+  servers: McpServer[]
+  onReload: () => void
+  activeProvider: LlmProvider | null
+}) {
+  const [editing, setEditing] = useState<McpServer | null>(null)
+  const [isNew, setIsNew] = useState(false)
+  const [addMode, setAddMode] = useState<AddMode>('local')
+  const [saving, setSaving] = useState(false)
+  const [scanning, setScanning] = useState(false)
+  const [error, setError] = useState('')
+  const [warnings, setWarnings] = useState<string[]>([])
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+  const [configPath, setConfigPath] = useState('')
+  const [localDir, setLocalDir] = useState('')
+  const [parseText, setParseText] = useState('')
+
+  useEffect(() => { invoke<string>('get_mcp_config_path').then(setConfigPath) }, [])
+
+  function startNew() {
+    setEditing({ ...EMPTY_SERVER })
+    setIsNew(true)
+    setError('')
+    setWarnings([])
+    setLocalDir('')
+    setParseText('')
+  }
+
+  function startEdit(s: McpServer) {
+    setEditing({ ...s, transport: s.transport || 'stdio', headers: s.headers || {}, url: s.url || '' })
+    setIsNew(false)
+    setError('')
+    setWarnings([])
+  }
+
+  async function pickLocalDir() {
+    const f = await open({ directory: true, multiple: false })
+    if (f && typeof f === 'string') {
+      setLocalDir(f)
+      await scanLocal(f)
+    }
+  }
+
+  async function scanLocal(dir: string) {
+    setScanning(true); setError(''); setWarnings([])
+    try {
+      const result = await invoke<ScanResult>('scan_mcp_local', {
+        dir,
+        provider: activeProvider ?? null,
+      })
+      applyResult(result)
+    } catch (e) {
+      setError(String(e))
+    } finally { setScanning(false) }
+  }
+
+  async function parseText_() {
+    if (!parseText.trim()) { setError('Please paste some text first'); return }
+    if (!activeProvider) { setError('Configure an LLM in the LLM Settings tab first'); return }
+    setScanning(true); setError(''); setWarnings([])
+    try {
+      const result = await invoke<ScanResult>('parse_mcp_text', {
+        text: parseText,
+        provider: activeProvider,
+      })
+      applyResult(result)
+    } catch (e) {
+      setError(String(e))
+    } finally { setScanning(false) }
+  }
+
+  function applyResult(r: ScanResult) {
+    setWarnings(r.warnings)
+    setEditing({
+      name: r.name, command: r.command, args: r.args, env: r.env,
+      transport: r.transport, url: r.url, headers: r.headers, description: r.description,
+    })
+  }
+
+  async function save() {
+    if (!editing) return
+    if (!editing.name.trim()) { setError('Name required'); return }
+    const isSSE = editing.transport === 'sse'
+    if (isSSE && !(editing.url ?? '').trim()) { setError('URL required for SSE transport'); return }
+    if (!isSSE && !editing.command.trim()) { setError('Command required for stdio transport'); return }
+    setSaving(true)
+    try {
+      await invoke('save_mcp_server', { server: editing })
+      await onReload()
+      setEditing(null)
+    } catch (e) { setError(String(e)) }
+    finally { setSaving(false) }
+  }
+
+  async function del(name: string) {
+    await invoke('delete_mcp_server', { name })
+    setDeleteConfirm(null)
+    onReload()
+    if (editing?.name === name) setEditing(null)
+  }
+
+  const isSSE = editing?.transport === 'sse'
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      {/* Server list */}
+      <div className="w-56 shrink-0 border-r border-gray-200 dark:border-gray-700 flex flex-col">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-800">
+          <span className="text-xs font-medium text-gray-500">{servers.length} servers</span>
+          <button onClick={startNew} className="rounded p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+          {servers.length === 0 && <p className="py-6 text-center text-xs text-gray-400">No servers yet</p>}
+          {servers.map(s => (
+            <button key={s.name} onClick={() => startEdit(s)}
+              className={`group flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors ${
+                editing?.name === s.name && !isNew
+                  ? 'bg-purple-50 text-purple-700 dark:bg-purple-900/20 dark:text-purple-300'
+                  : 'hover:bg-gray-50 dark:hover:bg-gray-800'
+              }`}>
+              <span>{s.transport === 'sse' ? '🌐' : '🔌'}</span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium text-gray-900 dark:text-gray-100">{s.name}</p>
+                <p className="truncate text-xs text-gray-400 font-mono">
+                  {s.transport === 'sse' ? s.url : `${s.command} ${s.args.slice(0, 1).join(' ')}`}
+                </p>
+              </div>
+              <button onClick={e => { e.stopPropagation(); setDeleteConfirm(s.name) }}
+                className="shrink-0 opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-500">
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </button>
+          ))}
+        </div>
+        <div className="p-2 border-t border-gray-100 dark:border-gray-800">
+          <button onClick={startNew} className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-purple-600 py-1.5 text-xs font-medium text-white hover:bg-purple-500">
+            <Plus className="h-3.5 w-3.5" /> Add Server
+          </button>
+        </div>
+      </div>
+
+      {/* Right panel */}
+      <div className="flex-1 overflow-y-auto">
+        {editing ? (
+          <div className="max-w-xl p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                {isNew ? 'Add MCP Server' : `Edit: ${editing.name}`}
+              </h3>
+            </div>
+
+            {/* Add mode selector — only for new */}
+            {isNew && (
+              <div className="flex rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+                {([
+                  { id: 'local' as AddMode, icon: <FolderOpen className="h-3.5 w-3.5" />, label: 'Local Dir' },
+                  { id: 'text'  as AddMode, icon: <Wrench className="h-3.5 w-3.5" />,      label: 'Smart Parse' },
+                  { id: 'manual'as AddMode, icon: <Plus className="h-3.5 w-3.5" />,         label: 'Manual' },
+                ]).map(m => (
+                  <button key={m.id} onClick={() => setAddMode(m.id)}
+                    className={`flex flex-1 items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors ${
+                      addMode === m.id
+                        ? 'bg-purple-50 text-purple-700 dark:bg-purple-900/20 dark:text-purple-400'
+                        : 'text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-gray-800'
+                    }`}>
+                    {m.icon}{m.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Local directory mode */}
+            {isNew && addMode === 'local' && (
+              <div className="space-y-2">
+                <F label="Local MCP Package Directory">
+                  <div className="flex gap-2">
+                    <input value={localDir} onChange={e => setLocalDir(e.target.value)}
+                      placeholder="D:/my-mcp-server" className="field-input flex-1 font-mono text-xs" />
+                    <button onClick={pickLocalDir} className="rounded-lg border border-gray-200 px-2.5 text-gray-500 hover:bg-gray-50 dark:border-gray-700">
+                      <FolderOpen className="h-4 w-4" />
+                    </button>
+                    <button onClick={() => localDir && scanLocal(localDir)} disabled={!localDir || scanning}
+                      className="flex items-center gap-1 rounded-lg bg-purple-600 px-3 text-xs text-white hover:bg-purple-500 disabled:opacity-50">
+                      {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Scan'}
+                    </button>
+                  </div>
+                </F>
+                <p className="text-xs text-gray-400">Select the folder containing the MCP package. The app will detect the entry point and environment variables automatically{activeProvider ? ' using AI' : ''}.</p>
+              </div>
+            )}
+
+            {/* Smart parse mode */}
+            {isNew && addMode === 'text' && (
+              <div className="space-y-2">
+                <F label="Paste anything — npm install command, README, JSON config, URL...">
+                  <textarea value={parseText} onChange={e => setParseText(e.target.value)}
+                    rows={5} placeholder={`npx @modelcontextprotocol/server-filesystem /path/to/dir\n\nor paste a JSON config snippet, README excerpt, SSE URL...`}
+                    className="field-input font-mono text-xs resize-none" />
+                </F>
+                <button onClick={parseText_} disabled={scanning || !parseText.trim()}
+                  className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs text-white hover:bg-purple-500 disabled:opacity-50">
+                  {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
+                  {scanning ? 'Parsing...' : 'Parse with AI'}
+                </button>
+                {!activeProvider && <p className="text-xs text-yellow-600">⚠ Configure an LLM in LLM Settings tab to use smart parse</p>}
+              </div>
+            )}
+
+            {/* Warnings */}
+            {warnings.length > 0 && (
+              <div className="rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 p-3 space-y-1">
+                {warnings.map((w, i) => (
+                  <p key={i} className="text-xs text-yellow-700 dark:text-yellow-400 flex items-start gap-1.5">
+                    <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />{w}
+                  </p>
+                ))}
+              </div>
+            )}
+
+            {/* Form fields — shown after scan or in manual mode */}
+            {(addMode === 'manual' || !isNew || editing.name || editing.command || editing.url) && (
+              <>
+                {/* Transport selector */}
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-medium text-gray-500">Transport:</span>
+                  {['stdio', 'sse'].map(t => (
+                    <label key={t} className="flex items-center gap-1.5 cursor-pointer">
+                      <input type="radio" name="transport" value={t}
+                        checked={(editing.transport || 'stdio') === t}
+                        onChange={() => setEditing(v => v ? { ...v, transport: t } : v)} />
+                      <span className="text-xs text-gray-700 dark:text-gray-300">{t === 'stdio' ? 'Local (stdio)' : 'Remote (SSE/HTTP)'}</span>
+                    </label>
+                  ))}
+                </div>
+
+                <F label="Server ID *">
+                  <input value={editing.name} disabled={!isNew}
+                    onChange={e => setEditing(v => v ? { ...v, name: e.target.value } : v)}
+                    placeholder="filesystem" className="field-input disabled:opacity-50" />
+                </F>
+
+                <F label="Description">
+                  <input value={editing.description || ''} onChange={e => setEditing(v => v ? { ...v, description: e.target.value } : v)}
+                    placeholder="What does this server do?" className="field-input" />
+                </F>
+
+                {isSSE ? (
+                  <>
+                    <F label="URL *">
+                      <input value={editing.url || ''} onChange={e => setEditing(v => v ? { ...v, url: e.target.value } : v)}
+                        placeholder="https://mcp.example.com/sse" className="field-input font-mono" />
+                    </F>
+                    <F label="Headers">
+                      <EnvEditor
+                        env={editing.headers || {}}
+                        onChange={h => setEditing(v => v ? { ...v, headers: h } : v)}
+                        keyPlaceholder="Authorization"
+                        valPlaceholder="Bearer token..."
+                      />
+                    </F>
+                  </>
+                ) : (
+                  <>
+                    <F label="Command *">
+                      <input value={editing.command} onChange={e => setEditing(v => v ? { ...v, command: e.target.value } : v)}
+                        placeholder="npx / node / python / uvx" className="field-input font-mono" />
+                    </F>
+                    <F label="Arguments">
+                      <div className="space-y-1.5">
+                        {editing.args.map((a, i) => (
+                          <div key={i} className="flex gap-2">
+                            <input value={a} onChange={e => setEditing(v => v ? { ...v, args: v.args.map((x, j) => j === i ? e.target.value : x) } : v)}
+                              className="field-input flex-1 font-mono text-xs" />
+                            <button onClick={() => setEditing(v => v ? { ...v, args: v.args.filter((_, j) => j !== i) } : v)}
+                              className="text-gray-400 hover:text-red-500"><Minus className="h-4 w-4" /></button>
+                          </div>
+                        ))}
+                        <button onClick={() => setEditing(v => v ? { ...v, args: [...v.args, ''] } : v)}
+                          className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700">
+                          <Plus className="h-3 w-3" /> Add arg
+                        </button>
+                      </div>
+                    </F>
+                    <F label="Environment Variables">
+                      <EnvEditor
+                        env={editing.env}
+                        onChange={env => setEditing(v => v ? { ...v, env } : v)}
+                      />
+                    </F>
+                  </>
+                )}
+
+                {error && (
+                  <div className="flex items-center gap-2 rounded-lg bg-red-50 dark:bg-red-900/20 px-3 py-2 text-xs text-red-600 dark:text-red-400">
+                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />{error}
+                  </div>
+                )}
+
+                <div className="flex gap-2">
+                  <button onClick={save} disabled={saving}
+                    className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs text-white hover:bg-purple-500 disabled:opacity-60">
+                    {saving && <Loader2 className="h-3 w-3 animate-spin" />} Save
+                  </button>
+                  <button onClick={() => setEditing(null)} className="rounded-lg px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800">Cancel</button>
+                </div>
+                <p className="text-xs text-gray-400">Config: <span className="font-mono">{configPath}</span></p>
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="flex h-full items-center justify-center text-gray-400">
+            <div className="text-center space-y-2">
+              <div className="text-4xl">🔌</div>
+              <p className="text-sm">Select a server to edit</p>
+              <p className="text-xs text-gray-400">or click <strong>Add Server</strong> to add a new one</p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {deleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-xl dark:border-gray-700 dark:bg-gray-900 w-72">
+            <p className="text-sm font-semibold mb-1 text-gray-900 dark:text-gray-100">Delete <span className="font-mono">{deleteConfirm}</span>?</p>
+            <p className="text-xs text-gray-500 mb-4">Removes from claude_desktop_config.json</p>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setDeleteConfirm(null)} className="px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-100 rounded-lg">Cancel</button>
+              <button onClick={() => del(deleteConfirm)} className="px-3 py-1.5 text-xs bg-red-600 text-white rounded-lg hover:bg-red-500">Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function EnvEditor({ env, onChange, keyPlaceholder = 'KEY', valPlaceholder = 'value' }: {
+  env: Record<string, string>; onChange: (e: Record<string, string>) => void
+  keyPlaceholder?: string; valPlaceholder?: string
+}) {
+  const pairs = Object.entries(env)
+  const update = (pairs: [string, string][]) => {
+    const obj: Record<string, string> = {}
+    pairs.forEach(([k, v]) => { if (k.trim()) obj[k.trim()] = v })
+    onChange(obj)
+  }
+  return (
+    <div className="space-y-1.5">
+      {pairs.map(([k, v], i) => (
+        <div key={i} className="flex gap-2">
+          <input value={k} onChange={e => update(pairs.map((p, j) => j === i ? [e.target.value, p[1]] : p))}
+            placeholder={keyPlaceholder} className="field-input flex-1 font-mono text-xs" />
+          <input value={v} onChange={e => update(pairs.map((p, j) => j === i ? [p[0], e.target.value] : p))}
+            placeholder={valPlaceholder} className="field-input flex-1 font-mono text-xs" />
+          <button onClick={() => update(pairs.filter((_, j) => j !== i))} className="text-gray-400 hover:text-red-500">
+            <Minus className="h-4 w-4" />
+          </button>
+        </div>
+      ))}
+      <button onClick={() => update([...pairs, ['', '']])}
+        className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-300">
+        <Plus className="h-3 w-3" /> Add
+      </button>
+    </div>
+  )
+}
+
+// ── LLM Settings tab ─────────────────────────────────────────────────────────
+
+function LlmTab({ providers, onReload }: { providers: LlmProvider[]; onReload: () => void }) {
+  const [showCustom, setShowCustom] = useState(false)
+  const [customForm, setCustomForm] = useState<LlmProvider>({ id: '', name: '', base_url: '', model: '', api_key: '', is_custom: true, enabled: true })
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [testing, setTesting] = useState<string | null>(null)
+  const [testResult, setTestResult] = useState<Record<string, { ok: boolean; msg: string }>>({})
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({})
+
+  async function saveProvider(p: LlmProvider) {
+    await invoke('save_llm_provider', { provider: p })
+    onReload()
+  }
+
+  async function testProvider(p: LlmProvider) {
+    setTesting(p.id)
+    try {
+      const msg = await invoke<string>('test_llm_provider', { provider: p })
+      setTestResult(r => ({ ...r, [p.id]: { ok: true, msg } }))
+    } catch (e) {
+      setTestResult(r => ({ ...r, [p.id]: { ok: false, msg: String(e) } }))
+    } finally { setTesting(null) }
+  }
+
+  async function saveCustom() {
+    if (!customForm.name.trim() || !customForm.base_url.trim() || !customForm.model.trim() || !customForm.api_key.trim()) {
+      setError('All fields required'); return
+    }
+    const id = editingId ?? `custom_${Date.now()}`
+    setSaving(true); setError('')
+    try {
+      await invoke('save_llm_provider', { provider: { ...customForm, id, is_custom: true } })
+      onReload(); setShowCustom(false); setEditingId(null)
+      setCustomForm({ id: '', name: '', base_url: '', model: '', api_key: '', is_custom: true, enabled: true })
+    } catch (e) { setError(String(e)) }
+    finally { setSaving(false) }
+  }
+
+  const builtins = providers.filter(p => !p.is_custom)
+  const customs = providers.filter(p => p.is_custom)
+
+  return (
+    <div className="h-full overflow-y-auto p-5 space-y-5">
+      <div>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-3">Built-in Providers</h3>
+        <div className="space-y-3">
+          {builtins.map(p => (
+            <BuiltinRow key={p.id} provider={p}
+              showKey={showKeys[p.id] ?? false}
+              onToggleKey={() => setShowKeys(s => ({ ...s, [p.id]: !s[p.id] }))}
+              testResult={testResult[p.id]}
+              testing={testing === p.id}
+              onSave={saveProvider}
+              onTest={testProvider}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Custom Models</h3>
+          <button onClick={() => { setShowCustom(true); setEditingId(null); setCustomForm({ id: '', name: '', base_url: '', model: '', api_key: '', is_custom: true, enabled: true }) }}
+            className="flex items-center gap-1 text-xs text-purple-600 hover:text-purple-500">
+            <Plus className="h-3.5 w-3.5" /> Add
+          </button>
+        </div>
+        <div className="space-y-2">
+          {customs.map(p => (
+            <div key={p.id} className="flex items-center gap-3 rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900 px-4 py-2.5">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{p.name}</p>
+                <p className="text-xs font-mono text-gray-400 truncate">{p.model} · {p.base_url}</p>
+              </div>
+              <button onClick={() => testProvider(p)} disabled={testing === p.id} className="text-xs text-gray-400 hover:text-blue-600">
+                {testing === p.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Test'}
+              </button>
+              <button onClick={() => { setCustomForm({ ...p }); setEditingId(p.id); setShowCustom(true) }}
+                className="text-xs text-gray-400 hover:text-gray-700">Edit</button>
+              <button onClick={async () => { await invoke('delete_llm_provider', { id: p.id }); onReload() }}
+                className="text-gray-300 hover:text-red-500"><Trash2 className="h-3.5 w-3.5" /></button>
+              <Toggle enabled={p.enabled} onChange={v => saveProvider({ ...p, enabled: v })} />
+              {testResult[p.id] && <TestBadge small result={testResult[p.id]} />}
+            </div>
+          ))}
+          {customs.length === 0 && !showCustom && <p className="text-xs text-gray-400 py-3 text-center">No custom models</p>}
+        </div>
+
+        {showCustom && (
+          <div className="mt-3 rounded-xl border border-purple-200 bg-white dark:border-purple-800 dark:bg-gray-900 p-4 space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <F label="Name"><input value={customForm.name} onChange={e => setCustomForm(f => ({ ...f, name: e.target.value }))} placeholder="Gemini / Kimi" className="field-input" /></F>
+              <F label="Model ID"><input value={customForm.model} onChange={e => setCustomForm(f => ({ ...f, model: e.target.value }))} placeholder="gemini-pro" className="field-input font-mono" /></F>
+            </div>
+            <F label="Base URL"><input value={customForm.base_url} onChange={e => setCustomForm(f => ({ ...f, base_url: e.target.value }))} placeholder="https://generativelanguage.googleapis.com/v1beta/openai" className="field-input font-mono" /></F>
+            <F label="API Key"><input type="password" value={customForm.api_key} onChange={e => setCustomForm(f => ({ ...f, api_key: e.target.value }))} placeholder="sk-..." className="field-input font-mono" /></F>
+            {error && <p className="text-xs text-red-500">{error}</p>}
+            <div className="flex gap-2">
+              <button onClick={saveCustom} disabled={saving} className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs text-white hover:bg-purple-500 disabled:opacity-60">
+                {saving && <Loader2 className="h-3 w-3 animate-spin" />} Save
+              </button>
+              <button onClick={() => testProvider({ ...customForm, id: editingId ?? 'temp' })} className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-700">Test</button>
+              <button onClick={() => { setShowCustom(false); setError('') }} className="rounded-lg px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-100">Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function BuiltinRow({ provider, showKey, onToggleKey, testResult, testing, onSave, onTest }: {
+  provider: LlmProvider; showKey: boolean; onToggleKey: () => void
+  testResult?: { ok: boolean; msg: string }; testing: boolean
+  onSave: (p: LlmProvider) => void; onTest: (p: LlmProvider) => void
+}) {
+  const [key, setKey] = useState(provider.api_key)
+  const [model, setModel] = useState(provider.model)
+  useEffect(() => { setKey(provider.api_key); setModel(provider.model) }, [provider])
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{provider.name}</span>
+          {provider.enabled && provider.api_key && <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-400">active</span>}
+        </div>
+        <Toggle enabled={provider.enabled} onChange={v => onSave({ ...provider, enabled: v })} />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <F label="Model">
+          <input value={model} onChange={e => setModel(e.target.value)} className="field-input text-xs font-mono" />
+        </F>
+        <F label="API Key">
+          <div className="relative">
+            <input type={showKey ? 'text' : 'password'} value={key} onChange={e => setKey(e.target.value)}
+              placeholder="sk-..." className="field-input text-xs font-mono pr-8" />
+            <button onClick={onToggleKey} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+              {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+        </F>
+      </div>
+      {testResult && <TestBadge result={testResult} />}
+      <div className="flex gap-2">
+        <button onClick={() => onSave({ ...provider, api_key: key, model, enabled: !!key })}
+          className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs text-white hover:bg-gray-700 dark:bg-gray-100 dark:text-gray-900">Save</button>
+        <button onClick={() => onTest({ ...provider, api_key: key, model })} disabled={testing || !key}
+          className="flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40 dark:border-gray-700">
+          {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : null} Test
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function TestBadge({ result, small }: { result: { ok: boolean; msg: string }; small?: boolean }) {
+  return (
+    <div className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 ${small ? 'text-xs' : 'text-xs'} ${
+      result.ok ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
+                : 'bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400'
+    }`}>
+      {result.ok ? <CheckCircle className="h-3.5 w-3.5 shrink-0" /> : <XCircle className="h-3.5 w-3.5 shrink-0" />}
+      <span className="truncate">{result.msg}</span>
+    </div>
+  )
+}
+
+function Toggle({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button onClick={() => onChange(!enabled)}
+      className={`relative h-5 w-9 rounded-full transition-colors ${enabled ? 'bg-purple-600' : 'bg-gray-200 dark:bg-gray-700'}`}>
+      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+    </button>
+  )
+}
+
+// ── Markdown renderer ────────────────────────────────────────────────────────
+
+function MdContent({ content }: { content: string }) {
+  // Strip <think>...</think> blocks (chain-of-thought from some models)
+  const clean = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        // Paragraphs
+        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+        // Headings
+        h1: ({ children }) => <h1 className="text-base font-bold mt-3 mb-1">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-sm font-bold mt-3 mb-1">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-sm font-semibold mt-2 mb-1">{children}</h3>,
+        // Code blocks
+        code: ({ className, children, ...props }) => {
+          const isBlock = className?.includes('language-')
+          return isBlock ? (
+            <code className="block overflow-x-auto rounded-lg bg-gray-900 dark:bg-black px-3 py-2 text-xs font-mono text-green-300 my-2 whitespace-pre">
+              {children}
+            </code>
+          ) : (
+            <code className="rounded px-1 py-0.5 bg-gray-200 dark:bg-gray-700 text-xs font-mono text-purple-700 dark:text-purple-300" {...props}>
+              {children}
+            </code>
+          )
+        },
+        pre: ({ children }) => <>{children}</>,
+        // Lists
+        ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-0.5 text-sm">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-0.5 text-sm">{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+        // Table
+        table: ({ children }) => (
+          <div className="overflow-x-auto my-2">
+            <table className="text-xs border-collapse w-full">{children}</table>
+          </div>
+        ),
+        thead: ({ children }) => <thead className="bg-gray-200 dark:bg-gray-700">{children}</thead>,
+        th: ({ children }) => <th className="border border-gray-300 dark:border-gray-600 px-2 py-1 text-left font-semibold">{children}</th>,
+        td: ({ children }) => <td className="border border-gray-300 dark:border-gray-600 px-2 py-1">{children}</td>,
+        // Blockquote
+        blockquote: ({ children }) => (
+          <blockquote className="border-l-2 border-purple-400 pl-3 italic text-gray-500 dark:text-gray-400 my-2">
+            {children}
+          </blockquote>
+        ),
+        // HR
+        hr: () => <hr className="border-gray-300 dark:border-gray-600 my-3" />,
+        // Strong / em
+        strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+        em: ({ children }) => <em className="italic">{children}</em>,
+        // Links
+        a: ({ href, children }) => (
+          <a href={href} target="_blank" rel="noreferrer" className="text-purple-600 dark:text-purple-400 underline hover:no-underline">
+            {children}
+          </a>
+        ),
+      }}
+    >
+      {clean}
+    </ReactMarkdown>
+  )
+}
+
+function F({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">{label}</label>
+      {children}
+    </div>
+  )
+}

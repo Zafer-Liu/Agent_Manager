@@ -9,6 +9,7 @@ export interface AgentConfig {
   working_dir: string
   env: Record<string, string>
   port?: number
+  ui_token?: string
   auto_restart: boolean
   created_at: string
   updated_at: string

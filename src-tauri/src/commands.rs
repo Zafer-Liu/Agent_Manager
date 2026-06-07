@@ -98,8 +98,25 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
     let configs = load_configs();
     let config = configs.get(&id).ok_or("Agent not found")?.clone();
 
-    let mut cmd = Command::new(&config.command);
-    cmd.args(&config.args)
+    // On Windows, resolve npm-global .cmd wrappers and route through cmd.exe
+    let resolved_command = resolve_npm_global(&config.command)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| config.command.clone());
+
+    #[cfg(windows)]
+    let (exe, leading): (&str, Vec<String>) = {
+        let lower = resolved_command.to_lowercase();
+        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            ("cmd.exe", vec!["/c".to_string(), resolved_command.clone()])
+        } else {
+            (resolved_command.as_str(), vec![])
+        }
+    };
+    #[cfg(not(windows))]
+    let (exe, leading): (&str, Vec<String>) = (resolved_command.as_str(), vec![]);
+
+    let mut cmd = Command::new(exe);
+    cmd.args(&leading).args(&config.args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -238,6 +255,7 @@ pub fn save_agent_config(config: Value) -> Result<String, String> {
             })
             .unwrap_or_default(),
         port: config["port"].as_u64().map(|p| p as u16),
+        ui_token: config["ui_token"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string()),
         auto_restart: config["auto_restart"].as_bool().unwrap_or(false),
         created_at: configs
             .get(&id)
@@ -352,6 +370,26 @@ pub fn scan_project_dir(dir: String) -> Result<ProjectScanResult, String> {
         });
     }
 
+    // npm 全局命令目录（如 C:\Users\xxx\.claude）
+    // 目录名本身就是命令名，且能在 npm 全局路径里找到对应 .cmd
+    if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+        // 去掉前缀点，如 ".claude" → "claude"
+        let cmd_name = dir_name.trim_start_matches('.');
+        if !cmd_name.is_empty() {
+            if let Some(resolved) = resolve_npm_global(cmd_name) {
+                let _ = resolved; // path confirmed it exists; store only the bare name
+                return Ok(ProjectScanResult {
+                    name: cmd_name.to_string(),
+                    command: cmd_name.to_string(),
+                    args: vec![],
+                    port: None,
+                    description: format!("npm global command: {}", cmd_name),
+                    project_type: "npm-global".to_string(),
+                });
+            }
+        }
+    }
+
     // 可执行文件扫描
     if let Some(exe) = find_executable(path) {
         return Ok(ProjectScanResult {
@@ -376,68 +414,267 @@ pub fn scan_project_dir(dir: String) -> Result<ProjectScanResult, String> {
 }
 
 fn detect_python_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
-    // 查找入口文件优先级
-    let candidates = ["main.py", "app.py", "server.py", "run.py", "agent.py", "__main__.py"];
-    let entry = candidates.iter().find(|f| path.join(f).exists()).copied();
+    // 入口文件候选，按优先级排列，同时搜索根目录和 src/ 子目录
+    let root_candidates = ["main.py", "app.py", "server.py", "run.py", "agent.py",
+                           "start.py", "manage.py", "wsgi.py", "asgi.py", "__main__.py"];
+    let entry: Option<String> = root_candidates.iter()
+        .find(|f| path.join(f).exists())
+        .map(|f| f.to_string())
+        .or_else(|| {
+            // 搜索 src/ 子目录
+            root_candidates.iter()
+                .find(|f| path.join("src").join(f).exists())
+                .map(|f| format!("src/{}", f))
+        });
 
-    // 检测常见框架及端口
     let has = |f: &str| path.join(f).exists();
-    let content_has = |file: &str, keyword: &str| -> bool {
-        path.join(file)
-            .exists()
-            .then(|| std::fs::read_to_string(path.join(file)).unwrap_or_default())
-            .map(|c| c.contains(keyword))
+
+    // 读文件内容辅助（支持多个文件）
+    let file_contains = |file: &str, keyword: &str| -> bool {
+        std::fs::read_to_string(path.join(file))
+            .map(|c| c.to_lowercase().contains(keyword))
             .unwrap_or(false)
     };
-
-    // 检测 uv
-    let python_cmd = if has(".python-version") || has("uv.lock") {
-        "uv"
-    } else {
-        "python"
+    let any_contains = |keyword: &str| -> bool {
+        ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile"]
+            .iter()
+            .any(|f| file_contains(f, keyword))
     };
 
-    if python_cmd == "uv" {
-        if let Some(e) = entry {
-            return ("uv".to_string(), vec!["run".to_string(), e.to_string()], detect_python_port(path));
+    // 检测 uv / poetry / pipenv
+    let use_uv = has(".python-version") || has("uv.lock");
+    let python_cmd = if use_uv { "uv" } else { "python" };
+
+    // 从 pyproject.toml 读 scripts 入口（[project.scripts] 或 [tool.poetry.scripts]）
+    let script_entry = std::fs::read_to_string(path.join("pyproject.toml")).ok()
+        .and_then(|content| {
+            // 简单正则：找第一个 "xxx = \"module:func\"" 行
+            for line in content.lines() {
+                if line.contains(" = \"") && line.contains(':') && !line.starts_with('[') {
+                    if let Some(val) = line.splitn(2, '=').nth(1) {
+                        let val = val.trim().trim_matches('"');
+                        if val.contains(':') {
+                            return Some(val.to_string()); // e.g. "myapp.main:app"
+                        }
+                    }
+                }
+            }
+            None
+        });
+
+    let port = detect_python_port(path);
+
+    // uv 项目
+    if use_uv {
+        // 优先 pyproject scripts 入口
+        if let Some(ref s) = script_entry {
+            return ("uv".to_string(), vec!["run".to_string(), s.clone()], port);
         }
-        return ("uv".to_string(), vec!["run".to_string()], detect_python_port(path));
+        if let Some(ref e) = entry {
+            return ("uv".to_string(), vec!["run".to_string(), e.clone()], port);
+        }
+        return ("uv".to_string(), vec!["run".to_string()], port);
     }
 
     // FastAPI / uvicorn
-    if content_has("requirements.txt", "fastapi") || content_has("pyproject.toml", "fastapi") {
-        let module = entry.map(|e| e.trim_end_matches(".py").to_string()).unwrap_or("main".to_string());
+    if any_contains("fastapi") || any_contains("uvicorn") {
+        let module = entry.as_deref()
+            .map(|e| e.trim_end_matches(".py").replace('/', ".").replace('\\', "."))
+            .unwrap_or_else(|| "main".to_string());
+        // 尝试检测 app 变量名：app / application / create_app
+        let app_var = entry.as_deref()
+            .and_then(|e| std::fs::read_to_string(path.join(e)).ok())
+            .and_then(|content| {
+                for var in &["application", "create_app", "app"] {
+                    if content.contains(&format!("{} =", var))
+                        || content.contains(&format!("{}=", var))
+                        || content.contains(&format!("def {}(", var))
+                    {
+                        return Some(var.to_string());
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| "app".to_string());
+        let uvicorn_port = port.unwrap_or(8000);
         return (
             "uvicorn".to_string(),
-            vec![format!("{}:app", module), "--reload".to_string()],
-            Some(8000),
+            vec![
+                format!("{}:{}", module, app_var),
+                "--reload".to_string(),
+                "--port".to_string(),
+                uvicorn_port.to_string(),
+            ],
+            Some(uvicorn_port),
         );
     }
 
     // Flask
-    if content_has("requirements.txt", "flask") || content_has("pyproject.toml", "flask") {
-        let e = entry.unwrap_or("app.py");
-        return ("python".to_string(), vec![e.to_string()], Some(5000));
+    if any_contains("flask") {
+        let e = entry.as_deref().unwrap_or("app.py").to_string();
+        let flask_port = port.unwrap_or(5000);
+        return ("python".to_string(), vec![e], Some(flask_port));
     }
 
-    // 通用
+    // Django
+    if any_contains("django") || has("manage.py") {
+        let django_port = port.unwrap_or(8000);
+        return (
+            "python".to_string(),
+            vec!["manage.py".to_string(), "runserver".to_string(),
+                 format!("0.0.0.0:{}", django_port)],
+            Some(django_port),
+        );
+    }
+
+    // Streamlit
+    if any_contains("streamlit") {
+        let e = entry.as_deref().unwrap_or("app.py").to_string();
+        let st_port = port.unwrap_or(8501);
+        return (
+            "streamlit".to_string(),
+            vec!["run".to_string(), e,
+                 "--server.port".to_string(), st_port.to_string()],
+            Some(st_port),
+        );
+    }
+
+    // 通用：有入口文件就直接 python 运行
     if let Some(e) = entry {
-        (python_cmd.to_string(), vec![e.to_string()], detect_python_port(path))
+        (python_cmd.to_string(), vec![e], port)
     } else {
-        (python_cmd.to_string(), vec![], None)
+        (python_cmd.to_string(), vec![], port)
     }
 }
 
 fn detect_python_port(path: &Path) -> Option<u16> {
-    // 从 .env 文件读 PORT
-    if let Ok(content) = std::fs::read_to_string(path.join(".env")) {
-        for line in content.lines() {
-            if let Some(val) = line.strip_prefix("PORT=") {
-                if let Ok(p) = val.trim().parse::<u16>() {
-                    return Some(p);
+    // 1. .env 文件：PORT= / APP_PORT= / AGENT_PORT= 等
+    for env_file in &[".env", ".env.local", ".env.development"] {
+        if let Ok(content) = std::fs::read_to_string(path.join(env_file)) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.starts_with('#') { continue; }
+                // 匹配任意以 PORT= 结尾的键（PORT= / APP_PORT= / AGENT_PORT= / SERVER_PORT= 等）
+                if let Some(eq) = line.find('=') {
+                    let key = line[..eq].trim().to_uppercase();
+                    if key == "PORT" || key.ends_with("_PORT") {
+                        let val = line[eq + 1..].trim().trim_matches('"').trim_matches('\'');
+                        if let Ok(p) = val.parse::<u16>() {
+                            if p > 1000 { return Some(p); }
+                        }
+                    }
                 }
             }
         }
+    }
+
+    // 2. 入口 py 文件中的端口声明
+    let py_candidates = ["main.py", "app.py", "server.py", "run.py", "agent.py", "start.py"];
+    for f in &py_candidates {
+        if let Ok(content) = std::fs::read_to_string(path.join(f)) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                // 跳过注释行
+                if trimmed.starts_with('#') { continue; }
+
+                // ── 模式 A：os.environ.get("AGENT_PORT", 5001) ──────────────
+                // 匹配 environ.get(..., XXXX) 或 environ.get(..., "XXXX") 中的默认值
+                // 仅当键名以 PORT 结尾（PORT / AGENT_PORT / APP_PORT 等）
+                if trimmed.contains("environ") && trimmed.contains("get(") {
+                    if let Some(p) = extract_environ_get_default(trimmed) {
+                        return Some(p);
+                    }
+                }
+
+                // ── 模式 B：port=XXXX（直接数字，词边界保护）──────────────
+                // 覆盖：app.run(port=5001)、uvicorn.run(..., port=5001)
+                let bytes = trimmed.as_bytes();
+                let mut search = trimmed;
+                while let Some(idx) = search.find("port=") {
+                    let abs = trimmed.len() - search.len() + idx;
+                    let prev_ok = abs == 0 || {
+                        let prev = bytes[abs - 1] as char;
+                        !prev.is_ascii_alphabetic() && prev != '_'
+                    };
+                    if prev_ok {
+                        let rest = search[idx + 5..].trim_start();
+                        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        if let Ok(p) = num.parse::<u16>() {
+                            if p > 1000 { return Some(p); }
+                        }
+                    }
+                    search = &search[idx + 5..];
+                }
+
+                // ── 模式 C：--port XXXX ──────────────────────────────────────
+                if let Some(idx) = trimmed.find("--port ") {
+                    let rest = trimmed[idx + 7..].trim_start();
+                    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                    if let Ok(p) = num.parse::<u16>() {
+                        if p > 1000 { return Some(p); }
+                    }
+                }
+
+                // ── 模式 D：PORT = 5001 / PORT=5001（脚本顶部大写赋值）────
+                let up = trimmed.to_uppercase();
+                for prefix in &["PORT = ", "PORT="] {
+                    if let Some(rest) = up.strip_prefix(prefix) {
+                        let num: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+                        if let Ok(p) = num.parse::<u16>() {
+                            if p > 1000 { return Some(p); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// 从 `os.environ.get("AGENT_PORT", 5001)` 这类表达式中提取默认端口。
+/// 仅当键名以 PORT 结尾时才提取（避免误匹配无关的 get 调用）。
+fn extract_environ_get_default(line: &str) -> Option<u16> {
+    // 找到所有 .get( 的位置，逐一分析
+    let mut search = line;
+    while let Some(get_idx) = search.find(".get(") {
+        let inner_start = get_idx + 5;
+        let inner = &search[inner_start..];
+
+        // 提取括号内的完整内容（找配对的 )）
+        let mut depth = 1usize;
+        let mut end = 0;
+        for (i, c) in inner.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 { end = i; break; }
+                }
+                _ => {}
+            }
+        }
+        if end == 0 {
+            search = &search[inner_start..];
+            continue;
+        }
+
+        let args_str = &inner[..end]; // 括号内容，如 `"AGENT_PORT", 5001`
+        let parts: Vec<&str> = args_str.splitn(2, ',').collect();
+        if parts.len() == 2 {
+            // 第一个参数：键名（去掉引号和空白）
+            let key = parts[0].trim().trim_matches('"').trim_matches('\'').to_uppercase();
+            // 键名必须以 PORT 结尾
+            if key == "PORT" || key.ends_with("PORT") {
+                // 第二个参数：默认值
+                let default_str = parts[1].trim().trim_matches('"').trim_matches('\'');
+                if let Ok(p) = default_str.parse::<u16>() {
+                    if p > 1000 { return Some(p); }
+                }
+            }
+        }
+
+        search = &search[inner_start..];
     }
     None
 }
@@ -576,5 +813,125 @@ fn find_executable(path: &Path) -> Option<String> {
             }
         }
     }
+    None
+}
+
+/// Resolve an npm-global command to its full .cmd path on Windows.
+#[cfg(windows)]
+pub fn resolve_npm_global(cmd: &str) -> Option<std::path::PathBuf> {
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let candidate = std::path::Path::new(&appdata).join("npm").join(format!("{}.cmd", cmd));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        let candidate = std::path::Path::new(&profile)
+            .join("AppData").join("Roaming").join("npm")
+            .join(format!("{}.cmd", cmd));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// For PTY use: resolve an npm-global command to (node_exe, js_entry).
+/// Reads the package.json "bin" field under node_modules to find the real JS entry.
+/// Returns None if not an npm-global command.
+#[cfg(windows)]
+pub fn resolve_npm_global_to_node(cmd: &str) -> Option<(String, String)> {
+    let cmd_path = resolve_npm_global(cmd)?;
+    let npm_dir = cmd_path.parent()?;
+    let node_modules = npm_dir.join("node_modules");
+
+    // Walk node_modules (including scoped @scope/pkg dirs) looking for
+    // a package whose "bin" has an entry matching cmd.
+    let js_entry = find_bin_entry(&node_modules, cmd)?;
+
+    // Find node.exe: try where.exe first, then common paths
+    let node_exe = find_node_exe_path();
+    Some((node_exe, js_entry))
+}
+
+#[cfg(windows)]
+fn find_bin_entry(node_modules: &std::path::Path, cmd: &str) -> Option<String> {
+    let Ok(top_entries) = std::fs::read_dir(node_modules) else { return None };
+
+    let mut dirs_to_check: Vec<std::path::PathBuf> = Vec::new();
+
+    for entry in top_entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('@') {
+            // Scoped: descend one more level
+            if let Ok(inner) = std::fs::read_dir(&path) {
+                for inner_entry in inner.flatten() {
+                    dirs_to_check.push(inner_entry.path());
+                }
+            }
+        } else {
+            dirs_to_check.push(path);
+        }
+    }
+
+    for pkg_dir in dirs_to_check {
+        let pkg_json = pkg_dir.join("package.json");
+        if !pkg_json.exists() { continue; }
+        let Ok(text) = std::fs::read_to_string(&pkg_json) else { continue };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+
+        let bin = json.get("bin")?;
+        let js_rel = if let Some(s) = bin.as_str() {
+            s.to_string()
+        } else if let Some(obj) = bin.as_object() {
+            obj.get(cmd).and_then(|v| v.as_str())?.to_string()
+        } else {
+            continue;
+        };
+
+        let js_rel_clean = js_rel.trim_start_matches("./").replace('/', std::path::MAIN_SEPARATOR_STR);
+        let full = pkg_dir.join(&js_rel_clean);
+        if full.exists() {
+            return Some(full.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_node_exe_path() -> String {
+    // 1. where.exe node
+    if let Ok(out) = std::process::Command::new("where.exe").arg("node").output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Some(first) = s.lines().next() {
+                let p = std::path::Path::new(first.trim());
+                if p.exists() { return first.trim().to_string(); }
+            }
+        }
+    }
+    // 2. Common install paths
+    for p in &[
+        r"C:\Program Files\nodejs\node.exe",
+        r"C:\Program Files (x86)\nodejs\node.exe",
+    ] {
+        if std::path::Path::new(p).exists() { return p.to_string(); }
+    }
+    // 3. nvm4w: NVM_SYMLINK env var points to current node dir
+    if let Ok(symlink) = std::env::var("NVM_SYMLINK") {
+        let p = std::path::Path::new(&symlink).join("node.exe");
+        if p.exists() { return p.to_string_lossy().to_string(); }
+    }
+    "node".to_string()
+}
+
+#[cfg(not(windows))]
+pub fn resolve_npm_global(_cmd: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn resolve_npm_global_to_node(_cmd: &str) -> Option<(String, String)> {
     None
 }

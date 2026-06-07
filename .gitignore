@@ -6,3 +6,5 @@ src-tauri/gen/
 *.log
 .DS_Store
 Thumbs.db
+Banner.psd
+DEVELOPMENT.md

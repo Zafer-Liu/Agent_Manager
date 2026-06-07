@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { AgentConfig } from '../types/agent'
-import { X, Plus, Minus, Loader2, FolderOpen, Sparkles, AlertCircle } from 'lucide-react'
+import { X, Plus, Minus, Loader2, FolderOpen, Sparkles, AlertCircle, Eye, EyeOff } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -25,6 +25,7 @@ const PROJECT_TYPE_LABELS: Record<string, string> = {
   rust: '🦀 Rust',
   go: '🐹 Go',
   binary: '⚙️ Executable',
+  'npm-global': '📦 npm global',
   unknown: '❓ Unknown',
 }
 
@@ -35,6 +36,8 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
   const [argInput, setArgInput] = useState((initial?.args ?? []).join(' '))
   const [workingDir, setWorkingDir] = useState(initial?.working_dir ?? '')
   const [port, setPort] = useState(initial?.port?.toString() ?? '')
+  const [uiToken, setUiToken] = useState(initial?.ui_token ?? '')
+  const [showToken, setShowToken] = useState(false)
   const [autoRestart, setAutoRestart] = useState(initial?.auto_restart ?? false)
   const [envPairs, setEnvPairs] = useState<[string, string][]>(
     Object.entries(initial?.env ?? {})
@@ -61,7 +64,6 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
     setScanHint('')
     try {
       const result = await invoke<ScanResult>('scan_project_dir', { dir })
-      // 只有空字段才填充（编辑模式时不覆盖用户已有的值）
       if (!name) setName(result.name)
       if (!description && result.description) setDescription(result.description)
       if (!command && result.command) setCommand(result.command)
@@ -107,6 +109,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
         working_dir: workingDir.trim(),
         env,
         port: port ? Number(port) : undefined,
+        ui_token: uiToken.trim() || undefined,
         auto_restart: autoRestart,
       })
       onClose()
@@ -117,14 +120,14 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 dark:bg-black/60">
+      <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-gray-700 dark:bg-gray-900">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-700">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-800">
+          <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
             {initial?.id ? 'Edit Agent' : 'New Agent'}
           </h3>
-          <button onClick={onClose} className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800">
+          <button onClick={onClose} className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300">
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -132,32 +135,30 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
         <form onSubmit={handleSubmit}>
           <div className="max-h-[65vh] overflow-y-auto px-6 py-5 space-y-4">
 
-            {/* Working directory — 放最前面，扫描后填充其他字段 */}
             <Field label="Working Directory">
               <div className="flex gap-2">
                 <input
                   value={workingDir}
                   onChange={e => handleWorkingDirChange(e.target.value)}
-                  placeholder="D:/projects/my-agent  (select or type)"
+                  placeholder="D:/projects/my-agent"
                   className="field-input flex-1 font-mono"
                 />
                 <button
                   type="button"
                   onClick={pickDirectory}
-                  className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 dark:border-gray-600 dark:text-gray-400 dark:hover:bg-gray-800"
+                  className="flex items-center rounded-lg border border-gray-200 px-3 py-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
                   title="Browse folder"
                 >
                   <FolderOpen className="h-4 w-4" />
                 </button>
               </div>
-              {/* Scan status */}
               {(scanning || scanHint) && (
                 <div className={`mt-2 flex items-center gap-1.5 text-xs rounded-lg px-3 py-2 ${
                   scanning
-                    ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400'
+                    ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
                     : scanHint.startsWith('Detected')
-                      ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
-                      : 'bg-yellow-50 text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400'
+                      ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                      : 'bg-yellow-50 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
                 }`}>
                   {scanning
                     ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Scanning project...</>
@@ -167,107 +168,87 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
               )}
             </Field>
 
-            <div className="border-t border-gray-100 dark:border-gray-800" />
+            <div className="border-t border-gray-200 dark:border-gray-800" />
 
             <Field label="Name *">
-              <input
-                autoFocus={!!initial?.id}
-                value={name}
-                onChange={e => setName(e.target.value)}
-                placeholder="My Agent"
-                className="field-input"
-              />
+              <input autoFocus={!!initial?.id} value={name} onChange={e => setName(e.target.value)}
+                placeholder="My Agent" className="field-input" />
             </Field>
 
             <Field label="Description">
-              <input
-                value={description}
-                onChange={e => setDescription(e.target.value)}
-                placeholder="What does this agent do?"
-                className="field-input"
-              />
+              <input value={description} onChange={e => setDescription(e.target.value)}
+                placeholder="What does this agent do?" className="field-input" />
             </Field>
 
             <Field label="Command *">
-              <input
-                value={command}
-                onChange={e => setCommand(e.target.value)}
-                placeholder="python / node / uvicorn / cargo"
-                className="field-input font-mono"
-              />
+              <input value={command} onChange={e => setCommand(e.target.value)}
+                placeholder="python / node / uvicorn / cargo" className="field-input font-mono" />
             </Field>
 
             <Field label="Arguments">
-              <input
-                value={argInput}
-                onChange={e => setArgInput(e.target.value)}
-                placeholder="main.py --port 8080 --verbose"
-                className="field-input font-mono"
-              />
+              <input value={argInput} onChange={e => setArgInput(e.target.value)}
+                placeholder="main.py --port 8080 --verbose" className="field-input font-mono" />
             </Field>
 
             <div className="grid grid-cols-2 gap-3">
               <Field label="Port (optional)">
-                <input
-                  type="number"
-                  value={port}
-                  onChange={e => setPort(e.target.value)}
-                  placeholder="8080"
-                  min={1}
-                  max={65535}
-                  className="field-input"
-                />
+                <input type="number" value={port} onChange={e => setPort(e.target.value)}
+                  placeholder="8080" min={1} max={65535} className="field-input" />
               </Field>
               <Field label="">
-                <label className="flex h-full items-end gap-2 pb-0.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={autoRestart}
-                    onChange={e => setAutoRestart(e.target.checked)}
-                    className="rounded"
-                  />
+                <label className="flex h-full items-end gap-2 pb-0.5 text-sm text-gray-600 cursor-pointer dark:text-gray-300">
+                  <input type="checkbox" checked={autoRestart}
+                    onChange={e => setAutoRestart(e.target.checked)} className="rounded" />
                   Auto-restart on crash
                 </label>
               </Field>
             </div>
 
+            <Field label="UI Access Key (optional)">
+              <div className="flex gap-2">
+                <input
+                  type={showToken ? 'text' : 'password'}
+                  value={uiToken} onChange={e => setUiToken(e.target.value)}
+                  placeholder="ad01a3b0282356d6..."
+                  className="field-input flex-1 font-mono" autoComplete="off"
+                />
+                <button type="button" onClick={() => setShowToken(v => !v)}
+                  className="flex items-center rounded-lg border border-gray-200 px-3 py-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:border-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+                  title={showToken ? 'Hide' : 'Show'}>
+                  {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-gray-400 dark:text-gray-600">
+                打开 UI 时自动填写到登录表单并连接，无需手动输入
+              </p>
+            </Field>
+
             <Field label="Environment Variables">
               <div className="space-y-2">
                 {envPairs.map(([k, v], i) => (
                   <div key={i} className="flex gap-2">
-                    <input
-                      value={k}
+                    <input value={k}
                       onChange={e => setEnvPairs(p => p.map((pair, j) => j === i ? [e.target.value, pair[1]] : pair))}
-                      placeholder="KEY"
-                      className="field-input flex-1 font-mono"
-                    />
-                    <input
-                      value={v}
+                      placeholder="KEY" className="field-input flex-1 font-mono" />
+                    <input value={v}
                       onChange={e => setEnvPairs(p => p.map((pair, j) => j === i ? [pair[0], e.target.value] : pair))}
-                      placeholder="value"
-                      className="field-input flex-1 font-mono"
-                    />
-                    <button
-                      type="button"
+                      placeholder="value" className="field-input flex-1 font-mono" />
+                    <button type="button"
                       onClick={() => setEnvPairs(p => p.filter((_, j) => j !== i))}
-                      className="text-gray-400 hover:text-red-500"
-                    >
+                      className="text-gray-400 hover:text-red-500 dark:text-gray-600 dark:hover:text-red-400">
                       <Minus className="h-4 w-4" />
                     </button>
                   </div>
                 ))}
-                <button
-                  type="button"
-                  onClick={() => setEnvPairs(p => [...p, ['', '']])}
-                  className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
-                >
+                <button type="button" onClick={() => setEnvPairs(p => [...p, ['', '']])}
+                  className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300">
                   <Plus className="h-3.5 w-3.5" /> Add variable
                 </button>
               </div>
             </Field>
 
             {error && (
-              <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
+              <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-900/30 dark:text-red-400">
                 <AlertCircle className="h-4 w-4 shrink-0" />
                 {error}
               </div>
@@ -275,9 +256,9 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
           </div>
 
           {/* Footer */}
-          <div className="flex justify-end gap-2 border-t border-gray-200 px-6 py-4 dark:border-gray-700">
+          <div className="flex justify-end gap-2 border-t border-gray-200 px-6 py-4 dark:border-gray-800">
             <button type="button" onClick={onClose}
-              className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800">
+              className="rounded-lg px-4 py-2 text-sm text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
               Cancel
             </button>
             <button type="submit" disabled={saving}
@@ -295,7 +276,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      {label && <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">{label}</label>}
+      {label && <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400">{label}</label>}
       {children}
     </div>
   )

@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Use class-based dark mode: add/remove .dark on <html> */
+@custom-variant dark (&:where(.dark, .dark *));
+
 * {
   box-sizing: border-box;
 }
@@ -15,10 +18,21 @@ body {
   overflow: hidden;
 }
 
-.input {
-  @apply w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500 transition-colors;
+/* ── Shared input styles (theme-aware) ─────────────── */
+.field-input {
+  @apply w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors;
+  @apply border-gray-200 bg-white text-gray-800 placeholder:text-gray-400;
+  @apply focus:border-blue-500;
+  @apply dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 dark:placeholder:text-gray-500;
 }
 
-.field-input {
-  @apply w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-blue-500 transition-colors dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:placeholder:text-gray-500;
+/* ── Resize handle ─────────────────────────────────── */
+.drag-col {
+  @apply w-[3px] shrink-0 cursor-col-resize transition-colors duration-150;
+  @apply bg-transparent hover:bg-blue-400/50;
+}
+.drag-row {
+  @apply h-[3px] shrink-0 cursor-row-resize transition-colors duration-150;
+  @apply bg-gray-200 hover:bg-blue-400/60;
+  @apply dark:bg-gray-800 dark:hover:bg-blue-500/50;
 }

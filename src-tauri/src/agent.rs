@@ -13,6 +13,8 @@ pub struct AgentConfig {
     pub working_dir: String,
     pub env: HashMap<String, String>,
     pub port: Option<u16>,
+    #[serde(default)]
+    pub ui_token: Option<String>,
     pub auto_restart: bool,
     pub created_at: String,
     pub updated_at: String,
