@@ -23,6 +23,7 @@
 
 <p align="center">
   <a href="#features">✨ 项目亮点</a> ·
+  <a href="#recommended-agents">🤝 推荐搭配</a> ·
   <a href="#install">⚙️ 快速安装</a> ·
   <a href="#quickstart">🚀 快速上手</a> ·
   <a href="#llm-config">🤖 LLM 配置</a> ·
@@ -71,7 +72,47 @@
 - 用自然语言就能操控所有 Agent
 
 ---
+<a id="recommended-agents"></a>
 
+# 🤝 推荐搭配 Agent
+
+智管-Agent Manager 可以统一管理本地运行的各类 AI Agent。
+如果你正在寻找一个适合被智管托管的业务型 Agent，推荐搭配使用：
+
+<details>
+<summary><strong>📊 智能商业分析 Agent</strong></summary>
+
+<br>
+
+**智能商业分析 Agent** 是一个面向商业数据分析场景的 AI Agent。
+上传 Excel / CSV，或连接数据库后，用户可以直接用自然语言提问，系统会自动完成：
+
+* 数据结构识别
+* SQL 生成与执行
+* 图表推荐与生成
+* 业务洞察分析
+* Excel / Word / PPT 报告导出
+
+配合智管-Agent Manager 使用后，可以获得更完整的桌面端体验：
+
+| 使用场景         | 智管-Agent Manager 提供的能力      |
+| ------------ | --------------------------- |
+| 启动商业分析 Agent | 一键启动 / 停止进程                 |
+| 查看运行状态       | 实时日志、PID、端口状态               |
+| 打开分析界面       | 内嵌 Web UI，无需切换浏览器           |
+| 团队临时演示       | 一键生成 Cloudflare Tunnel 公网链接 |
+| 多 Agent 协作   | 使用 Manager Agent 自然语言调度     |
+
+```text
+示例：
+帮我启动 Business Analytics Agent，然后打开它的界面
+```
+
+👉 项目地址：[智能商业分析 Agent](https://github.com/Zafer-Liu/Data-Analysis-Agent)
+
+</details>
+
+---
 <a id="capabilities"></a>
 
 # 🧠 核心功能
