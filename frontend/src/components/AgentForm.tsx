@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import type { AgentConfig } from '../types/agent'
-import { X, Plus, Minus, Loader2, FolderOpen, Sparkles, AlertCircle, Eye, EyeOff } from 'lucide-react'
+import { X, Plus, Minus, Loader2, FolderOpen, Sparkles, AlertCircle, Eye, EyeOff, GitBranch, PenLine } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import { GithubInstallTab } from './GithubInstallTab'
 
 interface Props {
   initial?: Partial<AgentConfig>
@@ -29,7 +30,14 @@ const PROJECT_TYPE_LABELS: Record<string, string> = {
   unknown: '❓ Unknown',
 }
 
+type FormTab = 'manual' | 'github'
+
 export function AgentForm({ initial, onSave, onClose }: Props) {
+  const isEdit = !!initial?.id
+
+  // 编辑已有 Agent 时固定在 manual tab
+  const [activeTab, setActiveTab] = useState<FormTab>('manual')
+
   const [name, setName] = useState(initial?.name ?? '')
   const [description, setDescription] = useState(initial?.description ?? '')
   const [command, setCommand] = useState(initial?.command ?? '')
@@ -47,14 +55,30 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
   const [error, setError] = useState('')
   const [scanHint, setScanHint] = useState('')
 
+  /** GitHub tab 完成 clone 后预填充字段，并切换到 manual tab 让用户确认 */
+  function handleGithubPrefill(partial: Partial<AgentConfig>) {
+    if (partial.name !== undefined) setName(partial.name)
+    if (partial.description !== undefined) setDescription(partial.description)
+    if (partial.command !== undefined) setCommand(partial.command)
+    if (partial.args !== undefined) setArgInput(partial.args.join(' '))
+    if (partial.working_dir !== undefined) setWorkingDir(partial.working_dir)
+    if (partial.port !== undefined) setPort(partial.port.toString())
+    if (partial.env !== undefined) setEnvPairs(Object.entries(partial.env))
+    if (partial.auto_restart !== undefined) setAutoRestart(partial.auto_restart)
+    setTimeout(() => setActiveTab('manual'), 300)
+  }
+
   async function pickDirectory() {
     try {
       const selected = await open({ directory: true, multiple: false })
       if (!selected || typeof selected !== 'string') return
       setWorkingDir(selected)
       await scanDirectory(selected)
-    } catch {
-      // user cancelled
+    } catch (e) {
+      const msg = String(e)
+      if (!msg.includes('cancelled') && msg !== 'null' && msg !== 'undefined') {
+        setScanHint(`无法打开文件夹选择器：${msg}`)
+      }
     }
   }
 
@@ -125,13 +149,40 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
         {/* Header */}
         <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-800">
           <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            {initial?.id ? 'Edit Agent' : 'New Agent'}
+            {isEdit ? 'Edit Agent' : 'New Agent'}
           </h3>
           <button onClick={onClose} className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300">
             <X className="h-5 w-5" />
           </button>
         </div>
 
+        {/* Tab bar — 新建时才显示 */}
+        {!isEdit && (
+          <div className="flex gap-1 border-b border-gray-200 px-6 pt-3 dark:border-gray-800">
+            <TabBtn
+              active={activeTab === 'manual'}
+              onClick={() => setActiveTab('manual')}
+              icon={<PenLine className="h-3.5 w-3.5" />}
+              label="手动配置"
+            />
+            <TabBtn
+              active={activeTab === 'github'}
+              onClick={() => setActiveTab('github')}
+              icon={<GitBranch className="h-3.5 w-3.5" />}
+              label="从 GitHub 安装"
+            />
+          </div>
+        )}
+
+        {/* GitHub 安装 Tab */}
+        {activeTab === 'github' && !isEdit && (
+          <div className="max-h-[70vh] overflow-y-auto px-6 py-5">
+            <GithubInstallTab onPrefill={handleGithubPrefill} />
+          </div>
+        )}
+
+        {/* 手动配置 Tab */}
+        {(activeTab === 'manual' || isEdit) && (
         <form onSubmit={handleSubmit}>
           <div className="max-h-[65vh] overflow-y-auto px-6 py-5 space-y-4">
 
@@ -268,6 +319,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
             </button>
           </div>
         </form>
+        )}
       </div>
     </div>
   )
@@ -279,5 +331,29 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {label && <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400">{label}</label>}
       {children}
     </div>
+  )
+}
+
+function TabBtn({
+  active, onClick, icon, label,
+}: {
+  active: boolean
+  onClick: () => void
+  icon: React.ReactNode
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-1.5 rounded-t-md border-b-2 px-3 pb-2.5 pt-1 text-sm font-medium transition-colors ${
+        active
+          ? 'border-blue-500 text-blue-600 dark:border-blue-400 dark:text-blue-400'
+          : 'border-transparent text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300'
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
   )
 }

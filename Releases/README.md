@@ -1,7 +1,7 @@
-# 智管-Agent Manager v0.2.0
+# 智管-Agent Manager v0.2.1
 
-> **发布日期：** 2026 年 6 月  
-> **类型：** 功能版本（Major Feature Release）
+> **发布日期：** 2026 年 6 月 9 日
+> **类型：** 功能版本（Feature Release）
 
 ---
 
@@ -9,55 +9,44 @@
 
 | 平台 | 文件 | 说明 |
 |------|------|------|
-| Windows (x64) | `agent-manager_0.2.0.exe` | NSIS 安装程序，双击安装 |
+| Windows (x64) | `agent-manager_0.2.1.exe` | NSIS 安装程序，双击安装 |
 | macOS (Intel) | *(即将发布)* | `.dmg` 格式 |
 
 > **Windows 安全提示：** 安装时若弹出"未知发布者"警告，点击"更多信息" → "仍要运行"。安装包未经 Microsoft 代码签名，属正常现象。
 
 ---
 
-## ✨ v0.2.0 新功能
+## ✨ v0.2.1 新功能
 
-### 🤖 Manager Agent — 自然语言指挥官
+### 🐙 从 GitHub 安装 Agent
 
-用一句话控制所有 Agent，无需手动操作界面：
+在 **New Agent → 从 GitHub 安装** Tab 中，输入任意 GitHub 仓库地址，一键完成：
 
-```
-帮我启动 Business Analytics Agent，然后打开它的界面
-把 Mindmap 停掉，顺便告诉我它是干什么的
-现在有哪些 Agent 在运行？
-```
+1. 自动拉取仓库信息（名称、描述、Stars、语言、README 摘要）
+2. 选择本地存放目录（或使用默认的 `~/agent-repos/`）
+3. Clone 到本地，表单字段自动填充，确认后保存即可启动
 
-支持：一键启动/停止、打开 UI、打开终端、读取 Agent README、页面跳转。会话持久化，切换页面后对话历史不丢失。
-
-> 需配置 LLM 提供商（支持 DeepSeek / OpenAI / 任意兼容 API）。
-
----
-
-### 🏫 Dashboard 教室视图
-
-所有 Agent 以"教室"布局可视化呈现：Manager Agent 在讲台，其他 Agent 依次就座。一眼看清所有 Agent 状态；悬停可直接启停、查看详情、打开 UI。
+支持三种 URL 格式：
+- `https://github.com/owner/repo`
+- `github.com/owner/repo`
+- `owner/repo`
 
 ---
 
-### 🌐 代理发布 — 一键公网分享
+### 🌟 内置推荐 Agent
 
-无需固定 IP、域名或服务器：
+打开 GitHub 安装 Tab 即可看到内置推荐，一键安装：
 
-- **Cloudflare Tunnel 临时链接**：一键生成 `https://xxx.trycloudflare.com`，会后关闭链接立即失效，适合开会演示
-- **Caddy 反向代理长期发布**：绑定自定义域名，自动申请 HTTPS 证书，支持用户名/密码访问控制，多用户权限精细管理
-
----
-
-### 💻 PTY 交互式终端
-
-内嵌真实的 PTY 终端，完整支持 Claude Code 等 TUI 工具。不再需要切换到外部终端。
+| Agent | 简介 | 技术栈 |
+|-------|------|--------|
+| **智析 · 数据分析 Agent** | 上传 CSV/Excel，用自然语言提问，自动生成图表与洞察报告 | Python · Streamlit |
+| **BrainBoost · AI 思维导图** | 输入关键词，AI 自动生成思维导图，支持语音输入、节点拖拽、一键导出 | TypeScript · React |
 
 ---
 
-### 🔍 Python 项目自动识别增强
+### 🔗 系统代理自动检测
 
-新增支持：**FastAPI、Django、Streamlit、uv / pyproject.toml**。选目录后自动填写正确的启动命令与端口号。
+GitHub 拉取与 Clone 操作自动读取系统代理配置（环境变量或 Windows 注册表），无需手动设置。界面实时显示当前代理状态。
 
 ---
 
@@ -65,15 +54,40 @@
 
 | 问题 | 说明 |
 |------|------|
+| git clone 提示 `Could not resolve host: github.com` | 系统开启代理时，代理配置现已自动注入 git 子进程 |
+| 文件夹选择器点击无响应 | Tauri 2 权限配置已修正，`dialog.open()` 现可正常弹出 |
+| 编译报错 `UnknownPermission: fs allow-read-all` | 修正 `tauri.conf.json` 中 fs 插件的权限命名 |
+
+---
+
+## 🔄 从 v0.2.0 升级
+
+直接安装新版安装包覆盖更新即可。Agent 配置数据（`%APPDATA%\agent-manager\`）不会丢失。
+
+---
+
+## 📜 历史版本
+
+<details>
+<summary>v0.2.0 · 2026 年 6 月</summary>
+
+### 新功能
+
+- **Manager Agent**：自然语言指挥所有 Agent，支持启动/停止/打开 UI/读取 README，会话持久化
+- **Dashboard 教室视图**：所有 Agent 状态一眼可见，悬停操作
+- **代理发布**：Cloudflare Tunnel 临时链接 + Caddy 反向代理长期发布
+- **PTY 交互式终端**：内嵌真实终端，完整支持 Claude Code 等 TUI 工具
+- **Python 自动识别增强**：支持 FastAPI / Django / Streamlit / uv / pyproject.toml
+
+### Bug 修复
+
+| 问题 | 说明 |
+|------|------|
 | Dashboard 启动 Agent 后全屏卡死 | 已修复状态更新导致的 UI 冻结问题 |
 | Mindmap (Node.js) 启动进入 REPL | 已修复 npm 全局包的 PTY 交互模式检测 |
 | 开发端口与其他 Vite 项目冲突 | 开发端口从 5173 改为 1420 |
 
----
-
-## 🔄 从 v0.1.0 升级
-
-直接安装新版安装包即可覆盖更新。Agent 配置数据（`%APPDATA%\agent-manager\`）不会丢失。
+</details>
 
 ---
 

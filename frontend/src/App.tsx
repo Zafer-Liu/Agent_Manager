@@ -195,7 +195,7 @@ export default function App() {
             <img src={logoUrl} alt="智管-Agent Manager" className="h-7 w-7 rounded-lg" />
             <div className="flex flex-col leading-tight">
               <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">智管-Agent Manager</span>
-              <span className="text-[10px] text-gray-400 dark:text-gray-500">v0.2.0</span>
+              <span className="text-[10px] text-gray-400 dark:text-gray-500">v0.2.1</span>
             </div>
           </div>
           <button

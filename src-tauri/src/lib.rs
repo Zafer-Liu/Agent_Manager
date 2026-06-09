@@ -6,6 +6,7 @@ mod llm;
 mod mcp_agent;
 mod pty;
 mod proxy;
+mod github;
 
 use commands::*;
 use mcp::*;
@@ -14,6 +15,7 @@ use llm::*;
 use mcp_agent::*;
 use pty::*;
 use proxy::*;
+use github::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -76,6 +78,11 @@ pub fn run() {
             tunnel_stop_all,
             tunnel_list,
             tunnel_alive,
+            // GitHub install
+            github_fetch_repo_info,
+            github_clone_repo,
+            github_check_git,
+            github_get_proxy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
