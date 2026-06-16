@@ -284,7 +284,7 @@ brew install cloudflared
 
 ### 下载预构建安装包（推荐）
 
-从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/releases) 下载最新版本：
+从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/tree/main/Releases) 下载最新版本：
 
 | 平台 | 文件 |
 |------|------|

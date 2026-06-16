@@ -295,7 +295,7 @@ View all ports currently listening on your machine.
 
 ### Download Prebuilt Installers Recommended
 
-Download the latest version from [Releases](https://github.com/Zafer-Liu/Agent_Manager/releases):
+Download the latest version from [Releases](https://github.com/Zafer-Liu/Agent_Manager/tree/main/Releases):
 
 | Platform | File |
 |----------|------|
