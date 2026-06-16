@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import { invoke } from '@tauri-apps/api/core'
 import { useAgentStore } from './store/agentStore'
+import { LanguageSwitcher } from './components/LanguageSwitcher'
 import { AgentList } from './components/AgentList'
 import { AgentDetail } from './components/AgentDetail'
 import { AgentForm } from './components/AgentForm'
@@ -14,17 +17,15 @@ import type { AgentState } from './types/agent'
 import {
   Plus, RefreshCw, Bot, X, Globe, Network, Cpu,
   Maximize2, Minimize2, TerminalSquare, Sun, Moon,
-  Crown, LayoutDashboard, Shield,
+  Crown, LayoutDashboard, Shield, Eraser,
 } from 'lucide-react'
 import logoUrl from '/logo.png'
 
 type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy'
-type TabKind = 'ui' | 'terminal'
-
 interface OpenTab {
   agentId: string
   label: string
-  kind: TabKind
+  kind: 'ui' | 'terminal'
   port?: number
   token?: string
   command?: string
@@ -48,6 +49,7 @@ export default function App() {
   } = useAgentStore()
 
   const { theme, toggle: toggleTheme } = useTheme()
+  const { t } = useTranslation()
 
   const [page, setPage] = useState<NavPage>('agents')
   const [showForm, setShowForm] = useState(false)
@@ -55,6 +57,7 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR)
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([])
   const [activeTabKey, setActiveTabKey] = useState<string | null>(null)
+  const [terminalClearVersions, setTerminalClearVersions] = useState<Record<string, number>>({})
   const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_H)
   const [panelFullscreen, setPanelFullscreen] = useState(false)
   const [managerSession, setManagerSession] = useState<ManagerSessionState>({ messages: [], selectedProvider: '' })
@@ -70,7 +73,9 @@ export default function App() {
   const agentLogs = selectedId ? (logs[selectedId] ?? []) : []
   const activeTab = openTabs.find(t => `${t.agentId}:${t.kind}` === activeTabKey)
     ?? openTabs.find(t => t.agentId === selectedId)
+    ?? openTabs[0]
     ?? null
+  const resolvedActiveTabKey = activeTab ? `${activeTab.agentId}:${activeTab.kind}` : null
   const showPanel = activeTab !== null
   const showSplit = showPanel && !panelFullscreen
 
@@ -78,7 +83,7 @@ export default function App() {
     fetchAgents()
     const id = setInterval(fetchAgents, 3000)
     return () => clearInterval(id)
-  }, [])
+  }, [fetchAgents])
 
   useEffect(() => {
     if (!selectedId) return
@@ -131,15 +136,22 @@ export default function App() {
   function openAgentUI(agent: AgentState) {
     if (!agent.config.port) return
     const id = agent.config.id
-    const existing = openTabs.find(t => t.agentId === id && t.kind === 'ui')
-    if (!existing) {
-      setOpenTabs(tabs => [
-        ...tabs.filter(t => !(t.agentId === id && t.kind === 'ui')),
-        { agentId: id, label: agent.config.name, kind: 'ui', port: agent.config.port!, token: agent.config.ui_token },
-      ])
+    const uiTab: OpenTab = {
+      agentId: id,
+      label: agent.config.name,
+      kind: 'ui',
+      port: agent.config.port,
+      token: agent.config.ui_token,
     }
+    setOpenTabs(tabs => {
+      const exists = tabs.some(tab => tab.agentId === id && tab.kind === 'ui')
+      return exists
+        ? tabs.map(tab => tab.agentId === id && tab.kind === 'ui' ? uiTab : tab)
+        : [...tabs, uiTab]
+    })
     selectAgent(id)
     setActiveTabKey(`${id}:ui`)
+    setPage('agents')
   }
 
   function openAgentTerminal(agent: AgentState) {
@@ -165,10 +177,33 @@ export default function App() {
 
   function closeTab(tab: OpenTab, e: React.MouseEvent) {
     e.stopPropagation()
+    if (tab.kind === 'ui') {
+      invoke('close_agent_ui_webview', { agentId: tab.agentId }).catch(() => {})
+    }
     const key = `${tab.agentId}:${tab.kind}`
     setOpenTabs(tabs => tabs.filter(t => !(t.agentId === tab.agentId && t.kind === tab.kind)))
     if (activeTabKey === key) setActiveTabKey(null)
     setPanelFullscreen(false)
+  }
+
+  function clearActiveTerminal() {
+    if (!activeTab || activeTab.kind !== 'terminal') return
+    setTerminalClearVersions(versions => ({
+      ...versions,
+      [activeTab.agentId]: (versions[activeTab.agentId] ?? 0) + 1,
+    }))
+  }
+
+  function togglePanelFullscreen() {
+    if (!activeTab) return
+    if (activeTab.kind === 'ui') {
+      invoke('fullscreen_agent_ui_webview', {
+        agentId: activeTab.agentId,
+        title: activeTab.label,
+      }).catch(error => console.error('Failed to fullscreen agent UI', error))
+      return
+    }
+    setPanelFullscreen(fullscreen => !fullscreen)
   }
 
   function openNew() { setEditingAgent(null); setShowForm(true) }
@@ -192,30 +227,33 @@ export default function App() {
         {/* App title */}
         <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-800">
           <div className="flex items-center gap-2.5">
-            <img src={logoUrl} alt="智管-Agent Manager" className="h-7 w-7 rounded-lg" />
+            <img src={logoUrl} alt={t('app.title')} className="h-7 w-7 rounded-lg" />
             <div className="flex flex-col leading-tight">
-              <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">智管-Agent Manager</span>
-              <span className="text-[10px] text-gray-400 dark:text-gray-500">v0.2.1</span>
+              <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('app.title')}</span>
+              <span className="text-[10px] text-gray-400 dark:text-gray-500">v0.2.3</span>
             </div>
           </div>
-          <button
-            onClick={toggleTheme}
-            className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300"
-            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          >
-            {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
+          <div className="flex items-center gap-0.5">
+            <LanguageSwitcher />
+            <button
+              onClick={toggleTheme}
+              className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+              title={theme === 'dark' ? t('app.switchToLight') : t('app.switchToDark')}
+            >
+              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
 
         {/* Nav */}
         <div className="flex flex-col gap-0.5 p-2 border-b border-gray-200 dark:border-gray-800">
           {([
-            { id: 'dashboard', icon: <LayoutDashboard className="h-4 w-4" />, label: 'Dashboard' },
-            { id: 'manager',   icon: <Crown className="h-4 w-4" />,           label: 'Manager' },
-            { id: 'agents',    icon: <Bot className="h-4 w-4" />,             label: 'Agents' },
-            { id: 'mcp-agent', icon: <Cpu className="h-4 w-4" />,             label: 'MCP Agent' },
-            { id: 'ports',     icon: <Network className="h-4 w-4" />,         label: 'Port Manager' },
-            { id: 'proxy',     icon: <Shield className="h-4 w-4" />,          label: '代理发布' },
+            { id: 'dashboard', icon: <LayoutDashboard className="h-4 w-4" />, label: t('nav.dashboard') },
+            { id: 'manager',   icon: <Crown className="h-4 w-4" />,           label: t('nav.manager') },
+            { id: 'agents',    icon: <Bot className="h-4 w-4" />,             label: t('nav.agents') },
+            { id: 'mcp-agent', icon: <Cpu className="h-4 w-4" />,             label: t('nav.mcpAgent') },
+            { id: 'ports',     icon: <Network className="h-4 w-4" />,         label: t('nav.ports') },
+            { id: 'proxy',     icon: <Shield className="h-4 w-4" />,          label: t('nav.proxy') },
           ] as const).map(nav => (
             <button
               key={nav.id}
@@ -234,9 +272,9 @@ export default function App() {
         {/* Agent list */}
         {page === 'agents' && <>
           <div className="flex items-center justify-between px-4 py-2">
-            <p className="text-xs text-gray-400">{agents.length} configured</p>
+            <p className="text-xs text-gray-400">{t('app.configured', { count: agents.length })}</p>
             <div className="flex gap-1">
-              <button onClick={openNew} className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300" title="Add">
+              <button onClick={openNew} className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300" title={t('common.add')}>
                 <Plus className="h-3.5 w-3.5" />
               </button>
               <button onClick={fetchAgents} disabled={loading} className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 disabled:opacity-40">
@@ -258,7 +296,7 @@ export default function App() {
           </div>
           <div className="border-t border-gray-200 p-3 dark:border-gray-800">
             <button onClick={openNew} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500">
-              <Plus className="h-4 w-4" /> New Agent
+              <Plus className="h-4 w-4" /> {t('app.newAgent')}
             </button>
           </div>
         </>}
@@ -305,8 +343,8 @@ export default function App() {
         {page === 'ports' && <PortManager />}
         {page === 'proxy' && <ProxyManager agents={agents} />}
 
-        {page === 'agents' && (
-          <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Keep the workspace mounted so terminals and iframe state survive navigation. */}
+        <div className={`flex flex-1 flex-col overflow-hidden ${page === 'agents' ? '' : 'hidden'}`}>
 
             {/* ── Tab bar ── */}
             {openTabs.length > 0 && (
@@ -331,7 +369,7 @@ export default function App() {
                       }
                       <span className="max-w-[100px] truncate">{tab.label}</span>
                       <span className="ml-0.5 text-[10px] text-gray-400 dark:text-gray-600">
-                        {tab.kind === 'terminal' ? 'term' : `${tab.port}`}
+                        {tab.kind === 'terminal' ? t('app.term') : `${tab.port}`}
                       </span>
                       <span
                         onClick={e => closeTab(tab, e)}
@@ -345,7 +383,7 @@ export default function App() {
               </div>
             )}
 
-            {/* ── Active panel (UI iframe or Terminal) ── */}
+            {/* ── Active terminal or embedded browser panel ── */}
             {showPanel && activeTab && (
               <div
                 style={panelFullscreen ? undefined : { height: panelHeight }}
@@ -360,25 +398,32 @@ export default function App() {
                   <span className="flex-1 font-mono text-xs text-gray-500 dark:text-gray-400">
                     {activeTab.kind === 'terminal'
                       ? `${activeTab.command} ${(activeTab.args ?? []).join(' ')}`
-                      : `http://localhost:${activeTab.port}`
+                      : `http://127.0.0.1:${activeTab.port}`
                     }
                   </span>
-                  {activeTab.kind === 'ui' && activeTab.token && (
-                    <span className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-600 shrink-0 dark:bg-amber-900/40 dark:text-amber-400">
-                      🔑 auth
-                    </span>
+                  {activeTab.kind === 'terminal' && (
+                    <button
+                      onClick={clearActiveTerminal}
+                      className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+                      title={t('common.clear')}
+                    >
+                      <Eraser className="h-3.5 w-3.5" />
+                    </button>
                   )}
                   <button
-                    onClick={() => setPanelFullscreen(f => !f)}
+                    onClick={togglePanelFullscreen}
                     className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
-                    title={panelFullscreen ? '还原' : '全屏'}
+                    title={activeTab.kind === 'terminal' && panelFullscreen ? t('common.restore') : t('common.fullscreen')}
                   >
-                    {panelFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                    {activeTab.kind === 'terminal' && panelFullscreen
+                      ? <Minimize2 className="h-3.5 w-3.5" />
+                      : <Maximize2 className="h-3.5 w-3.5" />
+                    }
                   </button>
                   <button
                     onClick={e => closeTab(activeTab, e)}
                     className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-red-500 dark:hover:bg-gray-700 dark:hover:text-red-400"
-                    title="Close"
+                    title={t('common.close')}
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
@@ -386,17 +431,33 @@ export default function App() {
 
                 {/* Panel content */}
                 <div className="flex-1 overflow-hidden">
-                  {activeTab.kind === 'terminal' ? (
-                    <TerminalPanel
-                      id={activeTab.agentId}
-                      command={activeTab.command!}
-                      args={activeTab.args ?? []}
-                      cwd={activeTab.cwd ?? ''}
-                      env={activeTab.env ?? {}}
-                    />
-                  ) : (
-                    <IframePanel tab={activeTab} />
-                  )}
+                  {openTabs.map(tab => {
+                    const tabKey = `${tab.agentId}:${tab.kind}`
+                    const isActive = tabKey === resolvedActiveTabKey
+                    return (
+                      <div
+                        key={tabKey}
+                        className={`h-full w-full ${isActive ? '' : 'hidden'}`}
+                      >
+                        {tab.kind === 'terminal' ? (
+                          <TerminalPanel
+                            id={tab.agentId}
+                            command={tab.command!}
+                            args={tab.args ?? []}
+                            cwd={tab.cwd ?? ''}
+                            env={tab.env ?? {}}
+                            active={isActive && page === 'agents'}
+                            clearVersion={terminalClearVersions[tab.agentId] ?? 0}
+                          />
+                        ) : (
+                          <NativeWebviewPanel
+                            tab={tab}
+                            active={isActive && page === 'agents' && !showForm}
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             )}
@@ -428,17 +489,16 @@ export default function App() {
                     <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gray-100 dark:bg-gray-800">
                       <img src={logoUrl} alt="" className="h-10 w-10 opacity-40" />
                     </div>
-                    <p className="text-sm text-gray-400 dark:text-gray-500">Select an agent to view details</p>
+                    <p className="text-sm text-gray-400 dark:text-gray-500">{t('app.selectAgentHint')}</p>
                     <button onClick={openNew} className="text-sm text-blue-500 hover:text-blue-400 dark:text-blue-400 dark:hover:text-blue-300">
-                      + Create your first agent
+                      {t('app.createFirstAgent')}
                     </button>
                   </div>
                 )}
               </div>
             )}
 
-          </div>
-        )}
+        </div>
       </main>
 
       {showForm && (
@@ -452,70 +512,81 @@ export default function App() {
   )
 }
 
-// ── IframePanel ────────────────────────────────────────────
-function IframePanel({ tab }: { tab: OpenTab }) {
-  const [key, setKey] = useState(0)
-  const iframeRef = useRef<HTMLIFrameElement>(null)
-  const base = `http://localhost:${tab.port}`
+function NativeWebviewPanel({ tab, active }: { tab: OpenTab; active: boolean }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const openedRef = useRef(false)
+  const activeRef = useRef(active)
+  const base = `http://127.0.0.1:${tab.port}/`
+  const url = tab.token ? `${base}#token=${encodeURIComponent(tab.token)}` : base
 
-  function handleLoad() {
-    if (!tab.token) return
-    const iframe = iframeRef.current
-    if (!iframe) return
-    try {
-      const doc = iframe.contentDocument
-      if (!doc) return
-      const wsUrl = `ws://127.0.0.1:${tab.port}`
-      const token = tab.token
-      const script = doc.createElement('script')
-      script.textContent = `
-        (function autoConnect() {
-          var attempts = 0;
-          var iv = setInterval(function() {
-            attempts++;
-            var inputs = Array.from(document.querySelectorAll('input'));
-            var wsInput = inputs.find(function(el) {
-              return el.type === 'text' || el.type === 'url' || el.placeholder.toLowerCase().includes('ws');
-            });
-            var tokenInput = inputs.find(function(el) {
-              return el.type === 'password' || el.placeholder.toLowerCase().includes('token') || el.placeholder.includes('令牌');
-            });
-            var connectBtn = Array.from(document.querySelectorAll('button')).find(function(b) {
-              return b.textContent.trim().includes('连接') || b.textContent.trim().toLowerCase().includes('connect');
-            });
-            if (wsInput && tokenInput && connectBtn) {
-              clearInterval(iv);
-              var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-              setter.call(wsInput, ${JSON.stringify(wsUrl)});
-              wsInput.dispatchEvent(new Event('input', { bubbles: true }));
-              setter.call(tokenInput, ${JSON.stringify(token)});
-              tokenInput.dispatchEvent(new Event('input', { bubbles: true }));
-              setTimeout(function() { connectBtn.click(); }, 150);
-            }
-            if (attempts > 40) clearInterval(iv);
-          }, 100);
-        })();
-      `
-      doc.head.appendChild(script)
-    } catch { /* cross-origin, user fills manually */ }
-  }
+  const getBounds = useCallback(() => {
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return null
+    return {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+    }
+  }, [])
 
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-gray-200 bg-white px-3 py-1 shrink-0 dark:border-gray-800 dark:bg-gray-900">
-        <button onClick={() => setKey(k => k + 1)} className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300" title="Reload">
-          <RefreshCw className="h-3.5 w-3.5" />
-        </button>
-      </div>
-      <iframe
-        ref={iframeRef}
-        key={key}
-        src={base}
-        title={tab.label}
-        className="flex-1 w-full border-0 bg-white"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-        onLoad={handleLoad}
-      />
-    </div>
-  )
+  useEffect(() => {
+    let cancelled = false
+    const frame = requestAnimationFrame(async () => {
+      const bounds = getBounds()
+      if (!bounds) return
+      try {
+        await invoke('open_agent_ui_webview', {
+          agentId: tab.agentId,
+          url,
+          ...bounds,
+        })
+        openedRef.current = true
+        if (cancelled || !activeRef.current) {
+          invoke('update_agent_ui_webview', {
+            agentId: tab.agentId,
+            ...bounds,
+            visible: false,
+          }).catch(() => {})
+        }
+      } catch (error) {
+        console.error('Failed to embed agent UI', error)
+      }
+    })
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(frame)
+    }
+  }, [getBounds, tab.agentId, url])
+
+  useEffect(() => {
+    activeRef.current = active
+    const syncBounds = () => {
+      const bounds = getBounds()
+      if (!bounds || !openedRef.current) return
+      invoke('update_agent_ui_webview', {
+        agentId: tab.agentId,
+        ...bounds,
+        visible: active,
+      }).catch(() => {})
+    }
+
+    const observer = new ResizeObserver(syncBounds)
+    if (containerRef.current) observer.observe(containerRef.current)
+    window.addEventListener('resize', syncBounds)
+    requestAnimationFrame(syncBounds)
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', syncBounds)
+      const bounds = getBounds() ?? { x: 0, y: 0, width: 1, height: 1 }
+      invoke('update_agent_ui_webview', {
+        agentId: tab.agentId,
+        ...bounds,
+        visible: false,
+      }).catch(() => {})
+    }
+  }, [active, getBounds, tab.agentId])
+
+  return <div ref={containerRef} className="h-full w-full bg-white dark:bg-gray-950" />
 }

@@ -4,24 +4,29 @@ mod mcp;
 mod ports;
 mod llm;
 mod mcp_agent;
+mod workflow;
 mod pty;
 mod proxy;
 mod github;
+mod ui_window;
 
 use commands::*;
 use mcp::*;
 use ports::*;
 use llm::*;
 use mcp_agent::*;
+use workflow::*;
 use pty::*;
 use proxy::*;
 use github::*;
+use ui_window::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(agent::AgentStore::new())
         .manage(pty::PtyStore::new())
+        .manage(ui_window::UiWebviewStore::new())
         .manage(proxy::TunnelStore::new())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -55,6 +60,13 @@ pub fn run() {
             run_mcp_agent,
             chat_with_mcp,
             manager_chat,
+            // Workflow
+            list_workflows,
+            save_workflow,
+            delete_workflow,
+            list_mcp_tools,
+            run_workflow,
+            run_workflow_stream,
             // PTY terminal
             pty_start,
             pty_write,
@@ -83,6 +95,13 @@ pub fn run() {
             github_clone_repo,
             github_check_git,
             github_get_proxy,
+            github_save_token,
+            github_token_status,
+            // Agent UI window
+            open_agent_ui_webview,
+            update_agent_ui_webview,
+            fullscreen_agent_ui_webview,
+            close_agent_ui_webview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

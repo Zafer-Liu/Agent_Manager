@@ -430,37 +430,105 @@ pub fn tunnel_start(
         .ok_or_else(|| "未找到 cloudflared，请先安装：https://github.com/cloudflare/cloudflared/releases/latest".to_string())?;
 
     // 启动子进程，捕获 stderr（cloudflared 把日志输出到 stderr）
-    let mut child = Command::new(&cloudflared)
-        .args(["tunnel", "--url", &format!("http://localhost:{port}"), "--no-autoupdate"])
+    let mut cmd = Command::new(&cloudflared);
+    cmd.args(["tunnel", "--url", &format!("http://localhost:{port}"), "--no-autoupdate"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+
+    // 注意：故意【不】注入系统代理。
+    // cloudflared 能直连 Cloudflare 边缘节点，注入 HTTP 代理反而会让所有
+    // 隧道数据绕代理出口（如新加坡），实测同一资源直连 0.2s vs 走代理 7.3s（慢 33 倍），
+    // 导致页面静态资源加载超时、"打不开"。
+    // cloudflared 唯一依赖的是系统 DNS 能解析 *.argotunnel.com / api.trycloudflare.com，
+    // 这属于 DNS 问题，应由用户修复 DNS（换公共 DNS 或热点），而非靠代理绕行。
+    // 显式清掉可能从父进程继承的代理环境变量，确保直连。
+    cmd.env_remove("HTTPS_PROXY")
+        .env_remove("HTTP_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("http_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy");
+
+    let mut child = cmd.spawn()
         .map_err(|e| format!("无法启动 cloudflared: {e}"))?;
 
     // 从 stderr 读取行，等待出现 trycloudflare.com URL
+    // 使用独立线程 + channel 实现超时，避免网络不通时无限阻塞
     let stderr = child.stderr.take().ok_or("无法读取 cloudflared 输出")?;
-    let reader = BufReader::new(stderr);
 
-    let mut tunnel_url = String::new();
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        // cloudflared 日志中包含隧道 URL 的行格式：
-        // ... | trycloudflare.com | ...  或  https://xxx.trycloudflare.com
-        if let Some(url) = extract_tunnel_url(&line) {
-            tunnel_url = url;
-            break;
+    // channel 传 (url_or_empty, 收集到的日志行)
+    let (tx, rx) = std::sync::mpsc::channel::<(String, Vec<String>)>();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut log_lines: Vec<String> = Vec::new();
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            // 只保留最近 20 行日志，避免太长
+            if log_lines.len() >= 20 {
+                log_lines.remove(0);
+            }
+            log_lines.push(line.clone());
+            if let Some(url) = extract_tunnel_url(&line) {
+                let _ = tx.send((url, log_lines));
+                return;
+            }
         }
-        // 超时保护：如果读了很多行还没找到 URL，放弃
-    }
+        // 进程退出或读取结束，发送空字符串 + 收集到的日志
+        let _ = tx.send((String::new(), log_lines));
+    });
 
-    if tunnel_url.is_empty() {
-        let _ = child.kill();
-        return Err("未能从 cloudflared 输出中获取隧道 URL，请检查网络连接".to_string());
-    }
+    // 最多等待 30 秒
+    let tunnel_url = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok((url, _)) if !url.is_empty() => url,
+        Ok((_, logs)) => {
+            let _ = child.kill();
+            let log_text = logs.join("\n");
+
+            // 分析日志，给出精准原因
+            let hint = if log_text.contains("no such host")
+                || log_text.contains("lookup")
+                || log_text.contains("i/o timeout")
+            {
+                concat!(
+                    "\n⚠️  DNS 解析失败：cloudflared 无法解析 Cloudflare 的服务器域名。\n\n",
+                    "这是【系统 DNS】问题，不是代理问题。常见原因是路由器/局域网 DNS 失效。\n\n",
+                    "解决方法（任选其一）：\n",
+                    "  1. 把本机 DNS 改为公共 DNS：阿里 223.5.5.5 或 Google 8.8.8.8\n",
+                    "     （设置 → 网络 → 适配器 → IPv4 属性 → 使用下面的 DNS）\n",
+                    "  2. 临时切换到手机热点（热点自带可用的 DNS）\n",
+                    "  3. 重启路由器，恢复其 DNS 服务\n",
+                )
+            } else if log_text.contains("certificate") || log_text.contains("tls") || log_text.contains("x509") {
+                "\n⚠️  TLS 证书验证失败，可能是代理软件 MITM 证书未受信任。\n"
+            } else if log_text.contains("connection refused") || log_text.contains("connect: connection refused") {
+                "\n⚠️  连接被拒绝，请检查网络防火墙设置。\n"
+            } else if log_text.is_empty() {
+                "\n⚠️  cloudflared 无任何输出即退出，可能版本过旧或可执行文件损坏。\n"
+            } else {
+                ""
+            };
+
+            return Err(format!(
+                "cloudflared 已退出但未生成隧道 URL。{hint}\ncloudflared 输出：\n{log_text}"
+            ));
+        }
+        Err(_) => {
+            let _ = child.kill();
+            return Err(concat!(
+                "等待隧道 URL 超时（30秒）。\n\n",
+                "⚠️  最可能是【系统 DNS】无法解析 Cloudflare 服务器域名。\n\n",
+                "解决方法（任选其一）：\n",
+                "  1. 把本机 DNS 改为公共 DNS：阿里 223.5.5.5 或 Google 8.8.8.8\n",
+                "  2. 临时切换到手机热点\n",
+                "  3. 重启路由器，恢复其 DNS 服务\n",
+                "  4. 确认本地 Agent 已启动且端口正确"
+            ).to_string());
+        }
+    };
 
     // 把进程句柄存起来，供后续 stop 使用
     store.tunnels.lock().unwrap().insert(agent_id, (child, tunnel_url.clone()));

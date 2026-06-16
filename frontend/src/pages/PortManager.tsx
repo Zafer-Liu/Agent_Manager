@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
 import { RefreshCw, Zap, Search, AlertTriangle } from 'lucide-react'
 
@@ -11,6 +12,7 @@ interface PortInfo {
 }
 
 export function PortManager() {
+  const { t } = useTranslation()
   const [ports, setPorts] = useState<PortInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
@@ -59,8 +61,8 @@ export function PortManager() {
       <div className="border-b border-gray-200 bg-white px-6 py-4 dark:border-gray-700 dark:bg-gray-900">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Port Manager</h2>
-            <p className="text-xs text-gray-500 dark:text-gray-400">{ports.length} listening ports detected</p>
+            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">{t('ports.title')}</h2>
+            <p className="text-xs text-gray-500 dark:text-gray-400">{t('ports.subtitle', { count: ports.length })}</p>
           </div>
           <button
             onClick={load}
@@ -68,7 +70,7 @@ export function PortManager() {
             className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-40 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
+            {t('ports.refresh')}
           </button>
         </div>
 
@@ -78,7 +80,7 @@ export function PortManager() {
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Filter by port, process or PID..."
+            placeholder={t('ports.filterPlaceholder')}
             className="field-input pl-9"
           />
         </div>
@@ -101,19 +103,19 @@ export function PortManager() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50">
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Port</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Protocol</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Process</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">PID</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">State</th>
-                <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Action</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.port')}</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.protocol')}</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.process')}</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.pid')}</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.state')}</th>
+                <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.action')}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50 dark:divide-gray-800">
               {filtered.length === 0 && (
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-gray-400">
-                    {loading ? 'Loading...' : 'No ports found'}
+                    {loading ? t('ports.loading') : t('ports.noPorts')}
                   </td>
                 </tr>
               )}
@@ -146,7 +148,7 @@ export function PortManager() {
                       className="flex items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-40 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20 ml-auto"
                     >
                       <Zap className="h-3 w-3" />
-                      {killing === p.port ? 'Killing...' : 'Kill'}
+                      {killing === p.port ? t('ports.killing') : t('ports.kill')}
                     </button>
                   </td>
                 </tr>
@@ -165,22 +167,22 @@ export function PortManager() {
                 <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400" />
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 dark:text-gray-100">Kill Port {confirmKill.port}?</h3>
-                <p className="text-xs text-gray-500">Process: {confirmKill.process_name} (PID {confirmKill.pid})</p>
+                <h3 className="font-semibold text-gray-900 dark:text-gray-100">{t('ports.killConfirmTitle', { port: confirmKill.port })}</h3>
+                <p className="text-xs text-gray-500">{t('ports.killConfirmProcess', { name: confirmKill.process_name, pid: confirmKill.pid })}</p>
               </div>
             </div>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              This will forcefully terminate the process. Unsaved data may be lost.
+              {t('ports.killConfirmWarn')}
             </p>
             <div className="flex gap-2 justify-end">
               <button onClick={() => setConfirmKill(null)} className="px-3 py-1.5 text-sm text-gray-500 hover:bg-gray-100 rounded-lg dark:hover:bg-gray-800">
-                Cancel
+                {t('common.cancel')}
               </button>
               <button
                 onClick={() => doKill(confirmKill.port)}
                 className="px-3 py-1.5 text-sm bg-red-600 text-white rounded-lg hover:bg-red-500"
               >
-                Kill Process
+                {t('ports.killProcess')}
               </button>
             </div>
           </div>

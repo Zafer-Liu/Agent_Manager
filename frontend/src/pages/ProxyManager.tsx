@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
 import {
   Globe, Plus, Trash2, Eye, EyeOff, RefreshCw,
@@ -46,16 +47,16 @@ function copyText(text: string) {
 }
 
 // ════════════════════════════════════════════════════════════
-// 临时分享 Section
+// 临时分享 Section（Cloudflare Tunnel）
 // ════════════════════════════════════════════════════════════
 
 function TunnelSection({ agents }: { agents: AgentState[] }) {
+  const { t } = useTranslation()
   const [cloudflaredPath, setCloudflaredPath] = useState<string | null>(null)
   const [tunnels, setTunnels] = useState<Record<string, TunnelState>>({})
   const [copied, setCopied] = useState<string | null>(null)
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // 初始化：检测 cloudflared，恢复已有隧道
   useEffect(() => {
     invoke<string | null>('tunnel_check_cloudflared').then(setCloudflaredPath)
     invoke<Record<string, string>>('tunnel_list').then(existing => {
@@ -67,42 +68,32 @@ function TunnelSection({ agents }: { agents: AgentState[] }) {
     })
   }, [])
 
-  // 轮询检查活跃隧道是否还活着
+  // 轮询隧道存活状态
   useEffect(() => {
-    pollingRef.current = setInterval(async () => {
+    pollingRef.current = setInterval(() => {
       setTunnels(prev => {
         const active = Object.keys(prev).filter(id => prev[id].status === 'active')
-        if (active.length === 0) return prev
-        // 异步检查，不能直接用 async 在 setTunnels 里
         active.forEach(async (id) => {
           const alive = await invoke<boolean>('tunnel_alive', { agentId: id })
-          if (!alive) {
-            setTunnels(p => ({
-              ...p,
-              [id]: { status: 'idle', url: '', error: '隧道已断开' },
-            }))
-          }
+          if (!alive) setTunnels(p => ({ ...p, [id]: { status: 'idle', url: '', error: t('proxy.tunnelDisconnected') } }))
         })
         return prev
       })
     }, 8000)
     return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
-  }, [])
+  }, [t])
 
   const activeAgents = agents.filter(a => a.config.port)
+  const canStart = !!cloudflaredPath
 
   async function startTunnel(agentId: string) {
     const agent = agents.find(a => a.config.id === agentId)
     if (!agent?.config.port) return
-
     setTunnels(prev => ({ ...prev, [agentId]: { status: 'connecting', url: '', error: '' } }))
     try {
-      const url = await invoke<string>('tunnel_start', {
-        agentId,
-        port: agent.config.port,
-      })
+      const url = await invoke<string>('tunnel_start', { agentId, port: agent.config.port })
       setTunnels(prev => ({ ...prev, [agentId]: { status: 'active', url, error: '' } }))
-    } catch (e: any) {
+    } catch (e: unknown) {
       setTunnels(prev => ({ ...prev, [agentId]: { status: 'error', url: '', error: String(e) } }))
     }
   }
@@ -113,54 +104,47 @@ function TunnelSection({ agents }: { agents: AgentState[] }) {
   }
 
   function handleCopy(url: string, agentId: string) {
-    copyText(url)
-    setCopied(agentId)
-    setTimeout(() => setCopied(null), 2000)
+    copyText(url); setCopied(agentId); setTimeout(() => setCopied(null), 2000)
   }
 
   return (
     <section>
       <div className="flex items-center gap-2 mb-3">
         <Link className="h-4 w-4 text-blue-500" />
-        <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">临时分享链接</h2>
+        <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">{t('proxy.tunnelTitle')}</h2>
         <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">
-          推荐
+          {t('proxy.recommended')}
         </span>
       </div>
 
-      {/* 说明 */}
-      <p className="mb-3 text-xs text-gray-400 dark:text-gray-500 leading-relaxed">
-        通过 Cloudflare Tunnel 生成临时公网链接，无需固定 IP 或域名。开会时分享给同事，关闭后链接自动失效。
-      </p>
+      {/* 方案说明 */}
+      <div className="mb-3 space-y-1.5">
+        <p className="text-xs text-gray-400 dark:text-gray-500 leading-relaxed">
+          {t('proxy.tunnelDesc')}
+        </p>
+        <p className="text-xs text-amber-500 dark:text-amber-400 leading-relaxed">
+          {t('proxy.dnsHint')}
+        </p>
+      </div>
 
-      {/* 未安装 cloudflared */}
-      {!cloudflaredPath && (
+      {/* 未安装 cloudflared 提示 */}
+      {!canStart && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800/50 dark:bg-amber-900/20">
           <div className="flex items-start gap-3">
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
             <div className="text-sm text-amber-800 dark:text-amber-300">
-              <p className="font-medium mb-1">未检测到 cloudflared</p>
-              <p className="text-xs leading-relaxed mb-2">请先安装 Cloudflare Tunnel 客户端：</p>
-              <div className="space-y-1.5 font-mono text-xs">
-                <div>
-                  <span className="text-amber-600 mr-2">方式一（Scoop）：</span>
-                  <code className="rounded bg-amber-100 px-2 py-0.5 dark:bg-amber-900/40 select-all">
-                    scoop install cloudflared
-                  </code>
+              <p className="font-medium mb-1">{t('proxy.noCloudflared')}</p>
+              <div className="space-y-1 font-mono text-xs">
+                <div><span className="text-amber-600 mr-2">Scoop：</span>
+                  <code className="rounded bg-amber-100 px-2 py-0.5 dark:bg-amber-900/40 select-all">scoop install cloudflared</code>
                 </div>
-                <div>
-                  <span className="text-amber-600 mr-2">方式二（直接下载）：</span>
-                  <span className="text-amber-700 dark:text-amber-400">
-                    从 GitHub Releases 下载 cloudflared-windows-amd64.exe，
-                    重命名为 cloudflared.exe，放入 C:\Windows\System32 或任意 PATH 目录
-                  </span>
+                <div><span className="text-amber-600 mr-2">winget：</span>
+                  <code className="rounded bg-amber-100 px-2 py-0.5 dark:bg-amber-900/40 select-all">winget install Cloudflare.cloudflared</code>
                 </div>
               </div>
-              <button
-                onClick={() => invoke<string | null>('tunnel_check_cloudflared').then(setCloudflaredPath)}
-                className="mt-3 flex items-center gap-1 text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400"
-              >
-                <RefreshCw className="h-3 w-3" /> 重新检测
+              <button onClick={() => invoke<string | null>('tunnel_check_cloudflared').then(setCloudflaredPath)}
+                className="mt-3 flex items-center gap-1 text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400">
+                <RefreshCw className="h-3 w-3" /> {t('proxy.recheckBtn')}
               </button>
             </div>
           </div>
@@ -168,7 +152,7 @@ function TunnelSection({ agents }: { agents: AgentState[] }) {
       )}
 
       {/* 已安装 — 显示路径 */}
-      {cloudflaredPath && (
+      {canStart && (
         <div className="mb-4 flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500">
           <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
           <span className="font-mono truncate">{cloudflaredPath}</span>
@@ -178,16 +162,16 @@ function TunnelSection({ agents }: { agents: AgentState[] }) {
       {/* Agent 列表 */}
       {activeAgents.length === 0 ? (
         <div className="rounded-xl border border-gray-200 bg-white py-8 text-center text-sm text-gray-400 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-600">
-          没有配置了端口的 Agent，请先在 Agents 页面配置端口
+          {t('proxy.noPortAgents')}
         </div>
       ) : (
         <div className="rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900 overflow-hidden">
           <div className="divide-y divide-gray-100 dark:divide-gray-800">
             {activeAgents.map(agent => {
-              const t = tunnels[agent.config.id] ?? { status: 'idle', url: '', error: '' }
-              const isConnecting = t.status === 'connecting'
-              const isActive = t.status === 'active'
-              const isError = t.status === 'error'
+              const tunnel = tunnels[agent.config.id] ?? { status: 'idle', url: '', error: '' }
+              const isConnecting = tunnel.status === 'connecting'
+              const isActive = tunnel.status === 'active'
+              const isError = tunnel.status === 'error'
 
               return (
                 <div key={agent.config.id} className="p-4">
@@ -201,89 +185,64 @@ function TunnelSection({ agents }: { agents: AgentState[] }) {
                     }`}>
                       {isConnecting
                         ? <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />
-                        : isActive
-                          ? <Wifi className="h-4 w-4 text-green-500" />
-                          : isError
-                            ? <WifiOff className="h-4 w-4 text-red-500" />
-                            : <Globe className="h-4 w-4 text-gray-400" />
-                      }
+                        : isActive ? <Wifi className="h-4 w-4 text-green-500" />
+                        : isError ? <WifiOff className="h-4 w-4 text-red-500" />
+                        : <Globe className="h-4 w-4 text-gray-400" />}
                     </div>
 
                     {/* Agent 信息 */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
-                          {agent.config.name}
-                        </span>
+                        <span className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">{agent.config.name}</span>
                         <span className="shrink-0 text-xs text-gray-400">:{agent.config.port}</span>
-                        {/* 运行状态 */}
-                        {agent.status === 'running' ? (
-                          <span className="shrink-0 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-600 dark:bg-green-900/30 dark:text-green-400">运行中</span>
-                        ) : (
-                          <span className="shrink-0 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-400 dark:bg-gray-800 dark:text-gray-500">已停止</span>
-                        )}
+                        {agent.status === 'running'
+                          ? <span className="shrink-0 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-600 dark:bg-green-900/30 dark:text-green-400">{t('proxy.statusRunning')}</span>
+                          : <span className="shrink-0 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-400 dark:bg-gray-800 dark:text-gray-500">{t('proxy.statusStopped')}</span>}
                       </div>
 
-                      {/* 隧道 URL */}
                       {isActive && (
                         <div className="mt-1 flex items-center gap-2">
-                          <span className="font-mono text-xs text-blue-600 dark:text-blue-400 truncate">
-                            {t.url}
-                          </span>
-                          <button
-                            onClick={() => handleCopy(t.url, agent.config.id)}
-                            className="shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors"
-                          >
+                          <span className="font-mono text-xs text-blue-600 dark:text-blue-400 truncate">{tunnel.url}</span>
+                          <button onClick={() => handleCopy(tunnel.url, agent.config.id)}
+                            className="shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors">
                             {copied === agent.config.id
-                              ? <><CheckCircle className="h-3 w-3 text-green-500" /> 已复制</>
-                              : <><Copy className="h-3 w-3" /> 复制</>
-                            }
+                              ? <><CheckCircle className="h-3 w-3 text-green-500" /> {t('common.copied')}</>
+                              : <><Copy className="h-3 w-3" /> {t('common.copy')}</>}
                           </button>
-                          <a
-                            href={t.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300"
-                          >
-                            <ExternalLink className="h-3 w-3" /> 打开
+                          <a href={tunnel.url} target="_blank" rel="noreferrer"
+                            className="shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300">
+                            <ExternalLink className="h-3 w-3" /> {t('common.open')}
                           </a>
                         </div>
                       )}
 
-                      {/* 连接中提示 */}
                       {isConnecting && (
                         <p className="mt-1 text-xs text-blue-500 dark:text-blue-400 animate-pulse">
-                          正在连接到 Cloudflare，通常需要 5-15 秒…
+                          {t('proxy.generating')}
                         </p>
                       )}
 
-                      {/* 错误信息 */}
                       {isError && (
-                        <p className="mt-1 text-xs text-red-500 dark:text-red-400 truncate" title={t.error}>
-                          {t.error}
-                        </p>
+                        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-red-50 px-3 py-2 text-[11px] leading-relaxed text-red-600 dark:bg-red-900/30 dark:text-red-400">
+                          {tunnel.error}
+                        </pre>
                       )}
                     </div>
 
                     {/* 操作按钮 */}
                     <div className="shrink-0">
                       {isActive ? (
-                        <button
-                          onClick={() => stopTunnel(agent.config.id)}
-                          className="flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20 transition-colors"
-                        >
-                          <Square className="h-3.5 w-3.5" /> 关闭
+                        <button onClick={() => stopTunnel(agent.config.id)}
+                          className="flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20 transition-colors">
+                          <Square className="h-3.5 w-3.5" /> {t('common.close')}
                         </button>
                       ) : (
-                        <button
-                          onClick={() => startTunnel(agent.config.id)}
-                          disabled={isConnecting || !cloudflaredPath}
-                          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40 transition-colors"
-                        >
+                        <button onClick={() => startTunnel(agent.config.id)}
+                          disabled={isConnecting || !canStart}
+                          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40 transition-colors">
                           {isConnecting
-                            ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> 连接中</>
-                            : <><Play className="h-3.5 w-3.5" /> 生成链接</>
-                          }
+                            ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('proxy.connecting')}</>
+                            : <><Play className="h-3.5 w-3.5" /> {t('proxy.generateLink')}</>}
                         </button>
                       )}
                     </div>
@@ -297,9 +256,8 @@ function TunnelSection({ agents }: { agents: AgentState[] }) {
 
       {/* 使用说明 */}
       <div className="mt-3 rounded-lg bg-gray-50 p-3 dark:bg-gray-900/50 text-xs text-gray-400 dark:text-gray-500 leading-relaxed">
-        <span className="font-medium text-gray-500 dark:text-gray-400">注意：</span>
-        临时链接无需登录即可访问，请仅在开会时开启，会后及时关闭。
-        链接在程序关闭或点击"关闭"后自动失效。
+        <span className="font-medium text-gray-500 dark:text-gray-400">{t('proxy.tunnelNoteLabel')}</span>
+        {t('proxy.tunnelNote')}
       </div>
     </section>
   )
@@ -312,6 +270,7 @@ function TunnelSection({ agents }: { agents: AgentState[] }) {
 interface Props { agents: AgentState[] }
 
 export function ProxyManager({ agents }: Props) {
+  const { t } = useTranslation()
   const [config, setConfig] = useState<ProxyConfig>({
     users: [], rules: [], caddy_path: null, admin_port: null,
   })
@@ -344,13 +303,13 @@ export function ProxyManager({ agents }: Props) {
 
   useEffect(() => {
     refresh()
-    const t = setInterval(() => invoke<boolean>('proxy_status').then(setIsRunning), 5000)
-    return () => clearInterval(t)
+    const timer = setInterval(() => invoke<boolean>('proxy_status').then(setIsRunning), 5000)
+    return () => clearInterval(timer)
   }, [refresh])
 
   async function addUser() {
     if (!newUsername.trim() || !newPassword.trim()) return
-    if (!caddyPath) { flash('请先安装 Caddy', false); return }
+    if (!caddyPath) { flash(t('proxy.installCaddyFirst'), false); return }
     setAddingUser(true)
     try {
       const hash = await invoke<string>('proxy_hash_password', { caddyPath, plaintext: newPassword })
@@ -358,8 +317,8 @@ export function ProxyManager({ agents }: Props) {
       const updated: ProxyConfig = { ...config, users: [...config.users.filter(u => u.username !== user.username), user] }
       await invoke('proxy_save_config', { config: updated })
       setConfig(updated); setNewUsername(''); setNewPassword('')
-      flash(`用户 ${user.username} 已添加`, true)
-    } catch (e: any) { flash(String(e), false) }
+      flash(t('proxy.userAdded', { name: user.username }), true)
+    } catch (e: unknown) { flash(String(e), false) }
     finally { setAddingUser(false) }
   }
 
@@ -402,17 +361,17 @@ export function ProxyManager({ agents }: Props) {
   }
 
   async function applyProxy() {
-    if (!caddyPath) { flash('未找到 Caddy，请先安装', false); return }
+    if (!caddyPath) { flash(t('proxy.caddyNotFound'), false); return }
     setBusy(true)
     try { flash(await invoke<string>('proxy_apply', { config }), true); setIsRunning(true) }
-    catch (e: any) { flash(String(e), false) }
+    catch (e: unknown) { flash(String(e), false) }
     finally { setBusy(false) }
   }
 
   async function stopProxy() {
     setBusy(true)
     try { flash(await invoke<string>('proxy_stop'), true); setIsRunning(false) }
-    catch (e: any) { flash(String(e), false) }
+    catch (e: unknown) { flash(String(e), false) }
     finally { setBusy(false) }
   }
 
@@ -434,8 +393,8 @@ export function ProxyManager({ agents }: Props) {
           <Globe className="h-4 w-4 text-blue-600 dark:text-blue-400" />
         </div>
         <div>
-          <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">代理发布</h1>
-          <p className="text-xs text-gray-400 dark:text-gray-500">临时分享或长期发布 Agent 到公网</p>
+          <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('proxy.title')}</h1>
+          <p className="text-xs text-gray-400 dark:text-gray-500">{t('proxy.subtitle')}</p>
         </div>
       </div>
 
@@ -458,7 +417,7 @@ export function ProxyManager({ agents }: Props) {
         {/* ── 分隔线 ── */}
         <div className="flex items-center gap-3">
           <div className="flex-1 border-t border-gray-200 dark:border-gray-800" />
-          <span className="text-xs text-gray-400">高级 · 长期发布</span>
+          <span className="text-xs text-gray-400">{t('proxy.advanced')}</span>
           <div className="flex-1 border-t border-gray-200 dark:border-gray-800" />
         </div>
 
@@ -469,8 +428,8 @@ export function ProxyManager({ agents }: Props) {
             className="flex w-full items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-gray-800/50"
           >
             <Shield className="h-4 w-4 text-gray-400" />
-            <span className="flex-1 text-left font-medium">Caddy 反向代理</span>
-            <span className="text-xs text-gray-400">固定域名 + 用户名密码保护</span>
+            <span className="flex-1 text-left font-medium">{t('proxy.caddyTitle')}</span>
+            <span className="text-xs text-gray-400">{t('proxy.caddySubtitle')}</span>
             {showCaddy ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </button>
 
@@ -484,9 +443,9 @@ export function ProxyManager({ agents }: Props) {
                   : isRunning ? 'bg-green-50 text-green-600 dark:bg-green-900/30 dark:text-green-400'
                   : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
                 }`}>
-                  {!caddyPath ? <><XCircle className="h-3 w-3" /> 未安装 Caddy</>
-                  : isRunning ? <><CheckCircle className="h-3 w-3" /> 运行中</>
-                  : <><Square className="h-3 w-3" /> 已停止</>}
+                  {!caddyPath ? <><XCircle className="h-3 w-3" /> {t('proxy.caddyNotInstalled')}</>
+                  : isRunning ? <><CheckCircle className="h-3 w-3" /> {t('proxy.statusRunning')}</>
+                  : <><Square className="h-3 w-3" /> {t('proxy.statusStopped')}</>}
                 </div>
                 <button onClick={refresh} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
                   <RefreshCw className="h-4 w-4" />
@@ -499,7 +458,7 @@ export function ProxyManager({ agents }: Props) {
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
                     <div className="text-xs text-amber-800 dark:text-amber-300 space-y-1">
-                      <p className="font-medium">未检测到 Caddy</p>
+                      <p className="font-medium">{t('proxy.caddyNotInstalled')}</p>
                       <div className="font-mono space-y-1">
                         <div><span className="text-amber-600">Windows: </span><code className="bg-amber-100 rounded px-1 dark:bg-amber-900/40">scoop install caddy</code></div>
                         <div><span className="text-amber-600">Mac: </span><code className="bg-amber-100 rounded px-1 dark:bg-amber-900/40">brew install caddy</code></div>
@@ -514,7 +473,7 @@ export function ProxyManager({ agents }: Props) {
               <div>
                 <div className="flex items-center gap-2 mb-2">
                   <Users className="h-3.5 w-3.5 text-gray-400" />
-                  <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-400">访问用户</h3>
+                  <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-400">{t('proxy.accessUsers')}</h3>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900 overflow-hidden">
                   {config.users.map(user => (
@@ -530,11 +489,11 @@ export function ProxyManager({ agents }: Props) {
                   ))}
                   <div className="flex items-center gap-2 p-3 bg-gray-50 dark:bg-gray-900/50">
                     <input value={newUsername} onChange={e => setNewUsername(e.target.value)}
-                      placeholder="用户名" onKeyDown={e => e.key === 'Enter' && addUser()}
+                      placeholder={t('proxy.username')} onKeyDown={e => e.key === 'Enter' && addUser()}
                       className="flex-1 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-blue-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100" />
                     <div className="relative">
                       <input type={showPwd ? 'text' : 'password'} value={newPassword}
-                        onChange={e => setNewPassword(e.target.value)} placeholder="密码"
+                        onChange={e => setNewPassword(e.target.value)} placeholder={t('proxy.password')}
                         onKeyDown={e => e.key === 'Enter' && addUser()}
                         className="w-32 rounded-lg border border-gray-200 bg-white px-3 py-1.5 pr-8 text-sm outline-none focus:border-blue-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100" />
                       <button onClick={() => setShowPwd(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400">
@@ -543,11 +502,11 @@ export function ProxyManager({ agents }: Props) {
                     </div>
                     <button onClick={addUser} disabled={addingUser || !newUsername.trim() || !newPassword.trim() || !caddyPath}
                       className="flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40">
-                      {addingUser ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} 添加
+                      {addingUser ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} {t('common.add')}
                     </button>
                   </div>
                   {config.users.length === 0 && (
-                    <p className="py-4 text-center text-xs text-gray-400 dark:text-gray-600">暂无用户</p>
+                    <p className="py-4 text-center text-xs text-gray-400 dark:text-gray-600">{t('proxy.noUsers')}</p>
                   )}
                 </div>
               </div>
@@ -556,10 +515,10 @@ export function ProxyManager({ agents }: Props) {
               <div>
                 <div className="flex items-center gap-2 mb-2">
                   <Server className="h-3.5 w-3.5 text-gray-400" />
-                  <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-400">代理规则</h3>
+                  <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-400">{t('proxy.proxyRules')}</h3>
                   <button onClick={() => setShowRuleForm(v => !v)}
                     className="ml-auto flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800">
-                    <Plus className="h-3 w-3" /> 添加
+                    <Plus className="h-3 w-3" /> {t('common.add')}
                   </button>
                 </div>
 
@@ -567,20 +526,20 @@ export function ProxyManager({ agents }: Props) {
                   <div className="mb-2 rounded-xl border border-blue-200 bg-blue-50 p-3 dark:border-blue-800/50 dark:bg-blue-900/20 space-y-2">
                     <div className="grid grid-cols-2 gap-2">
                       <div>
-                        <label className="block text-[10px] text-gray-500 mb-1">对外域名 / 端口</label>
+                        <label className="block text-[10px] text-gray-500 mb-1">{t('proxy.domain')}</label>
                         <input value={ruleForm.domain ?? ''} onChange={e => setRuleForm(f => ({ ...f, domain: e.target.value }))}
-                          placeholder=":8443 或 agent.example.com"
+                          placeholder={t('proxy.domainPlaceholder')}
                           className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100" />
                       </div>
                       <div>
-                        <label className="block text-[10px] text-gray-500 mb-1">转发到 Agent</label>
+                        <label className="block text-[10px] text-gray-500 mb-1">{t('proxy.forwardTo')}</label>
                         <select value={ruleForm.target_port ?? ''}
                           onChange={e => {
                             const agent = agents.find(a => String(a.config.port) === e.target.value)
                             setRuleForm(f => ({ ...f, target_port: Number(e.target.value), agent_name: agent?.config.name ?? '' }))
                           }}
                           className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
-                          <option value="">选择 Agent</option>
+                          <option value="">{t('proxy.selectAgent')}</option>
                           {agents.filter(a => a.config.port).map(a => (
                             <option key={a.config.id} value={a.config.port!}>{a.config.name} (:{a.config.port})</option>
                           ))}
@@ -590,20 +549,20 @@ export function ProxyManager({ agents }: Props) {
                     <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer">
                       <input type="checkbox" checked={ruleForm.https ?? false}
                         onChange={e => setRuleForm(f => ({ ...f, https: e.target.checked }))} className="accent-blue-500" />
-                      启用 HTTPS（需要真实域名）
+                      {t('proxy.enableHttps')}
                     </label>
                     <div className="flex justify-end gap-2">
                       <button onClick={() => { setShowRuleForm(false); setRuleForm({ https: false, allowed_users: [] }) }}
-                        className="rounded px-3 py-1 text-xs text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800">取消</button>
+                        className="rounded px-3 py-1 text-xs text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800">{t('common.cancel')}</button>
                       <button onClick={addRule} disabled={!ruleForm.domain || !ruleForm.target_port}
-                        className="rounded-lg bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40">保存</button>
+                        className="rounded-lg bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40">{t('common.save')}</button>
                     </div>
                   </div>
                 )}
 
                 <div className="rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900 overflow-hidden">
                   {config.rules.length === 0 ? (
-                    <p className="py-6 text-center text-xs text-gray-400 dark:text-gray-600">暂无规则</p>
+                    <p className="py-6 text-center text-xs text-gray-400 dark:text-gray-600">{t('proxy.noRules')}</p>
                   ) : config.rules.map(rule => (
                     <div key={rule.id} className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 dark:border-gray-800 last:border-0">
                       <Globe className="h-4 w-4 text-green-500 shrink-0" />
@@ -640,7 +599,7 @@ export function ProxyManager({ agents }: Props) {
               <button onClick={() => showPreview ? setShowPreview(false) : loadPreview()}
                 className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
                 <Shield className="h-3.5 w-3.5" />
-                {showPreview ? '隐藏' : '预览'} Caddyfile
+                {showPreview ? t('proxy.hideCaddyfile') : t('proxy.previewCaddyfile')}
                 {showPreview ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
               </button>
               {showPreview && (
@@ -648,11 +607,11 @@ export function ProxyManager({ agents }: Props) {
                   <div className="flex items-center justify-between px-4 py-2 border-b border-gray-700">
                     <span className="text-xs text-gray-400 font-mono">Caddyfile</span>
                     <button onClick={() => copyText(caddyfilePreview)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200">
-                      <Copy className="h-3 w-3" /> 复制
+                      <Copy className="h-3 w-3" /> {t('common.copy')}
                     </button>
                   </div>
                   <pre className="p-4 text-xs text-green-400 font-mono overflow-x-auto whitespace-pre">
-                    {caddyfilePreview || '（无规则）'}
+                    {caddyfilePreview || t('proxy.caddyfileEmpty')}
                   </pre>
                 </div>
               )}
@@ -662,13 +621,13 @@ export function ProxyManager({ agents }: Props) {
                 {isRunning && (
                   <button onClick={stopProxy} disabled={busy}
                     className="flex items-center gap-1.5 rounded-lg border border-red-200 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20">
-                    <Square className="h-4 w-4" /> 停止
+                    <Square className="h-4 w-4" /> {t('proxy.stopProxy')}
                   </button>
                 )}
                 <button onClick={applyProxy} disabled={busy || !caddyPath || config.rules.length === 0}
                   className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-40">
                   {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                  {isRunning ? '重新应用' : '启动代理'}
+                  {isRunning ? t('proxy.reapply') : t('proxy.applyProxy')}
                 </button>
               </div>
 

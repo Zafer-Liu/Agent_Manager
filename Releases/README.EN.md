@@ -1,7 +1,7 @@
-# Agent Manager v0.2.0
+# Agent Manager v0.2.3
 
-> **Release Date:** June 2026  
-> **Type:** Major Feature Release
+> **Release Date:** June 16, 2026
+> **Type:** Feature and Stability Update
 
 ---
 
@@ -9,86 +9,65 @@
 
 | Platform | File | Notes |
 |----------|------|-------|
-| Windows (x64) | `agent-manager_0.2.0.exe` | NSIS installer — double-click to install |
-| macOS (Intel) | *(coming soon)* | `.dmg` format |
+| Windows (x64) | `智管-Agent Manager_0.2.3_x64-setup.exe` | NSIS installer |
+| macOS | *(coming soon)* | Intel / Apple Silicon |
 
-> **Windows security note:** If you see an "Unknown Publisher" warning, click **More info → Run anyway**. The installer is unsigned; this is expected.
-
----
-
-## ✨ What's New in v0.2.0
-
-### 🤖 Manager Agent — Natural-Language Commander
-
-Control all your Agents with plain text. No clicking required:
-
-```
-Start the Business Analytics Agent and open its interface.
-Stop Mindmap and tell me what it does.
-Which Agents are currently running?
-```
-
-Supported actions: start/stop, open UI, open terminal, read Agent README, navigate to any page. Chat history persists when you switch pages and come back.
-
-> Requires an LLM provider — DeepSeek, OpenAI, or any OpenAI-compatible API.
+> **Windows security note:** If Windows shows an “Unknown Publisher” warning, select **More info → Run anyway**. The installer is not code-signed yet.
 
 ---
 
-### 🏫 Dashboard — Classroom View
+## ✨ What's New in v0.2.3
 
-All Agents visualized in a classroom layout: Manager Agent at the podium, others in student seats. See every Agent's status at a glance. Hover to start/stop, view details, or open the UI — without leaving the page.
+### 🔀 Visual Workflows
 
----
+- Compose MCP tools, LLM steps, and complete MCP Agent nodes with drag and drop
+- Let an MCP Agent node use every tool exposed by its selected server
+- Select and execute workflows directly from the chat page
+- Follow streamed steps, expand long output, and inspect failures before the final summary
 
-### 🌐 Agent Publishing — One-Click Public Access
+### 🧩 MCP Agent and Smart Configuration
 
-No fixed IP, domain name, or server needed:
+- Enable multiple MCP servers in one conversation
+- Inspect tool calls through collapsible execution steps
+- Scan local MCP packages or configure stdio and SSE servers manually
+- Parse JSON, commands, README excerpts, or URLs into MCP configuration with an LLM
+- Persist the selected LLM, enabled servers, and active workflow
 
-- **Cloudflare Tunnel (temporary):** generates `https://xxx.trycloudflare.com` in seconds. Close the link after your meeting and it expires immediately — ideal for demos.
-- **Caddy Reverse Proxy (permanent):** bind a custom domain with automatic HTTPS, add username/password access control with bcrypt storage, manage per-route permissions for multiple users.
+### 🌐 Chinese and English UI
 
----
+- Added an in-app Chinese / English language switcher
+- Main pages, forms, statuses, and errors now use the i18n system
 
-### 💻 PTY Interactive Terminal
+### ✅ Continuous Integration
 
-A real embedded PTY terminal with full support for TUI tools like Claude Code. No more switching to an external terminal window.
-
----
-
-### 🔍 Enhanced Python Auto-Detection
-
-Newly supported: **FastAPI, Django, Streamlit, uv / pyproject.toml**. Select a project folder and Agent Manager fills in the correct startup command and port automatically.
+- Pushes and pull requests run ESLint, the TypeScript/Vite build, and Rust tests
+- Releases reuse the same checks before cross-platform packaging
 
 ---
 
 ## 🐛 Bug Fixes
 
-| Issue | Details |
-|-------|---------|
-| Full-screen freeze after starting Agent from Dashboard | Fixed UI freeze caused by state update ordering |
-| Mindmap (Node.js) entering REPL on startup | Fixed PTY interaction-mode detection for npm global packages |
-| Dev-port conflict with other Vite projects | Changed dev port from 5173 to 1420 |
+| Issue | Fix |
+|-------|-----|
+| **Parse with AI** appeared to do nothing | Errors are always visible and include the actual HTTP/API message |
+| Chinese README parsing could fail | Text is now truncated safely on Unicode character boundaries |
+| MCP Agent workflow requests could fail | Blocking MCP stdio and asynchronous LLM HTTP work are separated |
+| Workflow context was passed incorrectly | Prompt/task semantics and output fallbacks were corrected |
+| Expanded workflow output remained truncated | Line clamping is removed after expansion |
+| MCP selections disappeared after restart | Relevant selections are now persisted in localStorage |
 
 ---
 
-## 🔄 Upgrading from v0.1.0
+## 🔄 Upgrading from v0.2.2
 
-Install the new package directly over the old one. Agent configuration data in `%APPDATA%\agent-manager\` is preserved.
+Install v0.2.3 over the previous version. Agent, LLM, proxy, and MCP configuration data is preserved.
 
----
-
-## 📋 Known Limitations
-
-- macOS build is not included in this release; it is in progress.
-- When multiple users access the same Agent simultaneously, conversation history is managed by the Agent itself — Agent Manager cannot isolate sessions externally.
+After upgrading, test the configured LLM again and confirm that the MCP servers you need are enabled.
 
 ---
 
-## 🤝 Feedback & Contributing
+## 📜 Previous Releases
 
-- **Bug reports / feature requests:** [GitHub Issues](https://github.com/Zafer-Liu/Agent_MCP_Manager/issues)
-- **Code contributions:** PRs welcome
-
----
-
-*[View full documentation →](https://github.com/Zafer-Liu/Agent_MCP_Manager#readme)*
+- **v0.2.2:** Workflows, MCP Agent nodes, internationalization, and persistent MCP selections
+- **v0.2.1:** GitHub Agent installation, recommended projects, proxy detection, and Tauri permission fixes
+- **v0.2.0:** Manager Agent, Dashboard, PTY terminal, Agent publishing, and project auto-detection

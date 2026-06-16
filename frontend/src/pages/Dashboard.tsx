@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { AgentState } from '../types/agent'
 import { Play, Square, Crown, Moon, Zap, AlertTriangle, Loader2, MessageSquare } from 'lucide-react'
 
@@ -31,6 +32,7 @@ export function Dashboard({
   onNavigateToAgents,
   onOpenManagerAgent,
 }: DashboardProps) {
+  const { t } = useTranslation()
   const [hoveredSeat, setHoveredSeat] = useState<number | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
@@ -72,20 +74,20 @@ export function Dashboard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Crown className="h-5 w-5 text-amber-500" />
-            <span className="text-base font-semibold text-gray-900 dark:text-gray-100">Dashboard</span>
+            <span className="text-base font-semibold text-gray-900 dark:text-gray-100">{t('dashboard.title')}</span>
           </div>
           <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
             <span className="flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full bg-green-400" />
-              {runningCount} 运行中
+              {t('dashboard.running', { count: runningCount })}
             </span>
             {errorCount > 0 && (
               <span className="flex items-center gap-1.5 text-red-500">
                 <span className="h-2 w-2 rounded-full bg-red-400" />
-                {errorCount} 异常
+                {t('dashboard.errors', { count: errorCount })}
               </span>
             )}
-            <span>{agents.length} / {TOTAL_SEATS} agents</span>
+            <span>{t('dashboard.seats', { count: agents.length, total: TOTAL_SEATS })}</span>
           </div>
         </div>
       </div>
@@ -109,8 +111,8 @@ export function Dashboard({
             </div>
 
             <div className="text-center">
-              <p className="text-sm font-bold text-amber-700 dark:text-amber-400">Manager Agent</p>
-              <p className="text-xs text-amber-600/70 dark:text-amber-500/70">点击对话 · 指挥所有 agent</p>
+              <p className="text-sm font-bold text-amber-700 dark:text-amber-400">{t('dashboard.managerName')}</p>
+              <p className="text-xs text-amber-600/70 dark:text-amber-500/70">{t('dashboard.managerHint')}</p>
             </div>
 
             {/* Chat bubble hint */}
@@ -123,7 +125,7 @@ export function Dashboard({
         {/* ── Divider: "讲台" label ── */}
         <div className="mb-6 flex items-center gap-3">
           <div className="flex-1 border-t border-dashed border-gray-300 dark:border-gray-700" />
-          <span className="text-xs font-medium text-gray-400 dark:text-gray-600 uppercase tracking-widest">学生席</span>
+          <span className="text-xs font-medium text-gray-400 dark:text-gray-600 uppercase tracking-widest">{t('dashboard.studentSeats')}</span>
           <div className="flex-1 border-t border-dashed border-gray-300 dark:border-gray-700" />
         </div>
 
@@ -131,12 +133,12 @@ export function Dashboard({
         {agents.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
             <div className="text-5xl">🏫</div>
-            <p className="text-sm">还没有 agent</p>
+            <p className="text-sm">{t('dashboard.noAgents')}</p>
             <button
               onClick={onNavigateToAgents}
               className="text-sm text-blue-500 hover:text-blue-400"
             >
-              去 Agents 页面添加
+              {t('dashboard.goAddAgents')}
             </button>
           </div>
         ) : (
@@ -167,7 +169,7 @@ export function Dashboard({
         {/* Overflow agents hint */}
         {agents.length > TOTAL_SEATS && (
           <div className="mt-4 text-center text-xs text-gray-400">
-            还有 {agents.length - TOTAL_SEATS} 个 agent 未显示（教室已满）
+            {t('dashboard.overflowHint', { count: agents.length - TOTAL_SEATS })}
           </div>
         )}
       </div>
@@ -190,6 +192,7 @@ interface SeatCardProps {
 }
 
 function SeatCard({ agent, isHovered, isLoading, onHover, onLeave, onClick, onStart, onStop }: SeatCardProps) {
+  const { t } = useTranslation()
   if (!agent) {
     return (
       <div className="flex aspect-[3/4] flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-800 opacity-40">
@@ -245,11 +248,11 @@ function SeatCard({ agent, isHovered, isLoading, onHover, onLeave, onClick, onSt
           ) : (
             <div className="flex gap-2">
               {status === 'running' || status === 'starting' ? (
-                <ControlBtn icon={<Square className="h-4 w-4" />} label="停止" danger onClick={onStop} />
+                <ControlBtn icon={<Square className="h-4 w-4" />} label={t('dashboard.ctrlStop')} danger onClick={onStop} />
               ) : (
-                <ControlBtn icon={<Play className="h-4 w-4" />} label="启动" onClick={onStart} />
+                <ControlBtn icon={<Play className="h-4 w-4" />} label={t('dashboard.ctrlStart')} onClick={onStart} />
               )}
-              <ControlBtn icon={<MessageSquare className="h-4 w-4" />} label="详情" onClick={(e) => { e.stopPropagation(); onClick() }} />
+              <ControlBtn icon={<MessageSquare className="h-4 w-4" />} label={t('dashboard.ctrlDetail')} onClick={(e) => { e.stopPropagation(); onClick() }} />
             </div>
           )}
         </div>
@@ -310,16 +313,17 @@ function AgentAvatar({ agent, status }: { agent: AgentState; status: string }) {
 // ── StatusLabel ───────────────────────────────────────────────────────────────
 
 function StatusLabel({ status }: { status: string }) {
-  const map: Record<string, { icon: React.ReactNode; label: string; cls: string }> = {
-    running:  { icon: <Zap className="h-2.5 w-2.5" />,           label: '工作中', cls: 'text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/30' },
-    stopped:  { icon: <Moon className="h-2.5 w-2.5" />,          label: '休息',   cls: 'text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800' },
-    error:    { icon: <AlertTriangle className="h-2.5 w-2.5" />, label: '异常',   cls: 'text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/30' },
-    starting: { icon: <Loader2 className="h-2.5 w-2.5 animate-spin" />, label: '启动中', cls: 'text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/30' },
+  const { t } = useTranslation()
+  const map: Record<string, { icon: React.ReactNode; labelKey: string; cls: string }> = {
+    running:  { icon: <Zap className="h-2.5 w-2.5" />,           labelKey: 'dashboard.labelWorking', cls: 'text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/30' },
+    stopped:  { icon: <Moon className="h-2.5 w-2.5" />,          labelKey: 'dashboard.labelResting', cls: 'text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800' },
+    error:    { icon: <AlertTriangle className="h-2.5 w-2.5" />, labelKey: 'dashboard.labelError',   cls: 'text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/30' },
+    starting: { icon: <Loader2 className="h-2.5 w-2.5 animate-spin" />, labelKey: 'dashboard.labelStarting', cls: 'text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/30' },
   }
   const s = map[status] ?? map['stopped']
   return (
     <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${s.cls}`}>
-      {s.icon}{s.label}
+      {s.icon}{t(s.labelKey)}
     </span>
   )
 }

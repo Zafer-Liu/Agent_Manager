@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { LogEntry } from '../types/agent'
 
 interface Props {
@@ -14,12 +15,10 @@ const levelColors: Record<string, string> = {
 }
 
 export function LogViewer({ logs, agentName }: Props) {
+  const { t } = useTranslation()
   const containerRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const [following, setFollowing] = useState(true)
-  const followingRef = useRef(true)
-
-  followingRef.current = following
 
   useEffect(() => {
     if (!following) return
@@ -30,7 +29,7 @@ export function LogViewer({ logs, agentName }: Props) {
     const el = containerRef.current
     if (!el) return
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    if (atBottom !== followingRef.current) {
+    if (atBottom !== following) {
       setFollowing(atBottom)
     }
   }
@@ -38,7 +37,7 @@ export function LogViewer({ logs, agentName }: Props) {
   return (
     <div className="flex flex-col h-full bg-gray-50 dark:bg-gray-950">
       <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 shrink-0 dark:border-gray-800">
-        <span className="text-sm font-medium text-gray-600 dark:text-gray-300">Logs — {agentName}</span>
+        <span className="text-sm font-medium text-gray-600 dark:text-gray-300">{t('agentDetail.logsTitle')} — {agentName}</span>
         {!following && (
           <button
             onClick={() => {
@@ -47,7 +46,7 @@ export function LogViewer({ logs, agentName }: Props) {
             }}
             className="text-xs text-blue-600 hover:text-blue-500 transition-colors dark:text-blue-400 dark:hover:text-blue-300"
           >
-            ↓ Jump to latest
+            {t('agentDetail.jumpToLatest')}
           </button>
         )}
       </div>
@@ -57,7 +56,7 @@ export function LogViewer({ logs, agentName }: Props) {
         className="flex-1 overflow-y-auto font-mono text-xs p-4 space-y-0.5"
       >
         {logs.length === 0 ? (
-          <span className="text-gray-400 dark:text-gray-600">No logs yet.</span>
+          <span className="text-gray-400 dark:text-gray-600">{t('agentDetail.noLogs')}</span>
         ) : (
           logs.map((entry, i) => (
             <div key={i} className="flex gap-3 leading-5">

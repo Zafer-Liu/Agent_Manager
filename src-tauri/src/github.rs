@@ -115,15 +115,93 @@ fn parse_github_url(url: &str) -> Option<(String, String)> {
     None
 }
 
-#[tauri::command]
-pub async fn github_fetch_repo_info(url: String) -> Result<GithubRepoInfo, String> {
-    let (owner, repo) = parse_github_url(&url)
-        .ok_or_else(|| format!("无法解析 GitHub URL: {}", url))?;
+/// Token 持久化文件路径：与其它配置同目录（%APPDATA%\agent-manager\github.json）。
+fn token_config_path() -> std::path::PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("agent-manager")
+        .join("github.json")
+}
 
-    let api_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+#[derive(Serialize, Deserialize, Default)]
+struct GithubConfig {
+    token: String,
+}
+
+/// 读取可选的 GitHub Token（提高 API 速率限制：未认证 60 次/小时 → 认证 5000 次/小时）。
+/// 优先级：用户在 UI 中保存的 Token（配置文件） > GITHUB_TOKEN > GH_TOKEN 环境变量。
+fn github_token() -> Option<String> {
+    // 1. UI 保存的配置文件
+    if let Ok(data) = std::fs::read_to_string(token_config_path()) {
+        if let Ok(cfg) = serde_json::from_str::<GithubConfig>(&data) {
+            let t = cfg.token.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    // 2. 环境变量
+    for key in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// 保存 GitHub Token 到配置文件（空字符串表示清除）。
+#[tauri::command]
+pub fn github_save_token(token: String) -> Result<(), String> {
+    let path = token_config_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let cfg = GithubConfig { token: token.trim().to_string() };
+    let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// 查询当前是否已配置 Token（不返回明文，只返回是否存在 + 来源）。
+/// 返回 (是否已配置, 是否来自环境变量)。
+#[tauri::command]
+pub fn github_token_status() -> (bool, bool) {
+    // 配置文件里的 token
+    let from_file = std::fs::read_to_string(token_config_path())
+        .ok()
+        .and_then(|d| serde_json::from_str::<GithubConfig>(&d).ok())
+        .map(|c| !c.token.trim().is_empty())
+        .unwrap_or(false);
+    if from_file {
+        return (true, false);
+    }
+    // 环境变量
+    let from_env = ["GITHUB_TOKEN", "GH_TOKEN"]
+        .iter()
+        .any(|k| std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false));
+    (from_env, from_env)
+}
+
+/// 构建带正确 header、代理、可选 Token 的 GitHub API 客户端。
+fn build_github_client() -> Result<reqwest::Client, String> {
+    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
+
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+    headers.insert("X-GitHub-Api-Version", HeaderValue::from_static("2022-11-28"));
+
+    if let Some(token) = github_token() {
+        if let Ok(mut val) = HeaderValue::from_str(&format!("Bearer {token}")) {
+            val.set_sensitive(true);
+            headers.insert(AUTHORIZATION, val);
+        }
+    }
 
     let mut client_builder = reqwest::Client::builder()
-        .user_agent("agent-manager/0.2.1")
+        .user_agent("agent-manager/0.2.3")
+        .default_headers(headers)
         .timeout(std::time::Duration::from_secs(15));
 
     if let Some(proxy_url) = detect_system_proxy() {
@@ -132,7 +210,81 @@ pub async fn github_fetch_repo_info(url: String) -> Result<GithubRepoInfo, Strin
         }
     }
 
-    let client = client_builder.build().map_err(|e| e.to_string())?;
+    client_builder.build().map_err(|e| e.to_string())
+}
+
+/// 根据失败的响应生成可操作的中文错误信息。
+async fn github_error_message(resp: reqwest::Response, owner: &str, repo: &str) -> String {
+    let status = resp.status();
+
+    // 读取速率限制头（在消费 body 之前）
+    let remaining = resp
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let reset = resp
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok());
+
+    // 尝试读取 GitHub 返回的错误消息体
+    let body = resp.text().await.unwrap_or_default();
+    let api_msg = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|j| j["message"].as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    match status.as_u16() {
+        403 | 429 => {
+            // 速率限制
+            if remaining.as_deref() == Some("0") {
+                let when = reset
+                    .map(|ts| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        let mins = ((ts - now).max(0) + 59) / 60;
+                        format!("约 {mins} 分钟后恢复")
+                    })
+                    .unwrap_or_else(|| "稍后".to_string());
+                format!(
+                    "GitHub API 速率受限（未登录每小时仅 60 次，{when}）。\n\n\
+                     解决方法：\n\
+                     • 展开上方「GitHub Token（可选）」填入 Token（额度提升到 5000 次/小时）\n\
+                     • 或等待额度恢复后重试\n\
+                     • 也可直接复制仓库地址手动 git clone"
+                )
+            } else {
+                format!(
+                    "GitHub 拒绝访问（403）。\n可能是代理出口 IP 被限流，或仓库需要授权。\n\
+                     GitHub 返回：{}",
+                    if api_msg.is_empty() { "（无）" } else { &api_msg }
+                )
+            }
+        }
+        404 => format!(
+            "未找到仓库 {owner}/{repo}（404）。\n请检查仓库地址是否正确，或该仓库是否为私有。"
+        ),
+        401 => "GitHub 认证失败（401）。\n请检查 GITHUB_TOKEN 是否有效。".to_string(),
+        _ => format!(
+            "GitHub API 返回 {}{}。",
+            status,
+            if api_msg.is_empty() { String::new() } else { format!("：{api_msg}") }
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn github_fetch_repo_info(url: String) -> Result<GithubRepoInfo, String> {
+    let (owner, repo) = parse_github_url(&url)
+        .ok_or_else(|| format!("无法解析 GitHub URL: {}", url))?;
+
+    let api_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+
+    let client = build_github_client()?;
 
     let resp = client
         .get(&api_url)
@@ -141,8 +293,7 @@ pub async fn github_fetch_repo_info(url: String) -> Result<GithubRepoInfo, Strin
         .map_err(|e| format!("请求失败: {}", e))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        return Err(format!("GitHub API 返回 {}: {}", status, api_url));
+        return Err(github_error_message(resp, &owner, &repo).await);
     }
 
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;

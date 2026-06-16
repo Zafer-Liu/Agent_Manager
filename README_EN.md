@@ -1,12 +1,12 @@
 # Agent Manager
 
 <p align="center">
-  <img src="./logo/Banner.png" alt="Agent Manager Banner" width="100%" />
+  <img src="./Logo/Banner.png" alt="Agent Manager Banner" width="100%" />
 </p>
 
 <p align="right"><a href="./README.md">中文</a></p>
 
-![Version](https://img.shields.io/badge/Version-v0.2.0-blue.svg)
+![Version](https://img.shields.io/badge/Version-v0.2.3-blue.svg)
 ![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-blue?style=flat-square)](#)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri)](https://tauri.app)
@@ -249,12 +249,12 @@ View all ports currently listening on your machine.
 
 ### Download Prebuilt Installers Recommended
 
-Download the latest version from [Releases](https://github.com/Zafer-Liu/Agent_MCP_Manager/releases):
+Download the latest version from [Releases](https://github.com/Zafer-Liu/Agent_Manager/releases):
 
 | Platform | File |
 |----------|------|
-| Windows | `Agent-Manager.exe` |
-| macOS（Intel） | `Agent-Manager.dmg` |
+| Windows (x64) | `智管-Agent Manager_0.2.3_x64-setup.exe` |
+| macOS | Coming soon |
 
 Double-click the installer and follow the prompts.
 
@@ -267,8 +267,8 @@ Double-click the installer and follow the prompts.
 - [Tauri prerequisites](https://tauri.app/start/prerequisites/), including Visual Studio C++ Build Tools on Windows
 
 ```bash
-git clone https://github.com/Zafer-Liu/Agent_MCP_Manager.git
-cd Agent_MCP_Manager
+git clone https://github.com/Zafer-Liu/Agent_Manager.git
+cd Agent_Manager
 
 # Install dependencies
 npm install
@@ -384,24 +384,25 @@ Port numbers are also detected automatically by scanning `.env` files, `pyprojec
 
 # 🗺️ Roadmap and Changelog
 
-> **Current version `v0.2.0`** · June 2026
+> **Current version `v0.2.3`** · June 13, 2026
 
-## Major Updates in v0.2.0
+## Major Updates in v0.2.3
 
 **New features:**
 
-- ✅ **Manager Agent:** control all Agents through natural language, including start, stop, open UI, and read README
-- ✅ **Dashboard Classroom View:** see all Agent statuses at a glance, with hover actions
-- ✅ **Agent Publishing:** one-click Cloudflare Tunnel temporary sharing and Caddy reverse proxy for long-term publishing
-- ✅ **PTY Terminal:** real interactive terminal support for Claude Code and other TUI tools
-- ✅ **Enhanced Python Detection:** supports FastAPI, Django, Streamlit, uv, and pyproject.toml
-- ✅ **Persistent Conversations:** Manager Agent chat history is preserved when switching pages
+- ✅ **Visual Workflows:** compose MCP tools, LLM steps, and complete MCP Agent nodes with streamed step feedback
+- ✅ **Enhanced MCP Agent:** enable multiple MCP servers per conversation and inspect collapsible tool-call steps
+- ✅ **Smart MCP Configuration:** scan local packages or parse JSON, README text, commands, and stdio/SSE settings with AI
+- ✅ **Chinese and English UI:** full i18n support and an in-app language switcher across the main workflows
+- ✅ **Persistent Selections:** remember the selected LLM, enabled MCP servers, and active workflow
+- ✅ **Continuous Integration:** run frontend checks and Rust tests for pushes, pull requests, and releases
 
 **Fixes:**
 
-- Fixed full-screen freezing after starting an Agent from the Dashboard
-- Fixed Mindmap, a Node.js Agent, entering REPL mode during startup
-- Fixed development port conflicts with other Vite projects by changing the dev port to 1420
+- Fixed silent failures when clicking **Parse with AI** and now surface the actual API error
+- Fixed unsafe truncation of Chinese README content at UTF-8 byte boundaries
+- Fixed async runtime conflicts and broken context passing in MCP Agent workflow nodes
+- Fixed workflow text remaining truncated after expansion and a server-list refresh race after deletion
 
 ---
 

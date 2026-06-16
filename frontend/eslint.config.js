@@ -18,5 +18,12 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      // Data-loading effects are intentional in this desktop client. The
+      // exhaustive-deps rule still reports dependency mistakes as warnings.
+      'react-hooks/set-state-in-effect': 'off',
+      // theme.tsx exports both the provider and its hook by design.
+      'react-refresh/only-export-components': 'off',
+    },
   },
 ])

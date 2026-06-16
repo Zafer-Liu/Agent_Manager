@@ -1,12 +1,22 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 pub struct PtySession {
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub master: Box<dyn portable_pty::MasterPty + Send>,
+    pub child: Box<dyn portable_pty::Child + Send + Sync>,
+    pub cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self.child.kill();
+    }
 }
 
 pub struct PtyStore {
@@ -166,11 +176,12 @@ pub fn pty_start(
     store: tauri::State<'_, PtyStore>,
     app: AppHandle,
 ) -> Result<(), String> {
-    // Close any existing session for this id
-    {
+    // Stop any existing session before reusing its event channel.
+    let previous = {
         let mut sessions = store.sessions.lock().unwrap();
-        sessions.remove(&id);
-    }
+        sessions.remove(&id)
+    };
+    drop(previous);
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -218,7 +229,7 @@ pub fn pty_start(
         cmd.env_remove("GITHUB_ACTIONS");
     }
 
-    let _child = pair.slave
+    let child = pair.slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn: {e}"))?;
 
@@ -247,21 +258,31 @@ pub fn pty_start(
     // Only an Err signals that the process has truly exited and the PTY closed.
     let id_clone = id.clone();
     let app_clone = app.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let reader_cancelled = Arc::clone(&cancelled);
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
-        loop {
+        while !reader_cancelled.load(Ordering::Acquire) {
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // Spurious empty read — spin briefly and retry
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(_) => {
-                    let _ = app_clone.emit(&format!("pty-exit-{}", id_clone), ());
+                    if !reader_cancelled.load(Ordering::Acquire) {
+                        let _ = app_clone.emit(&format!("pty-exit-{}", id_clone), ());
+                    }
                     break;
                 }
                 Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let _ = app_clone.emit(&format!("pty-data-{}", id_clone), data);
+                    if !reader_cancelled.load(Ordering::Acquire) {
+                        // Preserve byte boundaries. xterm's streaming UTF-8 decoder
+                        // handles multibyte characters split across PTY reads.
+                        let _ = app_clone.emit(
+                            &format!("pty-data-{}", id_clone),
+                            buf[..n].to_vec(),
+                        );
+                    }
                 }
             }
         }
@@ -270,6 +291,8 @@ pub fn pty_start(
     let session = PtySession {
         writer,
         master: pair.master,
+        child,
+        cancelled,
     };
     store.sessions.lock().unwrap().insert(id, session);
     Ok(())

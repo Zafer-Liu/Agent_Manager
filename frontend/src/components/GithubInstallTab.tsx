@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import type { AgentConfig } from '../types/agent'
 import {
   GitFork, Star, GitBranch, Loader2, FolderOpen,
   CheckCircle2, AlertCircle, ExternalLink, ChevronRight,
+  KeyRound, ChevronDown, ChevronUp,
 } from 'lucide-react'
 
 interface GithubRepoInfo {
@@ -47,6 +49,7 @@ interface Props {
 }
 
 export function GithubInstallTab({ onPrefill }: Props) {
+  const { t } = useTranslation()
   const [url, setUrl] = useState('')
   const [step, setStep] = useState<Step>('input')
   const [repoInfo, setRepoInfo] = useState<GithubRepoInfo | null>(null)
@@ -68,7 +71,7 @@ export function GithubInstallTab({ onPrefill }: Props) {
     } catch (e) {
       const msg = String(e)
       if (!msg.includes('cancelled') && msg !== 'null' && msg !== 'undefined') {
-        setErrorMsg(`无法打开文件夹选择器：${msg}`)
+        setErrorMsg(t('github.openFolderFailed', { error: msg }))
       }
     }
   }
@@ -140,10 +143,13 @@ export function GithubInstallTab({ onPrefill }: Props) {
       {/* Proxy badge */}
       <ProxyBadge proxy={detectedProxy} />
 
+      {/* GitHub Token 配置（可选，折叠） */}
+      <TokenConfig />
+
       {/* Recommended */}
       {step === 'input' && (
         <div>
-          <p className="mb-2 text-xs font-medium text-gray-500 dark:text-gray-400">推荐 Agent</p>
+          <p className="mb-2 text-xs font-medium text-gray-500 dark:text-gray-400">{t('github.recommended')}</p>
           <div className="space-y-2">
             {RECOMMENDED_AGENTS.map(agent => (
               <RecommendedCard
@@ -162,7 +168,7 @@ export function GithubInstallTab({ onPrefill }: Props) {
       {/* URL input */}
       {(step === 'input' || step === 'error') && (
         <div>
-          <p className="mb-1 text-xs font-medium text-gray-500 dark:text-gray-400">或输入 GitHub 仓库地址</p>
+          <p className="mb-1 text-xs font-medium text-gray-500 dark:text-gray-400">{t('github.orInputUrl')}</p>
           <div className="flex gap-2">
             <input
               value={url}
@@ -176,13 +182,13 @@ export function GithubInstallTab({ onPrefill }: Props) {
               disabled={!url.trim()}
               className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
             >
-              <GitFork className="h-4 w-4" /> 获取信息
+              <GitFork className="h-4 w-4" /> {t('github.fetchInfo')}
             </button>
           </div>
           {step === 'error' && errorMsg && (
             <div className="mt-2 flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-900/30 dark:text-red-400">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{errorMsg}</span>
+              <span className="whitespace-pre-wrap leading-relaxed">{errorMsg}</span>
             </div>
           )}
         </div>
@@ -192,7 +198,7 @@ export function GithubInstallTab({ onPrefill }: Props) {
       {step === 'fetching' && (
         <div className="flex items-center gap-2 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">
           <Loader2 className="h-4 w-4 animate-spin" />
-          正在获取仓库信息…
+          {t('github.fetching')}
         </div>
       )}
 
@@ -204,20 +210,20 @@ export function GithubInstallTab({ onPrefill }: Props) {
           {/* Clone destination */}
           <div>
             <p className="mb-1 text-xs font-medium text-gray-500 dark:text-gray-400">
-              存放目录 <span className="font-normal text-gray-400">（留空则存到 ~/agent-repos/）</span>
+              {t('github.storeDir')} <span className="font-normal text-gray-400">{t('github.storeDirHint')}</span>
             </p>
             <div className="flex gap-2">
               <input
                 value={baseDir}
                 onChange={e => setBaseDir(e.target.value)}
-                placeholder="D:/projects  （留空使用默认）"
+                placeholder={t('github.storeDirPlaceholder')}
                 className="field-input flex-1 font-mono text-sm"
               />
               <button
                 type="button"
                 onClick={pickBaseDir}
                 className="flex items-center rounded-lg border border-gray-200 px-3 py-2 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-                title="选择文件夹"
+                title={t('github.pickFolder')}
               >
                 <FolderOpen className="h-4 w-4" />
               </button>
@@ -229,7 +235,7 @@ export function GithubInstallTab({ onPrefill }: Props) {
             className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 py-2.5 text-sm font-medium text-white hover:bg-blue-500"
           >
             <GitBranch className="h-4 w-4" />
-            Clone 到本地
+            {t('github.cloneToLocal')}
           </button>
         </div>
       )}
@@ -238,7 +244,7 @@ export function GithubInstallTab({ onPrefill }: Props) {
       {step === 'cloning' && (
         <div className="flex items-center gap-2 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">
           <Loader2 className="h-4 w-4 animate-spin" />
-          正在 Clone 仓库，请稍候…
+          {t('github.cloning')}
         </div>
       )}
 
@@ -248,18 +254,18 @@ export function GithubInstallTab({ onPrefill }: Props) {
           <div className="flex items-start gap-2 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700 dark:bg-green-900/30 dark:text-green-400">
             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
-              <p className="font-medium">Clone 成功！</p>
+              <p className="font-medium">{t('github.cloneSuccess')}</p>
               <p className="mt-0.5 font-mono text-xs text-green-600 dark:text-green-500">{clonedPath}</p>
             </div>
           </div>
           <p className="text-xs text-gray-400 dark:text-gray-500">
-            表单已自动填充，请在「手动配置」Tab 确认配置后保存。
+            {t('github.autoFillHint')}
           </p>
           <button
             onClick={reset}
             className="text-xs text-blue-500 hover:text-blue-400 dark:text-blue-400 dark:hover:text-blue-300"
           >
-            安装另一个 Agent
+            {t('github.installAnother')}
           </button>
         </div>
       )}
@@ -270,18 +276,131 @@ export function GithubInstallTab({ onPrefill }: Props) {
 // ── Sub-components ────────────────────────────────────────────
 
 function ProxyBadge({ proxy }: { proxy: string }) {
+  const { t } = useTranslation()
   if (proxy) {
     return (
       <div className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
         <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-        代理已就绪：<span className="font-mono">{proxy}</span>
+        {t('github.proxyReady')}<span className="font-mono">{proxy}</span>
       </div>
     )
   }
   return (
     <div className="flex items-center gap-1.5 text-xs text-amber-500 dark:text-amber-400">
       <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-      未检测到系统代理，如 Clone 失败请检查网络
+      {t('github.proxyNone')}
+    </div>
+  )
+}
+
+function TokenConfig() {
+  const { t } = useTranslation()
+  const [expanded, setExpanded] = useState(false)
+  const [token, setToken] = useState('')
+  const [configured, setConfigured] = useState(false)
+  const [fromEnv, setFromEnv] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [justSaved, setJustSaved] = useState(false)
+
+  useEffect(() => {
+    invoke<[boolean, boolean]>('github_token_status')
+      .then(([has, env]) => { setConfigured(has); setFromEnv(env) })
+      .catch(() => {})
+  }, [])
+
+  async function save() {
+    setSaving(true)
+    try {
+      await invoke('github_save_token', { token })
+      setConfigured(token.trim().length > 0)
+      setFromEnv(false)
+      setToken('')
+      setJustSaved(true)
+      setTimeout(() => setJustSaved(false), 2000)
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  async function clear() {
+    setSaving(true)
+    try {
+      await invoke('github_save_token', { token: '' })
+      setConfigured(false)
+      setFromEnv(false)
+      setToken('')
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 dark:border-gray-700">
+      {/* 折叠头 */}
+      <button
+        type="button"
+        onClick={() => setExpanded(o => !o)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+      >
+        <KeyRound className="h-3.5 w-3.5 text-gray-400" />
+        <span className="text-xs font-medium text-gray-600 dark:text-gray-300">{t('github.tokenSection')}</span>
+        {configured && (
+          <span className="flex items-center gap-1 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] text-green-600 dark:bg-green-900/30 dark:text-green-400">
+            <CheckCircle2 className="h-3 w-3" />
+            {t('github.tokenConfigured')}{fromEnv ? `（${t('github.tokenFromEnv')}）` : ''}
+          </span>
+        )}
+        <span className="ml-auto text-gray-400">
+          {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+        </span>
+      </button>
+
+      {/* 折叠体 */}
+      {expanded && (
+        <div className="space-y-2 border-t border-gray-100 px-3 py-3 dark:border-gray-800">
+          <p className="text-[11px] leading-relaxed text-gray-400 dark:text-gray-500">
+            {t('github.tokenHint')}
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={token}
+              onChange={e => setToken(e.target.value)}
+              placeholder={t('github.tokenPlaceholder')}
+              className="field-input flex-1 font-mono text-xs"
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || !token.trim()}
+              className="flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40"
+            >
+              {justSaved ? <><CheckCircle2 className="h-3.5 w-3.5" /> {t('github.tokenSaved')}</> : t('github.tokenSave')}
+            </button>
+            {configured && !fromEnv && (
+              <button
+                type="button"
+                onClick={clear}
+                disabled={saving}
+                className="rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800"
+              >
+                {t('github.tokenClear')}
+              </button>
+            )}
+          </div>
+          <div className="flex items-center justify-between">
+            <a
+              href="https://github.com/settings/tokens/new?description=agent-manager&default_expires=none"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-[11px] text-blue-500 hover:text-blue-400 dark:text-blue-400"
+            >
+              <ExternalLink className="h-3 w-3" />
+              {t('github.tokenGetLink')}
+            </a>
+            <span className="text-[10px] text-gray-400 dark:text-gray-600">{t('github.tokenNote')}</span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

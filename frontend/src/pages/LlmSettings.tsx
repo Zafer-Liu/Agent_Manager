@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
 import { Plus, Trash2, CheckCircle, XCircle, Loader2, Eye, EyeOff, AlertCircle } from 'lucide-react'
 
@@ -20,6 +21,7 @@ const EMPTY_CUSTOM: LlmProvider = {
 }
 
 export function LlmSettings() {
+  const { t } = useTranslation()
   const [providers, setProviders] = useState<LlmProvider[]>([])
   const [showCustomForm, setShowCustomForm] = useState(false)
   const [editingCustom, setEditingCustom] = useState<LlmProvider | null>(null)
@@ -55,10 +57,10 @@ export function LlmSettings() {
   }
 
   async function saveCustom() {
-    if (!form.name.trim()) { setError('Name is required'); return }
-    if (!form.base_url.trim()) { setError('Base URL is required'); return }
-    if (!form.model.trim()) { setError('Model ID is required'); return }
-    if (!form.api_key.trim()) { setError('API Key is required'); return }
+    if (!form.name.trim()) { setError(t('llm.nameRequired')); return }
+    if (!form.base_url.trim()) { setError(t('llm.baseUrlRequired')); return }
+    if (!form.model.trim()) { setError(t('llm.modelRequired')); return }
+    if (!form.api_key.trim()) { setError(t('llm.apiKeyRequired')); return }
 
     const id = editingCustom?.id || `custom_${form.name.toLowerCase().replace(/\s+/g, '_')}_${Date.now()}`
     setSaving(true)
@@ -87,13 +89,13 @@ export function LlmSettings() {
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-gray-50 dark:bg-gray-950 p-6 space-y-6">
       <div>
-        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">LLM Providers</h2>
-        <p className="text-xs text-gray-500 mt-0.5">Configure API keys for language models used by MCP Agent</p>
+        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">{t('llm.title')}</h2>
+        <p className="text-xs text-gray-500 mt-0.5">{t('llm.subtitle')}</p>
       </div>
 
       {/* Built-in providers */}
       <div className="space-y-3">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Built-in</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{t('llm.builtin')}</h3>
         {builtins.map(p => (
           <BuiltinCard
             key={p.id}
@@ -111,12 +113,12 @@ export function LlmSettings() {
       {/* Custom providers */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Custom (OpenAI-compatible)</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{t('llm.custom')}</h3>
           <button
             onClick={() => { setForm({ ...EMPTY_CUSTOM }); setEditingCustom(null); setShowCustomForm(true); setError('') }}
             className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-500"
           >
-            <Plus className="h-3.5 w-3.5" /> Add
+            <Plus className="h-3.5 w-3.5" /> {t('llm.add')}
           </button>
         </div>
 
@@ -133,12 +135,12 @@ export function LlmSettings() {
                   disabled={testing === p.id}
                   className="text-xs text-gray-500 hover:text-blue-600"
                 >
-                  {testing === p.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Test'}
+                  {testing === p.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t('llm.test')}
                 </button>
                 <button
                   onClick={() => { setForm({ ...p }); setEditingCustom(p); setShowCustomForm(true); setError('') }}
                   className="text-xs text-gray-500 hover:text-gray-700"
-                >Edit</button>
+                >{t('llm.edit')}</button>
                 <button onClick={() => deleteCustom(p.id)} className="text-gray-400 hover:text-red-500">
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
@@ -153,7 +155,7 @@ export function LlmSettings() {
         ))}
 
         {customs.length === 0 && !showCustomForm && (
-          <p className="text-xs text-gray-400 text-center py-4">No custom models yet</p>
+          <p className="text-xs text-gray-400 text-center py-4">{t('llm.noModels')}</p>
         )}
       </div>
 
@@ -161,23 +163,23 @@ export function LlmSettings() {
       {showCustomForm && (
         <div className="rounded-2xl border border-blue-200 bg-white p-5 dark:border-blue-800 dark:bg-gray-900 space-y-3">
           <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-            {editingCustom ? `Edit: ${editingCustom.name}` : 'Add Custom Model'}
+            {editingCustom ? t('llm.editProvider', { name: editingCustom.name }) : t('llm.addCustomModel')}
           </h4>
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Display Name">
+            <Field label={t('llm.displayName')}>
               <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                placeholder="DeepSeek / Gemini..." className="field-input" />
+                placeholder={t('llm.displayNamePlaceholder')} className="field-input" />
             </Field>
-            <Field label="Model ID">
+            <Field label={t('llm.modelId')}>
               <input value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))}
-                placeholder="deepseek-chat" className="field-input font-mono" />
+                placeholder={t('llm.modelIdPlaceholder')} className="field-input font-mono" />
             </Field>
           </div>
-          <Field label="Base URL">
+          <Field label={t('llm.baseUrl')}>
             <input value={form.base_url} onChange={e => setForm(f => ({ ...f, base_url: e.target.value }))}
               placeholder="https://api.deepseek.com" className="field-input font-mono" />
           </Field>
-          <Field label="API Key">
+          <Field label={t('llm.apiKey')}>
             <input type="password" value={form.api_key} onChange={e => setForm(f => ({ ...f, api_key: e.target.value }))}
               placeholder="sk-..." className="field-input font-mono" />
           </Field>
@@ -189,15 +191,15 @@ export function LlmSettings() {
           <div className="flex gap-2">
             <button onClick={saveCustom} disabled={saving}
               className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-60">
-              {saving && <Loader2 className="h-3 w-3 animate-spin" />} Save
+              {saving && <Loader2 className="h-3 w-3 animate-spin" />} {t('llm.save')}
             </button>
             <button onClick={() => { testProvider({ ...form, id: editingCustom?.id ?? 'temp' }) }}
               disabled={testing !== null}
               className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400">
-              Test connection
+              {t('llm.testConnection')}
             </button>
             <button onClick={() => { setShowCustomForm(false); setError('') }}
-              className="rounded-lg px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-100">Cancel</button>
+              className="rounded-lg px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-100">{t('llm.cancel')}</button>
           </div>
         </div>
       )}
@@ -214,6 +216,7 @@ function BuiltinCard({ provider, showKey, onToggleKey, testResult, testing, onSa
   onSave: (p: LlmProvider) => void
   onTest: (p: LlmProvider) => void
 }) {
+  const { t } = useTranslation()
   const [key, setKey] = useState(provider.api_key)
   const [model, setModel] = useState(provider.model)
 
@@ -229,18 +232,18 @@ function BuiltinCard({ provider, showKey, onToggleKey, testResult, testing, onSa
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{provider.name}</span>
           {provider.enabled && provider.api_key && (
-            <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-400">active</span>
+            <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-400">{t('llm.active')}</span>
           )}
         </div>
         <EnableToggle enabled={provider.enabled} onChange={v => onSave({ ...provider, enabled: v })} />
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Model">
+        <Field label={t('llm.model')}>
           <input value={model} onChange={e => setModel(e.target.value)}
             className="field-input font-mono text-xs" placeholder={provider.model} />
         </Field>
-        <Field label="API Key">
+        <Field label={t('llm.apiKey')}>
           <div className="relative">
             <input
               type={showKey ? 'text' : 'password'}
@@ -261,11 +264,11 @@ function BuiltinCard({ provider, showKey, onToggleKey, testResult, testing, onSa
       <div className="flex gap-2">
         <button onClick={save}
           className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700 dark:bg-gray-100 dark:text-gray-900">
-          Save
+          {t('llm.save')}
         </button>
         <button onClick={() => onTest({ ...provider, api_key: key, model })} disabled={testing || !key}
           className="flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40 dark:border-gray-700 dark:text-gray-400">
-          {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : null} Test
+          {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : null} {t('llm.test')}
         </button>
       </div>
     </div>

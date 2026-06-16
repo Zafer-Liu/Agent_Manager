@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import type { AgentState } from '../types/agent'
 import { Play, Square, Trash2, Settings, GripVertical } from 'lucide-react'
 import {
@@ -41,6 +42,7 @@ function SortableItem({
   onDelete: () => void
   onConfigure: () => void
 }) {
+  const { t } = useTranslation()
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: agent.config.id,
   })
@@ -61,7 +63,8 @@ function SortableItem({
         {...attributes}
         {...listeners}
         onClick={e => e.stopPropagation()}
-        className="shrink-0 cursor-grab touch-none text-gray-300 opacity-0 group-hover:opacity-100 active:cursor-grabbing dark:text-gray-700"
+        title={t('agentList.dragToReorder')}
+        className="shrink-0 cursor-grab touch-none text-gray-300 opacity-60 hover:opacity-100 active:cursor-grabbing dark:text-gray-600"
       >
         <GripVertical className="h-4 w-4" />
       </button>
@@ -100,18 +103,18 @@ function SortableItem({
       {/* Actions */}
       <div className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
         {agent.status === 'running' ? (
-          <ActionBtn onClick={onStop} title="Stop" danger>
+          <ActionBtn onClick={onStop} title={t('common.stop')} danger>
             <Square className="h-3.5 w-3.5" />
           </ActionBtn>
         ) : (
-          <ActionBtn onClick={onStart} title="Start">
+          <ActionBtn onClick={onStart} title={t('common.start')}>
             <Play className="h-3.5 w-3.5" />
           </ActionBtn>
         )}
-        <ActionBtn onClick={onConfigure} title="Edit">
+        <ActionBtn onClick={onConfigure} title={t('common.edit')}>
           <Settings className="h-3.5 w-3.5" />
         </ActionBtn>
-        <ActionBtn onClick={onDelete} title="Delete" danger>
+        <ActionBtn onClick={onDelete} title={t('common.delete')} danger>
           <Trash2 className="h-3.5 w-3.5" />
         </ActionBtn>
       </div>
@@ -141,6 +144,7 @@ function ActionBtn({ children, onClick, title, danger }: {
 }
 
 export function AgentList({ agents, selectedId, onSelect, onStart, onStop, onDelete, onConfigure, onReorder }: Props) {
+  const { t } = useTranslation()
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   function handleDragEnd(event: DragEndEvent) {
@@ -148,13 +152,14 @@ export function AgentList({ agents, selectedId, onSelect, onStart, onStop, onDel
     if (!over || active.id === over.id) return
     const oldIndex = agents.findIndex(a => a.config.id === active.id)
     const newIndex = agents.findIndex(a => a.config.id === over.id)
+    if (oldIndex < 0 || newIndex < 0) return
     onReorder(arrayMove(agents, oldIndex, newIndex).map(a => a.config.id))
   }
 
   if (agents.length === 0) {
     return (
       <div className="flex flex-col items-center py-8">
-        <p className="text-xs text-gray-400 dark:text-gray-600">No agents yet</p>
+        <p className="text-xs text-gray-400 dark:text-gray-600">{t('agentList.empty')}</p>
       </div>
     )
   }

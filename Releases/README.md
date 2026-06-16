@@ -1,108 +1,111 @@
-# 智管-Agent Manager v0.2.1
+# 智管-Agent Manager v0.2.3
 
-> **发布日期：** 2026 年 6 月 9 日
-> **类型：** 功能版本（Feature Release）
+> **发布日期：** 2026 年 6 月 16 日
+> **类型：** 功能增强与稳定性修复
 
 ---
 
-## 📦 下载
+## 下载
 
 | 平台 | 文件 | 说明 |
 |------|------|------|
-| Windows (x64) | `agent-manager_0.2.1.exe` | NSIS 安装程序，双击安装 |
-| macOS (Intel) | *(即将发布)* | `.dmg` 格式 |
+| Windows (x64) | `智管-Agent Manager_0.2.3_x64-setup.exe` | NSIS 安装程序，双击安装 |
+| macOS | *(即将发布)* | Intel / Apple Silicon |
 
-> **Windows 安全提示：** 安装时若弹出"未知发布者"警告，点击"更多信息" → "仍要运行"。安装包未经 Microsoft 代码签名，属正常现象。
-
----
-
-## ✨ v0.2.1 新功能
-
-### 🐙 从 GitHub 安装 Agent
-
-在 **New Agent → 从 GitHub 安装** Tab 中，输入任意 GitHub 仓库地址，一键完成：
-
-1. 自动拉取仓库信息（名称、描述、Stars、语言、README 摘要）
-2. 选择本地存放目录（或使用默认的 `~/agent-repos/`）
-3. Clone 到本地，表单字段自动填充，确认后保存即可启动
-
-支持三种 URL 格式：
-- `https://github.com/owner/repo`
-- `github.com/owner/repo`
-- `owner/repo`
+> **Windows 安全提示：** 若安装时出现“未知发布者”，点击“更多信息” -> “仍要运行”。安装包尚未进行 Microsoft 代码签名。
 
 ---
 
-### 🌟 内置推荐 Agent
+## v0.2.3 重点更新
 
-打开 GitHub 安装 Tab 即可看到内置推荐，一键安装：
+### Agent UI 内嵌与全屏
 
-| Agent | 简介 | 技术栈 |
-|-------|------|--------|
-| **智析 · 数据分析 Agent** | 上传 CSV/Excel，用自然语言提问，自动生成图表与洞察报告 | Python · Streamlit |
-| **BrainBoost · AI 思维导图** | 输入关键词，AI 自动生成思维导图，支持语音输入、节点拖拽、一键导出 | TypeScript · React |
+- Agent 前端界面改为使用 Tauri 原生 WebView 嵌入，兼容带 `X-Frame-Options` / CSP 限制的本地前端
+- 支持通过 `#token=...` 自动传递 UI 访问密钥，适配 OpenClaw 等带网关令牌的前端
+- 修复点击“打开 UI”后只能在浏览器打开、Manager 内打不开的问题
+- 全屏按钮会把当前 UI 移入独立窗口，关闭窗口后再同步回 Manager 内部
+- 修复全屏弹窗关闭后内容丢失、状态不同步的问题
+- 优化全屏弹窗尺寸同步，减少窗口打开后布局错位、白边和内容裁切
+- 修复弹出的 UI 窗口异常保持置顶的问题
+
+### 终端与运行状态保留
+
+- 切换页面时不再卸载 Agent 工作区，已打开的终端和 UI 内容会继续保留
+- 修复切换页面后终端重新启动、历史输出丢失的问题
+- 终端输出改为按原始字节传递并在前端解码，减少中文乱码
+- 增加终端清空按钮，方便手动清理本次运行输出
+- 修复重复启动终端会留下旧会话的问题
+
+### Agent 列表顺序
+
+- Agent 列表顺序改为稳定持久化
+- 新增 Agent 会追加到列表末尾，不再因为刷新或状态变化来回跳动
+- 支持通过左侧拖拽手柄手动调整顺序
+
+### 前端启动兼容性
+
+- 修复 Windows 下 `npm` / `pnpm` / `yarn` 等 `.cmd` 启动命令在部分环境中无法运行的问题
+- 启动命令会优先解析可执行包装脚本，提升 Claude、OpenClaw、Vite 等前端项目的启动成功率
+- 崩溃自动重启保持为可选项，避免不需要时反复重启影响调试
 
 ---
 
-### 🔗 系统代理自动检测
+## 其他功能
 
-GitHub 拉取与 Clone 操作自动读取系统代理配置（环境变量或 Windows 注册表），无需手动设置。界面实时显示当前代理状态。
+### 可视化工作流
+
+- 使用拖拽方式组合 MCP 工具、LLM 和完整 MCP Agent 节点
+- MCP Agent 节点可使用指定 Server 的全部工具运行 Agent Loop
+- 在聊天页选择工作流并输入任务，执行步骤会实时显示
+- 支持步骤展开、错误标记和最终结果汇总
+
+### MCP Agent 与智能配置
+
+- 支持在一次对话中启用多个 MCP Server
+- 工具调用过程以可折叠步骤展示
+- 支持本地 MCP 包扫描和 stdio / SSE 手动配置
+- 可粘贴 JSON、命令、README 或 URL，通过 LLM 自动解析配置
+- 已选 LLM、启用的 Server 和工作流会持久化保存
+
+### 中英文界面
+
+- 新增中文 / 英文切换器
+- 主要页面、表单、状态和错误提示均已接入 i18n
 
 ---
 
-## 🐛 Bug 修复
+## Bug 修复
 
-| 问题 | 说明 |
+| 问题 | 修复 |
 |------|------|
-| git clone 提示 `Could not resolve host: github.com` | 系统开启代理时，代理配置现已自动注入 git 子进程 |
-| 文件夹选择器点击无响应 | Tauri 2 权限配置已修正，`dialog.open()` 现可正常弹出 |
-| 编译报错 `UnknownPermission: fs allow-read-all` | 修正 `tauri.conf.json` 中 fs 插件的权限命名 |
+| 带网关令牌的 Agent 前端在 Manager 内打不开 | 改用原生 WebView，并通过 URL hash 自动传递 UI Token |
+| Claude / Vite 等前端项目启动失败 | 修复 Windows `.cmd` 命令解析与启动逻辑 |
+| 切换页面后终端重新启动 | 保持 Agent 工作区挂载，终端会话不再被卸载 |
+| 切换回来后终端输出乱码 | 后端发送原始字节，前端统一解码 |
+| 终端历史无法清理 | 增加本次会话清空功能 |
+| Agent 列表刷新后顺序变化 | 使用持久化顺序并支持手动拖拽调整 |
+| 全屏 UI 关闭后内容丢失 | 同一个 WebView 在弹窗和主界面之间移动，关闭后恢复原状态 |
+| 弹出的 UI 窗口一直悬浮最上层 | 移除异常置顶行为 |
+| 弹出 UI 布局错位、白边或裁切 | 使用窗口真实尺寸同步 WebView bounds |
+| 点击“用 AI 解析”看起来无响应 | 解析错误现在始终可见，并透传真实 HTTP/API 错误 |
+| 中文 README 解析可能异常 | 改为按 Unicode 字符安全截断 |
+| MCP Agent 工作流节点请求失败 | 分离阻塞 MCP stdio 与异步 LLM HTTP 执行 |
+| 工作流上下文传递不正确 | 修正 prompt/task 语义并增加输出 fallback |
+| 工作流内容展开后仍被截断 | 展开后移除 line clamp，仅长内容显示展开按钮 |
+| MCP 选择重启后丢失 | 使用 localStorage 持久化相关选择 |
 
 ---
 
-## 🔄 从 v0.2.0 升级
+## 从 v0.2.2 升级
 
-直接安装新版安装包覆盖更新即可。Agent 配置数据（`%APPDATA%\agent-manager\`）不会丢失。
+直接安装 v0.2.3 覆盖旧版本即可。Agent、LLM、代理、MCP、GitHub Token 和工作流配置会继续保留。
 
----
-
-## 📜 历史版本
-
-<details>
-<summary>v0.2.0 · 2026 年 6 月</summary>
-
-### 新功能
-
-- **Manager Agent**：自然语言指挥所有 Agent，支持启动/停止/打开 UI/读取 README，会话持久化
-- **Dashboard 教室视图**：所有 Agent 状态一眼可见，悬停操作
-- **代理发布**：Cloudflare Tunnel 临时链接 + Caddy 反向代理长期发布
-- **PTY 交互式终端**：内嵌真实终端，完整支持 Claude Code 等 TUI 工具
-- **Python 自动识别增强**：支持 FastAPI / Django / Streamlit / uv / pyproject.toml
-
-### Bug 修复
-
-| 问题 | 说明 |
-|------|------|
-| Dashboard 启动 Agent 后全屏卡死 | 已修复状态更新导致的 UI 冻结问题 |
-| Mindmap (Node.js) 启动进入 REPL | 已修复 npm 全局包的 PTY 交互模式检测 |
-| 开发端口与其他 Vite 项目冲突 | 开发端口从 5173 改为 1420 |
-
-</details>
+建议升级后重新测试已配置的 Agent UI，尤其是带访问令牌、网关连接或自定义端口的前端项目。
 
 ---
 
-## 📋 已知限制
+## 历史版本
 
-- macOS 版本正在构建中，本次暂未提供
-- 多用户同时访问同一 Agent 时，对话历史由 Agent 本身管理，Manager 无法外部隔离
-
----
-
-## 🤝 反馈与贡献
-
-- **Bug 报告 / 功能建议：** [GitHub Issues](https://github.com/Zafer-Liu/Agent_MCP_Manager/issues)
-- **代码贡献：** 欢迎提交 PR
-
----
-
-*[查看完整文档 →](https://github.com/Zafer-Liu/Agent_MCP_Manager#readme)*
+- **v0.2.2**：工作流、MCP Agent 节点、国际化及 MCP 配置持久化
+- **v0.2.1**：GitHub 安装 Agent、推荐项目、系统代理检测与 Tauri 权限修复
+- **v0.2.0**：Manager Agent、Dashboard、PTY、代理发布和项目自动识别

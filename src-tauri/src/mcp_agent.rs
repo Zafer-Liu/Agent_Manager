@@ -43,17 +43,54 @@ pub struct RunAgentResult {
 
 // ── MCP stdio client ────────────────────────────────────────────────────────
 
-struct McpClient {
+pub(crate) struct McpClient {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     _child: Child,
     req_id: u64,
 }
 
+/// Resolve an MCP server command into a spawnable (executable, leading_args).
+///
+/// On Windows, a packaged GUI process does not inherit a shell PATH that
+/// includes `C:\Program Files\nodejs` or the npm-global dir, so a bare
+/// `node` / `npx` / `<some>-mcp` command fails with "program not found".
+/// We resolve those to absolute paths the same way agent startup does, so
+/// users don't have to type the full `C:\Program Files\nodejs\node` path.
+#[cfg(windows)]
+fn resolve_mcp_command(command: &str) -> (String, Vec<String>) {
+    // Bare `node` → absolute node.exe path.
+    let lower = command.to_lowercase();
+    if lower == "node" || lower == "node.exe" {
+        return (crate::commands::find_node_exe_path(), vec![]);
+    }
+
+    // npm-global command (npx, or an installed *-mcp bin) → its .cmd wrapper,
+    // launched through cmd.exe so the wrapper script runs.
+    if let Some(p) = crate::commands::resolve_npm_global(command) {
+        let cmd_path = p.to_string_lossy().to_string();
+        return ("cmd.exe".to_string(), vec!["/c".to_string(), cmd_path]);
+    }
+
+    // Explicit .cmd / .bat → route through cmd.exe.
+    if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+        return ("cmd.exe".to_string(), vec!["/c".to_string(), command.to_string()]);
+    }
+
+    (command.to_string(), vec![])
+}
+
+#[cfg(not(windows))]
+fn resolve_mcp_command(command: &str) -> (String, Vec<String>) {
+    (command.to_string(), vec![])
+}
+
 impl McpClient {
-    fn start(server: &McpServer) -> Result<Self, String> {
-        let mut cmd = Command::new(&server.command);
-        cmd.args(&server.args)
+    pub(crate) fn start(server: &McpServer) -> Result<Self, String> {
+        let (exe, leading) = resolve_mcp_command(&server.command);
+        let mut cmd = Command::new(&exe);
+        cmd.args(&leading)
+            .args(&server.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -119,12 +156,12 @@ impl McpClient {
         }
     }
 
-    fn list_tools(&mut self) -> Result<Vec<Value>, String> {
+    pub(crate) fn list_tools(&mut self) -> Result<Vec<Value>, String> {
         let result = self.call("tools/list", json!({}))?;
         Ok(result["tools"].as_array().cloned().unwrap_or_default())
     }
 
-    fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<Value, String> {
+    pub(crate) fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<Value, String> {
         let result = self.call("tools/call", json!({
             "name": name,
             "arguments": arguments
@@ -135,7 +172,7 @@ impl McpClient {
 
 // ── LLM chat helper ─────────────────────────────────────────────────────────
 
-async fn chat(
+pub(crate) async fn chat(
     provider: &LlmProvider,
     messages: &[Value],
     tools: &[Value],

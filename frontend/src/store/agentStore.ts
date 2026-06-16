@@ -5,25 +5,54 @@ import { create } from 'zustand'
 const ORDER_KEY = 'agent-order'
 
 function loadOrder(): string[] {
-  try { return JSON.parse(localStorage.getItem(ORDER_KEY) ?? '[]') } catch { return [] }
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(ORDER_KEY) ?? '[]')
+    if (!Array.isArray(value)) return []
+    return [...new Set(value.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+  } catch {
+    return []
+  }
 }
 function saveOrder(ids: string[]) {
   localStorage.setItem(ORDER_KEY, JSON.stringify(ids))
 }
 
-function applyOrder(agents: AgentState[], order: string[]): AgentState[] {
-  if (!order.length) return agents
+function reconcileOrder(
+  agents: AgentState[],
+  savedOrder: string[],
+  currentAgents: AgentState[],
+): { agents: AgentState[]; order: string[] } {
   const map = new Map(agents.map(a => [a.config.id, a]))
-  const sorted: AgentState[] = []
-  for (const id of order) {
-    const a = map.get(id)
-    if (a) sorted.push(a)
+  const order: string[] = []
+  const seen = new Set<string>()
+
+  const appendExisting = (ids: string[]) => {
+    for (const id of ids) {
+      if (map.has(id) && !seen.has(id)) {
+        seen.add(id)
+        order.push(id)
+      }
+    }
   }
-  // 追加 order 里没有的新 agent
-  for (const a of agents) {
-    if (!order.includes(a.config.id)) sorted.push(a)
+
+  // Persisted drag order wins. The current visible order keeps the list stable
+  // during overlapping refreshes. Brand-new agents are appended deterministically.
+  appendExisting(savedOrder)
+  appendExisting(currentAgents.map(agent => agent.config.id))
+
+  const newIds = agents
+    .filter(agent => !seen.has(agent.config.id))
+    .sort((a, b) => {
+      const created = a.config.created_at.localeCompare(b.config.created_at)
+      return created || a.config.id.localeCompare(b.config.id)
+    })
+    .map(agent => agent.config.id)
+  appendExisting(newIds)
+
+  return {
+    agents: order.map(id => map.get(id)!),
+    order,
   }
-  return sorted
 }
 
 interface AgentStore {
@@ -53,9 +82,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set({ loading: true })
     try {
       const raw = await invoke<AgentState[]>('list_agents')
-      const { order } = get()
-      const agents = applyOrder(raw, order)
-      set({ agents, loading: false })
+      const current = get()
+      const reconciled = reconcileOrder(raw, current.order, current.agents)
+      saveOrder(reconciled.order)
+      set({ agents: reconciled.agents, order: reconciled.order, loading: false })
     } catch {
       set({ loading: false })
     }
@@ -68,7 +98,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   reorderAgents: (newOrder) => {
     saveOrder(newOrder)
-    set(s => ({ order: newOrder, agents: applyOrder(s.agents, newOrder) }))
+    set(s => ({
+      order: newOrder,
+      agents: newOrder
+        .map(id => s.agents.find(agent => agent.config.id === id))
+        .filter((agent): agent is AgentState => agent !== undefined),
+    }))
   },
 
   startAgent: async (id) => {

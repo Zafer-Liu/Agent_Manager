@@ -6,7 +6,7 @@
 
 <p align="right"><a href="./README_EN.md">English</a></p>
 
-![版本](https://img.shields.io/badge/版本-v0.2.0-blue.svg)
+![版本](https://img.shields.io/badge/版本-v0.2.3-blue.svg)
 ![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)
 [![Platform](https://img.shields.io/badge/平台-Windows%20%7C%20macOS-blue?style=flat-square)](#)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri)](https://tauri.app)
@@ -286,8 +286,8 @@ brew install cloudflared
 
 | 平台 | 文件 |
 |------|------|
-| Windows | `Agent-Manager.exe` |
-| macOS（Intel） | `Agent-Manager.dmg` |
+| Windows (x64) | `智管-Agent Manager_0.2.3_x64-setup.exe` |
+| macOS | 即将发布 |
 
 双击安装包，按提示安装即可。
 
@@ -300,8 +300,8 @@ brew install cloudflared
 - [Tauri 前置依赖](https://tauri.app/start/prerequisites/)（Windows 需要 VS C++ 生成工具）
 
 ```bash
-git clone https://github.com/Zafer-Liu/Agent_MCP_Manager.git
-cd Agent_MCP_Manager
+git clone https://github.com/Zafer-Liu/Agent_Manager.git
+cd Agent_Manager
 
 # 安装依赖
 npm install
@@ -417,24 +417,25 @@ Manager Agent 和 MCP Agent 都需要 LLM 驱动。在 **MCP Agent → LLM 设�
 
 # 🗺️ 版本更新
 
-> **当前版本 `v0.2.0`** · 2026 年 6 月
+> **当前版本 `v0.2.3`** · 2026 年 6 月 13 日
 
-## v0.2.0 主要更新
+## v0.2.3 主要更新
 
 **新功能：**
 
-- ✅ **Manager Agent**：自然语言指挥所有 Agent，支持启动/停止/打开 UI/读取 README
-- ✅ **Dashboard 教室视图**：所有 Agent 状态一眼可见，悬停操作
-- ✅ **代理发布**：一键 Cloudflare Tunnel 临时分享 + Caddy 反向代理长期发布
-- ✅ **PTY 终端**：真实交互式终端，支持 Claude Code 等 TUI 工具
-- ✅ **Python 自动识别增强**：支持 FastAPI/Django/Streamlit/uv/pyproject.toml
-- ✅ **会话持久化**：Manager Agent 切换页面不丢失对话历史
+- ✅ **可视化工作流**：拖拽组合 MCP 工具、LLM 与完整 MCP Agent 节点，支持流式步骤反馈
+- ✅ **MCP Agent 增强**：对话中选择并启用多个 MCP Server，工具调用过程可折叠查看
+- ✅ **MCP 智能配置**：支持本地目录扫描、JSON/README/命令文本 AI 解析及 stdio/SSE 配置
+- ✅ **中英文界面**：新增完整 i18n 与语言切换，覆盖主要页面和操作提示
+- ✅ **配置持久化**：记住已选 LLM、启用的 MCP Server 和工作流选择
+- ✅ **持续集成**：Push、Pull Request 和正式发布前自动执行前端检查与 Rust 测试
 
 **修复：**
 
-- 修复从 Dashboard 启动 Agent 后全屏卡死问题
-- 修复 Mindmap（Node.js）启动进入 REPL 的问题
-- 修复开发端口与其他 Vite 项目冲突（改为 1420）
+- 修复“用 AI 解析”失败后界面看起来无响应的问题，并显示真实 API 错误
+- 修复中文 README 截断可能触发字符串边界异常的问题
+- 修复工作流 MCP Agent 节点的异步运行时冲突和上下文传递问题
+- 修复工作流展开内容仍被截断、删除后列表刷新竞态等问题
 
 ---
 

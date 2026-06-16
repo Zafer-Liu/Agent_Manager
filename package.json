@@ -1,11 +1,18 @@
 {
   "name": "agent-manager",
+  "version": "0.2.3",
   "private": true,
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
-    "frontend:dev": "cd frontend && npm run dev",
-    "frontend:build": "cd frontend && npm run build"
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:check": "npm --prefix frontend run check",
+    "rust:check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "lint": "npm --prefix frontend run lint",
+    "test": "npm run frontend:check && npm run rust:test",
+    "ci": "npm test"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

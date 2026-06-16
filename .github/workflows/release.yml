@@ -6,7 +6,12 @@ on:
       - 'v*'
 
 jobs:
+  quality:
+    name: Quality checks
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: quality
     strategy:
       matrix:
         include:

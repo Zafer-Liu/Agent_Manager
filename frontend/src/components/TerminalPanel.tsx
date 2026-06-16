@@ -12,15 +12,19 @@ interface Props {
   args: string[]
   cwd: string
   env: Record<string, string>
+  active: boolean
+  clearVersion: number
 }
 
-export function TerminalPanel({ id, command, args, cwd, env }: Props) {
+export function TerminalPanel({ id, command, args, cwd, env, active, clearVersion }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const startedRef = useRef(false)
+  const activeRef = useRef(active)
+  const clearVersionRef = useRef(clearVersion)
 
-  const startPty = useCallback(async (term: Terminal, _fit: FitAddon) => {
+  const startPty = useCallback(async (term: Terminal) => {
     const { cols, rows } = term
     term.writeln(`\x1b[90mStarting: ${command} ${args.join(' ')}\x1b[0m`)
     // Show resolved exe+args so we can see what Rust actually runs
@@ -105,8 +109,8 @@ export function TerminalPanel({ id, command, args, cwd, env }: Props) {
     })
 
     // Receive PTY output from Tauri events
-    const unlistenData = listen<string>(`pty-data-${id}`, (event) => {
-      term.write(event.payload)
+    const unlistenData = listen<number[]>(`pty-data-${id}`, (event) => {
+      term.write(Uint8Array.from(event.payload))
     })
 
     const unlistenExit = listen(`pty-exit-${id}`, () => {
@@ -115,12 +119,13 @@ export function TerminalPanel({ id, command, args, cwd, env }: Props) {
 
     // Wait for DOM to settle so fit() gets real dimensions before starting PTY
     requestAnimationFrame(() => {
-      fit.fit()
-      startPty(term, fit)
+      if (activeRef.current) fit.fit()
+      startPty(term)
     })
 
     // ResizeObserver to keep terminal fitted
     const ro = new ResizeObserver(() => {
+      if (!activeRef.current) return
       fit.fit()
       const { cols, rows } = term
       invoke('pty_resize', { id, cols, rows }).catch(() => {})
@@ -135,7 +140,34 @@ export function TerminalPanel({ id, command, args, cwd, env }: Props) {
       term.dispose()
       startedRef.current = false
     }
-  }, []) // intentionally empty — run once on mount
+    // A PTY session is owned by this component mount and must not restart when
+    // parent props receive equivalent object/array identities.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    activeRef.current = active
+    if (!active) return
+
+    const frame = requestAnimationFrame(() => {
+      const term = termRef.current
+      const fit = fitRef.current
+      if (!term || !fit) return
+      fit.fit()
+      invoke('pty_resize', { id, cols: term.cols, rows: term.rows }).catch(() => {})
+      term.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [active, id])
+
+  useEffect(() => {
+    if (clearVersion === clearVersionRef.current) return
+    clearVersionRef.current = clearVersion
+    const term = termRef.current
+    if (!term) return
+    term.clear()
+    term.write('\x1b[2J\x1b[H')
+  }, [clearVersion])
 
   return (
     <div

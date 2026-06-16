@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { AgentConfig } from '../types/agent'
 import { X, Plus, Minus, Loader2, FolderOpen, Sparkles, AlertCircle, Eye, EyeOff, GitBranch, PenLine } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
@@ -33,6 +34,7 @@ const PROJECT_TYPE_LABELS: Record<string, string> = {
 type FormTab = 'manual' | 'github'
 
 export function AgentForm({ initial, onSave, onClose }: Props) {
+  const { t } = useTranslation()
   const isEdit = !!initial?.id
 
   // 编辑已有 Agent 时固定在 manual tab
@@ -54,6 +56,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState('')
   const [scanHint, setScanHint] = useState('')
+  const [scanStatus, setScanStatus] = useState<'detected' | 'failed' | ''>('')
 
   /** GitHub tab 完成 clone 后预填充字段，并切换到 manual tab 让用户确认 */
   function handleGithubPrefill(partial: Partial<AgentConfig>) {
@@ -77,7 +80,8 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
     } catch (e) {
       const msg = String(e)
       if (!msg.includes('cancelled') && msg !== 'null' && msg !== 'undefined') {
-        setScanHint(`无法打开文件夹选择器：${msg}`)
+        setScanStatus('failed')
+        setScanHint(t('agentForm.openFolderFailed', { error: msg }))
       }
     }
   }
@@ -86,6 +90,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
     if (!dir) return
     setScanning(true)
     setScanHint('')
+    setScanStatus('')
     try {
       const result = await invoke<ScanResult>('scan_project_dir', { dir })
       if (!name) setName(result.name)
@@ -95,12 +100,15 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
       if (!port && result.port) setPort(result.port.toString())
 
       if (result.project_type !== 'unknown') {
-        setScanHint(`Detected: ${PROJECT_TYPE_LABELS[result.project_type] ?? result.project_type}`)
+        setScanStatus('detected')
+        setScanHint(t('agentForm.detected', { type: PROJECT_TYPE_LABELS[result.project_type] ?? result.project_type }))
       } else {
-        setScanHint('Could not detect project type — please fill in manually.')
+        setScanStatus('failed')
+        setScanHint(t('agentForm.detectFailed'))
       }
     } catch (e) {
-      setScanHint(`Scan failed: ${e}`)
+      setScanStatus('failed')
+      setScanHint(t('agentForm.scanFailed', { error: String(e) }))
     } finally {
       setScanning(false)
     }
@@ -115,8 +123,8 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!name.trim()) { setError('Name is required'); return }
-    if (!command.trim()) { setError('Command is required'); return }
+    if (!name.trim()) { setError(t('agentForm.nameRequired')); return }
+    if (!command.trim()) { setError(t('agentForm.commandRequired')); return }
 
     const env: Record<string, string> = {}
     envPairs.forEach(([k, v]) => { if (k.trim()) env[k.trim()] = v })
@@ -149,7 +157,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
         {/* Header */}
         <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-800">
           <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            {isEdit ? 'Edit Agent' : 'New Agent'}
+            {isEdit ? t('agentForm.titleEdit') : t('agentForm.titleNew')}
           </h3>
           <button onClick={onClose} className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300">
             <X className="h-5 w-5" />
@@ -163,13 +171,13 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
               active={activeTab === 'manual'}
               onClick={() => setActiveTab('manual')}
               icon={<PenLine className="h-3.5 w-3.5" />}
-              label="手动配置"
+              label={t('agentForm.tabManual')}
             />
             <TabBtn
               active={activeTab === 'github'}
               onClick={() => setActiveTab('github')}
               icon={<GitBranch className="h-3.5 w-3.5" />}
-              label="从 GitHub 安装"
+              label={t('agentForm.tabGithub')}
             />
           </div>
         )}
@@ -186,7 +194,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
         <form onSubmit={handleSubmit}>
           <div className="max-h-[65vh] overflow-y-auto px-6 py-5 space-y-4">
 
-            <Field label="Working Directory">
+            <Field label={t('agentForm.workingDir')}>
               <div className="flex gap-2">
                 <input
                   value={workingDir}
@@ -198,7 +206,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
                   type="button"
                   onClick={pickDirectory}
                   className="flex items-center rounded-lg border border-gray-200 px-3 py-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-                  title="Browse folder"
+                  title={t('agentForm.browseFolder')}
                 >
                   <FolderOpen className="h-4 w-4" />
                 </button>
@@ -207,12 +215,12 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
                 <div className={`mt-2 flex items-center gap-1.5 text-xs rounded-lg px-3 py-2 ${
                   scanning
                     ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-                    : scanHint.startsWith('Detected')
+                    : scanStatus === 'detected'
                       ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                       : 'bg-yellow-50 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
                 }`}>
                   {scanning
-                    ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Scanning project...</>
+                    ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('agentForm.scanningProject')}</>
                     : <><Sparkles className="h-3.5 w-3.5" /> {scanHint}</>
                   }
                 </div>
@@ -221,41 +229,41 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
 
             <div className="border-t border-gray-200 dark:border-gray-800" />
 
-            <Field label="Name *">
+            <Field label={t('agentForm.name')}>
               <input autoFocus={!!initial?.id} value={name} onChange={e => setName(e.target.value)}
-                placeholder="My Agent" className="field-input" />
+                placeholder={t('agentForm.namePlaceholder')} className="field-input" />
             </Field>
 
-            <Field label="Description">
+            <Field label={t('agentForm.description')}>
               <input value={description} onChange={e => setDescription(e.target.value)}
-                placeholder="What does this agent do?" className="field-input" />
+                placeholder={t('agentForm.descriptionPlaceholder')} className="field-input" />
             </Field>
 
-            <Field label="Command *">
+            <Field label={t('agentForm.command')}>
               <input value={command} onChange={e => setCommand(e.target.value)}
-                placeholder="python / node / uvicorn / cargo" className="field-input font-mono" />
+                placeholder={t('agentForm.commandPlaceholder')} className="field-input font-mono" />
             </Field>
 
-            <Field label="Arguments">
+            <Field label={t('agentForm.args')}>
               <input value={argInput} onChange={e => setArgInput(e.target.value)}
-                placeholder="main.py --port 8080 --verbose" className="field-input font-mono" />
+                placeholder={t('agentForm.argsPlaceholder')} className="field-input font-mono" />
             </Field>
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Port (optional)">
+              <Field label={t('agentForm.port')}>
                 <input type="number" value={port} onChange={e => setPort(e.target.value)}
-                  placeholder="8080" min={1} max={65535} className="field-input" />
+                  placeholder={t('agentForm.portPlaceholder')} min={1} max={65535} className="field-input" />
               </Field>
               <Field label="">
                 <label className="flex h-full items-end gap-2 pb-0.5 text-sm text-gray-600 cursor-pointer dark:text-gray-300">
                   <input type="checkbox" checked={autoRestart}
                     onChange={e => setAutoRestart(e.target.checked)} className="rounded" />
-                  Auto-restart on crash
+                  {t('agentForm.autoRestart')}
                 </label>
               </Field>
             </div>
 
-            <Field label="UI Access Key (optional)">
+            <Field label={t('agentForm.uiToken')}>
               <div className="flex gap-2">
                 <input
                   type={showToken ? 'text' : 'password'}
@@ -265,25 +273,25 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
                 />
                 <button type="button" onClick={() => setShowToken(v => !v)}
                   className="flex items-center rounded-lg border border-gray-200 px-3 py-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:border-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-                  title={showToken ? 'Hide' : 'Show'}>
+                  title={showToken ? t('agentForm.hide') : t('agentForm.show')}>
                   {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
               <p className="mt-1 text-xs text-gray-400 dark:text-gray-600">
-                打开 UI 时自动填写到登录表单并连接，无需手动输入
+                {t('agentForm.uiTokenHint')}
               </p>
             </Field>
 
-            <Field label="Environment Variables">
+            <Field label={t('agentForm.env')}>
               <div className="space-y-2">
                 {envPairs.map(([k, v], i) => (
                   <div key={i} className="flex gap-2">
                     <input value={k}
                       onChange={e => setEnvPairs(p => p.map((pair, j) => j === i ? [e.target.value, pair[1]] : pair))}
-                      placeholder="KEY" className="field-input flex-1 font-mono" />
+                      placeholder={t('agentForm.envKey')} className="field-input flex-1 font-mono" />
                     <input value={v}
                       onChange={e => setEnvPairs(p => p.map((pair, j) => j === i ? [pair[0], e.target.value] : pair))}
-                      placeholder="value" className="field-input flex-1 font-mono" />
+                      placeholder={t('agentForm.envValue')} className="field-input flex-1 font-mono" />
                     <button type="button"
                       onClick={() => setEnvPairs(p => p.filter((_, j) => j !== i))}
                       className="text-gray-400 hover:text-red-500 dark:text-gray-600 dark:hover:text-red-400">
@@ -293,7 +301,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
                 ))}
                 <button type="button" onClick={() => setEnvPairs(p => [...p, ['', '']])}
                   className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300">
-                  <Plus className="h-3.5 w-3.5" /> Add variable
+                  <Plus className="h-3.5 w-3.5" /> {t('agentForm.addEnv')}
                 </button>
               </div>
             </Field>
@@ -310,12 +318,12 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
           <div className="flex justify-end gap-2 border-t border-gray-200 px-6 py-4 dark:border-gray-800">
             <button type="button" onClick={onClose}
               className="rounded-lg px-4 py-2 text-sm text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200">
-              Cancel
+              {t('agentForm.cancel')}
             </button>
             <button type="submit" disabled={saving}
               className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-60">
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              {saving ? 'Saving...' : 'Save Agent'}
+              {saving ? t('agentForm.saving') : t('agentForm.save')}
             </button>
           </div>
         </form>

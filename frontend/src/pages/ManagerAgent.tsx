@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { useTranslation } from 'react-i18next'
 import type { AgentState } from '../types/agent'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -88,6 +89,7 @@ export function ManagerAgent({
   onStopAgent,
   onNavigate,
 }: ManagerAgentProps) {
+  const { t } = useTranslation()
   const [providers, setProviders] = useState<LlmProvider[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
@@ -110,6 +112,9 @@ export function ManagerAgent({
         if (active) setSelectedProvider(active.id)
       }
     })
+    // Provider discovery is initialization-only; session updates must not
+    // refetch providers or overwrite the user's current selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -195,7 +200,7 @@ export function ManagerAgent({
         request: { history, provider: activeProvider, agents: agentInfos, max_iterations: 8 },
       })
 
-      const rawReply = result.reply || (result.error ?? '（无响应）')
+      const rawReply = result.reply || (result.error ?? t('manager.noResponse'))
 
       // Extract actions from tool results (embedded as __action__:type:id:name)
       const toolActions = extractActionsFromSteps(result.steps)
@@ -210,7 +215,7 @@ export function ManagerAgent({
 
       if (toolActions.length > 0) await executeActions(toolActions)
     } catch (e) {
-      const errMsg: ManagerChatMessage = { role: 'assistant', content: `错误：${e}` }
+      const errMsg: ManagerChatMessage = { role: 'assistant', content: t('manager.errorPrefix', { error: String(e) }) }
       onSessionChange({ ...session, messages: [...nextMessages, errMsg] })
     } finally {
       setSending(false)
@@ -243,7 +248,7 @@ export function ManagerAgent({
             <div>
               <p className="text-sm font-semibold text-gray-900 dark:text-gray-100 leading-none">Manager Agent</p>
               <p className="mt-0.5 text-xs text-gray-400 dark:text-gray-500">
-                {agents.length} agents · {runningCount} 运行中
+                {agents.length} agents · {runningCount} {t('manager.running')}
               </p>
             </div>
           </div>
@@ -257,14 +262,14 @@ export function ManagerAgent({
               </span>
             ) : (
               <span className="flex items-center gap-1 rounded-full bg-yellow-50 dark:bg-yellow-900/20 px-2.5 py-1 text-xs font-medium text-yellow-700 dark:text-yellow-400">
-                <AlertCircle className="h-3 w-3" />未配置 LLM
+                <AlertCircle className="h-3 w-3" />{t('manager.notConfigured')}
               </span>
             )}
             {messages.length > 0 && (
               <button
                 onClick={() => onSessionChange({ ...session, messages: [] })}
                 className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-red-500 transition-colors"
-                title="清空对话"
+                title={t('manager.clearChat')}
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -272,7 +277,7 @@ export function ManagerAgent({
             <button
               onClick={() => setShowSettings(s => !s)}
               className={`rounded-lg p-1.5 transition-colors ${showSettings ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300' : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
-              title="设置"
+              title={t('manager.settings')}
             >
               <Settings className="h-4 w-4" />
             </button>
@@ -282,7 +287,7 @@ export function ManagerAgent({
         {/* Settings dropdown */}
         {showSettings && (
           <div className="mt-3 flex items-center gap-3 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 p-3">
-            <span className="text-xs font-medium text-gray-500 shrink-0">模型</span>
+            <span className="text-xs font-medium text-gray-500 shrink-0">{t('manager.model')}</span>
             {availableProviders.length > 0 ? (
               <select
                 value={selectedProvider}
@@ -294,7 +299,7 @@ export function ManagerAgent({
                 ))}
               </select>
             ) : (
-              <span className="text-xs text-yellow-600">请先在 MCP Agent → LLM Settings 中配置</span>
+              <span className="text-xs text-yellow-600">{t('manager.configureHint')}</span>
             )}
           </div>
         )}
@@ -325,7 +330,7 @@ export function ManagerAgent({
                 <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-4 py-3 shadow-sm">
                   <Loader2 className="h-4 w-4 animate-spin text-amber-500" />
                   <span className="text-sm text-gray-500 dark:text-gray-400">
-                    {executingActions ? '执行中...' : '思考中...'}
+                    {executingActions ? t('manager.executing') : t('manager.thinking')}
                   </span>
                 </div>
               </div>
@@ -348,7 +353,7 @@ export function ManagerAgent({
               value={input}
               onChange={autoResize}
               onKeyDown={handleKeyDown}
-              placeholder={activeProvider ? '指挥 Manager Agent... （Enter 发送，Shift+Enter 换行）' : '请先配置 LLM'}
+              placeholder={activeProvider ? t('manager.inputPlaceholderFull') : t('manager.inputPlaceholderNoLlm')}
               rows={1}
               disabled={sending || !activeProvider}
               className="flex-1 resize-none bg-transparent text-sm text-gray-800 dark:text-gray-100 placeholder-gray-400 outline-none disabled:cursor-not-allowed"
@@ -363,7 +368,7 @@ export function ManagerAgent({
             </button>
           </div>
           <p className="mt-1.5 text-center text-[11px] text-gray-400 dark:text-gray-600">
-            Manager Agent 可读取 agent 实时状态 · 可执行启动/停止/打开界面等操作
+            {t('manager.footerHint')}
           </p>
         </div>
       </div>
@@ -374,11 +379,12 @@ export function ManagerAgent({
 // ── EmptyState ────────────────────────────────────────────────────────────────
 
 function EmptyState({ agents, onPrompt }: { agents: AgentState[]; onPrompt: (p: string) => void }) {
+  const { t } = useTranslation()
   const examples = [
-    { icon: <Activity className="h-4 w-4" />, text: '查看所有 agent 的实时状态' },
-    { icon: <Play className="h-4 w-4" />, text: '帮我启动所有已停止的 agent' },
-    { icon: <ExternalLink className="h-4 w-4" />, text: agents[0] ? `打开 ${agents[0].config.name} 的界面` : '打开指定 agent 的界面' },
-    { icon: <Navigation className="h-4 w-4" />, text: '切换到 Dashboard 看总览' },
+    { icon: <Activity className="h-4 w-4" />, text: t('manager.exampleStatus') },
+    { icon: <Play className="h-4 w-4" />, text: t('manager.exampleStartAll') },
+    { icon: <ExternalLink className="h-4 w-4" />, text: agents[0] ? t('manager.exampleOpenUi', { name: agents[0].config.name }) : t('manager.exampleOpenUiGeneric') },
+    { icon: <Navigation className="h-4 w-4" />, text: t('manager.exampleNavigate') },
   ]
 
   return (
@@ -395,15 +401,15 @@ function EmptyState({ agents, onPrompt }: { agents: AgentState[]; onPrompt: (p: 
 
       {/* Text */}
       <div className="text-center space-y-2">
-        <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Manager Agent 就绪</h2>
+        <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-100">{t('manager.ready')}</h2>
         <p className="text-sm text-gray-500 dark:text-gray-400 max-w-xs">
-          用自然语言指挥所有连接的 agent，我会理解你的意图并执行操作
+          {t('manager.readyDesc')}
         </p>
       </div>
 
       {/* Example prompts */}
       <div className="w-full max-w-sm space-y-2">
-        <p className="text-xs font-medium text-gray-400 dark:text-gray-600 uppercase tracking-wide mb-3">试试这些</p>
+        <p className="text-xs font-medium text-gray-400 dark:text-gray-600 uppercase tracking-wide mb-3">{t('manager.tryThese')}</p>
         {examples.map((ex, i) => (
           <button
             key={i}
@@ -467,6 +473,7 @@ function MessageBubble({ msg }: { msg: ManagerChatMessage }) {
 // ── ToolCallGroup ─────────────────────────────────────────────────────────────
 
 function ToolCallGroup({ steps }: { steps: AgentStep[] }) {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
 
   const toolCalls = steps.filter(s => s.kind === 'toolcall')
@@ -484,8 +491,8 @@ function ToolCallGroup({ steps }: { steps: AgentStep[] }) {
       >
         <Activity className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
         <span className="flex-1 text-xs font-medium text-amber-700 dark:text-amber-400">
-          {toolCalls.map(t => t.tool).filter(Boolean).join(' · ')}
-          {errors.length > 0 && <span className="ml-1 text-red-500">· {errors.length} 错误</span>}
+          {toolCalls.map(tc => tc.tool).filter(Boolean).join(' · ')}
+          {errors.length > 0 && <span className="ml-1 text-red-500">· {t('manager.errorsCount', { count: errors.length })}</span>}
         </span>
         {expanded
           ? <ChevronUp className="h-3.5 w-3.5 text-amber-500 shrink-0" />
@@ -504,7 +511,7 @@ function ToolCallGroup({ steps }: { steps: AgentStep[] }) {
           ))}
           {toolResults.map((s, i) => (
             <div key={i} className="space-y-0.5">
-              <p className="text-[10px] font-mono text-amber-600 dark:text-amber-500">{s.tool} result</p>
+              <p className="text-[10px] font-mono text-amber-600 dark:text-amber-500">{s.tool} {t('manager.resultSuffix')}</p>
               <pre className="overflow-x-auto rounded-lg bg-gray-900 dark:bg-black px-3 py-2 text-[11px] font-mono text-green-300 whitespace-pre-wrap">{s.content}</pre>
             </div>
           ))}
@@ -516,16 +523,17 @@ function ToolCallGroup({ steps }: { steps: AgentStep[] }) {
 
 // ── ActionRow ─────────────────────────────────────────────────────────────────
 
-const ACTION_CFG: Record<string, { icon: React.ReactNode; label: string; color: string }> = {
-  open_ui:       { icon: <ExternalLink className="h-3.5 w-3.5" />, label: '打开界面',  color: 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800' },
-  open_terminal: { icon: <TerminalSquare className="h-3.5 w-3.5" />, label: '打开终端', color: 'bg-green-100 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-400 dark:border-green-800' },
-  start_agent:   { icon: <Play className="h-3.5 w-3.5" />,         label: '启动',      color: 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800' },
-  stop_agent:    { icon: <Square className="h-3.5 w-3.5" />,       label: '停止',      color: 'bg-red-100 text-red-600 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800' },
-  navigate:      { icon: <Navigation className="h-3.5 w-3.5" />,   label: '导航',      color: 'bg-purple-100 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-800' },
-  send_message:  { icon: <MessageSquare className="h-3.5 w-3.5" />, label: '发消息',   color: 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800' },
+const ACTION_CFG: Record<string, { icon: React.ReactNode; labelKey: string; color: string }> = {
+  open_ui:       { icon: <ExternalLink className="h-3.5 w-3.5" />, labelKey: 'manager.actionOpenUi',       color: 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800' },
+  open_terminal: { icon: <TerminalSquare className="h-3.5 w-3.5" />, labelKey: 'manager.actionOpenTerminal', color: 'bg-green-100 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-400 dark:border-green-800' },
+  start_agent:   { icon: <Play className="h-3.5 w-3.5" />,         labelKey: 'manager.actionStart',         color: 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800' },
+  stop_agent:    { icon: <Square className="h-3.5 w-3.5" />,       labelKey: 'manager.actionStop',          color: 'bg-red-100 text-red-600 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800' },
+  navigate:      { icon: <Navigation className="h-3.5 w-3.5" />,   labelKey: 'manager.actionNavigate',      color: 'bg-purple-100 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-800' },
+  send_message:  { icon: <MessageSquare className="h-3.5 w-3.5" />, labelKey: 'manager.actionSendMessage',  color: 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800' },
 }
 
 function ActionRow({ actions }: { actions: ManagerAction[] }) {
+  const { t } = useTranslation()
   return (
     <div className="flex flex-wrap gap-1.5">
       {actions.map((action, i) => {
@@ -537,7 +545,7 @@ function ActionRow({ actions }: { actions: ManagerAction[] }) {
             className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium ${cfg.color}`}
           >
             {cfg.icon}
-            <span>{cfg.label}</span>
+            <span>{t(cfg.labelKey)}</span>
             {target && <span className="opacity-70">· {target}</span>}
           </span>
         )

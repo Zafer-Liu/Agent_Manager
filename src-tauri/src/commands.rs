@@ -816,24 +816,84 @@ fn find_executable(path: &Path) -> Option<String> {
     None
 }
 
-/// Resolve an npm-global command to its full .cmd path on Windows.
+/// Resolve a shell command wrapper to its full .cmd/.bat path on Windows.
 #[cfg(windows)]
 pub fn resolve_npm_global(cmd: &str) -> Option<std::path::PathBuf> {
+    let command_path = std::path::Path::new(cmd);
+    if command_path.is_file() && is_windows_command_wrapper(command_path) {
+        return Some(command_path.to_path_buf());
+    }
+
+    // `std::process::Command` does not apply PATHEXT like an interactive
+    // Windows shell does. `where npm` commonly returns both an extensionless
+    // shim and npm.cmd, so explicitly select a runnable command wrapper.
+    if let Ok(output) = std::process::Command::new("where.exe").arg(cmd).output() {
+        if output.status.success() {
+            if let Some(path) =
+                select_windows_command_wrapper(&String::from_utf8_lossy(&output.stdout))
+            {
+                return Some(path);
+            }
+        }
+    }
+
+    let command_name = command_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(cmd);
+
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        let candidate = std::path::Path::new(&appdata).join("npm").join(format!("{}.cmd", cmd));
+        let candidate = std::path::Path::new(&appdata)
+            .join("npm")
+            .join(format!("{}.cmd", command_name));
         if candidate.exists() {
             return Some(candidate);
         }
     }
     if let Some(profile) = std::env::var_os("USERPROFILE") {
         let candidate = std::path::Path::new(&profile)
-            .join("AppData").join("Roaming").join("npm")
-            .join(format!("{}.cmd", cmd));
+            .join("AppData")
+            .join("Roaming")
+            .join("npm")
+            .join(format!("{}.cmd", command_name));
         if candidate.exists() {
             return Some(candidate);
         }
     }
+
+    // npm/npx installed with Node itself live beside node.exe rather than in
+    // the per-user npm global bin directory.
+    let node_dir = std::path::PathBuf::from(find_node_exe_path());
+    if let Some(parent) = node_dir.parent() {
+        for extension in ["cmd", "bat"] {
+            let candidate = parent.join(format!("{}.{}", command_name, extension));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
     None
+}
+
+#[cfg(windows)]
+fn is_windows_command_wrapper(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn select_windows_command_wrapper(output: &str) -> Option<std::path::PathBuf> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(std::path::PathBuf::from)
+        .find(|path| is_windows_command_wrapper(path))
 }
 
 /// For PTY use: resolve an npm-global command to (node_exe, js_entry).
@@ -900,7 +960,7 @@ fn find_bin_entry(node_modules: &std::path::Path, cmd: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn find_node_exe_path() -> String {
+pub fn find_node_exe_path() -> String {
     // 1. where.exe node
     if let Ok(out) = std::process::Command::new("where.exe").arg("node").output() {
         if out.status.success() {
@@ -934,4 +994,22 @@ pub fn resolve_npm_global(_cmd: &str) -> Option<std::path::PathBuf> {
 #[cfg(not(windows))]
 pub fn resolve_npm_global_to_node(_cmd: &str) -> Option<(String, String)> {
     None
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::select_windows_command_wrapper;
+
+    #[test]
+    fn selects_cmd_wrapper_from_where_output() {
+        let node_dir = std::path::Path::new(r"C:\Program Files\nodejs");
+        let npm_cmd = node_dir.join("npm.cmd");
+        let output = format!(
+            "{}\r\n{}\r\n",
+            node_dir.join("npm").display(),
+            npm_cmd.display()
+        );
+
+        assert_eq!(select_windows_command_wrapper(&output), Some(npm_cmd));
+    }
 }
