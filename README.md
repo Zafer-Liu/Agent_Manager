@@ -8,6 +8,8 @@
 
 ![版本](https://img.shields.io/badge/版本-v0.2.3-blue.svg)
 ![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)
+[![Stars](https://img.shields.io/github/stars/Zafer-Liu/Agent_Manager?style=flat-square)](https://github.com/Zafer-Liu/Agent_Manager/stargazers)
+[![CI](https://img.shields.io/github/actions/workflow/status/Zafer-Liu/Agent_Manager/ci.yml?style=flat-square&label=CI)](https://github.com/Zafer-Liu/Agent_Manager/actions)
 [![Platform](https://img.shields.io/badge/平台-Windows%20%7C%20macOS-blue?style=flat-square)](#)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react)](https://react.dev)
@@ -266,7 +268,7 @@ brew install cloudflared
 <a id="ports"></a>
 
 ## 6️⃣ Port Manager — 端口管理
-![/port](Images/port.png)
+![port](Images/port.png)
 
 查看当前机器上所有正在监听的端口：
 
@@ -282,7 +284,7 @@ brew install cloudflared
 
 ### 下载预构建安装包（推荐）
 
-从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/tree/main/Releases) 下载最新版本：
+从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/releases) 下载最新版本：
 
 | 平台 | 文件 |
 |------|------|
@@ -437,6 +439,8 @@ Manager Agent 和 MCP Agent 都需要 LLM 驱动。在 **MCP Agent → LLM 设�
 - 修复工作流 MCP Agent 节点的异步运行时冲突和上下文传递问题
 - 修复工作流展开内容仍被截断、删除后列表刷新竞态等问题
 
+📖 [查看完整 Changelog](https://github.com/Zafer-Liu/Agent_Manager/releases)
+
 ---
 
 <a id="faq"></a>
@@ -476,7 +480,7 @@ LLM 使用的是 Agent 的名称，确认你说的名称和 Agent 配置中的�
 ---
 
 <details>
-<summary><b>🤖 Agent 管理相关</b></summary>
+<summary><b>📦 Agent 管理相关</b></summary>
 
 <br>
 
@@ -627,7 +631,15 @@ taskkill /PID <PID> /F
 
 # 🤝 参与贡献
 
-欢迎提交 PR 或 Issue！
+欢迎提交 PR 或 Issue！参与方式：
+
+1. **Fork** 本仓库
+2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'feat: add amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 提交 **Pull Request**
+
+Bug 报告或功能建议请通过 [Issues](https://github.com/Zafer-Liu/Agent_Manager/issues) 提交。开发环境搭建详见[从源码构建](#install)。
 
 ---
 

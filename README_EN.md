@@ -8,6 +8,8 @@
 
 ![Version](https://img.shields.io/badge/Version-v0.2.3-blue.svg)
 ![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)
+[![Stars](https://img.shields.io/github/stars/Zafer-Liu/Agent_Manager?style=flat-square)](https://github.com/Zafer-Liu/Agent_Manager/stargazers)
+[![CI](https://img.shields.io/github/actions/workflow/status/Zafer-Liu/Agent_Manager/ci.yml?style=flat-square&label=CI)](https://github.com/Zafer-Liu/Agent_Manager/actions)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-blue?style=flat-square)](#)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react)](https://react.dev)
@@ -23,6 +25,7 @@
 
 <p align="center">
   <a href="#features">✨ Highlights</a> ·
+  <a href="#recommended-agents">🤝 Recommended</a> ·
   <a href="#install">⚙️ Installation</a> ·
   <a href="#quickstart">🚀 Quick Start</a> ·
   <a href="#llm-config">🤖 LLM Config</a> ·
@@ -36,6 +39,7 @@
 <br>
 
 - [Highlights](#features)
+- [Recommended Agent](#recommended-agents)
 - [Core Capabilities](#capabilities)
   - [Dashboard Classroom View](#dashboard)
   - [Manager Agent Natural-Language Commander](#manager)
@@ -69,6 +73,48 @@ Core idea: **manage all Agents from one window.**
 - No need to remember different startup commands
 - No need to manually open browser tabs and search for ports
 - Control every Agent through natural language
+
+---
+
+<a id="recommended-agents"></a>
+
+# 🤝 Recommended Agent
+
+Agent Manager can centrally manage various locally running AI Agents.
+If you're looking for a business-oriented Agent to host under Agent Manager, we recommend:
+
+<details>
+<summary><strong>📊 Smart Business Analytics Agent</strong></summary>
+
+<br>
+
+**Smart Business Analytics Agent** is an AI Agent for business data analysis scenarios.
+After uploading Excel/CSV files or connecting a database, users can ask questions in natural language. The system automatically handles:
+
+* Data structure recognition
+* SQL generation and execution
+* Chart recommendation and generation
+* Business insight analysis
+* Excel / Word / PPT report export
+
+When used together with Agent Manager, you get a more complete desktop experience:
+
+| Scenario | Agent Manager provides |
+|----------|----------------------|
+| Start the Analytics Agent | One-click start / stop process |
+| Monitor runtime status | Real-time logs, PID, port status |
+| Open the analytics interface | Embedded Web UI, no browser switching |
+| Temporary team demos | One-click Cloudflare Tunnel public link |
+| Multi-Agent collaboration | Natural-language orchestration via Manager Agent |
+
+```text
+Example:
+Start the Business Analytics Agent and open its interface.
+```
+
+👉 Project: [Smart Business Analytics Agent](https://github.com/Zafer-Liu/Data-Analysis-Agent)
+
+</details>
 
 ---
 
@@ -309,7 +355,7 @@ Build outputs are located in `src-tauri/target/release/bundle/`.
 3. Select an LLM provider
 4. Send instructions in natural language
 
-## Step 4: Share an Agent During Meetings Optional
+## Step 4: Share an Agent During Meetings (Optional)
 
 1. Install cloudflared
 2. Open the **Agent Publishing** page
@@ -404,6 +450,8 @@ Port numbers are also detected automatically by scanning `.env` files, `pyprojec
 - Fixed async runtime conflicts and broken context passing in MCP Agent workflow nodes
 - Fixed workflow text remaining truncated after expansion and a server-list refresh race after deletion
 
+📖 [View Full Changelog](https://github.com/Zafer-Liu/Agent_Manager/releases)
+
 ---
 
 <a id="faq"></a>
@@ -443,7 +491,7 @@ This was fixed in v0.2.0. The Manager Agent component now stays mounted in the b
 ---
 
 <details>
-<summary><b>🤖 Agent Management</b></summary>
+<summary><b>📦 Agent Management</b></summary>
 
 <br>
 
@@ -595,7 +643,15 @@ taskkill /PID <PID> /F
 
 # 🤝 Contributing
 
-PRs and Issues are welcome.
+PRs and Issues are welcome! Here's how to get involved:
+
+1. **Fork** this repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a **Pull Request**
+
+For bug reports or feature requests, please use [Issues](https://github.com/Zafer-Liu/Agent_Manager/issues). See [Build from Source](#install) for dev environment setup.
 
 ---
 
