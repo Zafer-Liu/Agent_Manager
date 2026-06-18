@@ -36,12 +36,44 @@ pub struct AgentState {
     pub pid: Option<u32>,
     pub started_at: Option<String>,
     pub port_open: bool,
+    /// 自动重启累计次数（手动 start_agent 时重置）
+    #[serde(default)]
+    pub restart_count: u32,
+    /// 最近一次进程退出码（None 表示从未退出或仍在运行）
+    #[serde(default)]
+    pub last_exit_code: Option<i32>,
 }
 
+/// 共享的 Agent 运行时存储。所有字段都是 Arc<Mutex>，
+/// 以便在监控线程、自动重启线程中安全共享。
 pub struct AgentStore {
-    pub agents: Mutex<HashMap<String, AgentState>>,
+    pub agents: Arc<Mutex<HashMap<String, AgentState>>>,
     pub logs: Arc<Mutex<HashMap<String, Vec<LogEntry>>>>,
-    pub processes: Mutex<HashMap<String, Child>>,
+    pub processes: Arc<Mutex<HashMap<String, Child>>>,
+    /// 正在重启中的 agent id → 已重启次数，避免重启风暴与重复触发。
+    /// 值为 u32::MAX 时表示被 stop_agent 显式阻止重启。
+    pub restarting: Arc<Mutex<HashMap<String, u32>>>,
+}
+
+impl AgentStore {
+    pub fn new() -> Self {
+        Self {
+            agents: Arc::new(Mutex::new(HashMap::new())),
+            logs: Arc::new(Mutex::new(HashMap::new())),
+            processes: Arc::new(Mutex::new(HashMap::new())),
+            restarting: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+/// 自动重启策略常量
+pub mod restart_policy {
+    /// 启动后存活检查等待时长
+    pub const HEALTH_CHECK_MS: u64 = 800;
+    /// 单个 agent 最大自动重启次数
+    pub const MAX_RESTARTS: u32 = 5;
+    /// 两次重启之间的最小退避间隔
+    pub const RESTART_BACKOFF_MS: u64 = 1500;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,14 +90,4 @@ pub enum LogLevel {
     Warn,
     Error,
     Debug,
-}
-
-impl AgentStore {
-    pub fn new() -> Self {
-        Self {
-            agents: Mutex::new(HashMap::new()),
-            logs: Arc::new(Mutex::new(HashMap::new())),
-            processes: Mutex::new(HashMap::new()),
-        }
-    }
 }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::State;
@@ -57,40 +57,186 @@ fn push_log(logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>, id: &str, level: 
     });
 }
 
+/// 终止进程树：Windows 用 taskkill /T /F 递归杀掉子进程，避免孤儿进程
+#[cfg(windows)]
+fn kill_process_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // 兜底：确保直接子进程也被 kill
+    let _ = child.kill();
+}
+
+#[cfg(not(windows))]
+fn kill_process_tree(child: &mut std::process::Child) {
+    // TODO: Unix 下可用 pgid 杀进程组，这里先用基础 kill
+    let _ = child.kill();
+}
+
 #[tauri::command]
 pub fn list_agents(store: State<AgentStore>) -> Vec<AgentState> {
     let configs = load_configs();
     let mut agents = store.agents.lock().unwrap();
 
-    // 检查进程是否还活着
+    // 检查进程是否还活着，同步更新状态
     let mut processes = store.processes.lock().unwrap();
+    let mut exited: Vec<(String, Option<i32>)> = Vec::new();
     for (id, child) in processes.iter_mut() {
-        if let Ok(Some(_)) = child.try_wait() {
+        if let Ok(Some(status)) = child.try_wait() {
+            let code = status.code();
+            exited.push((id.clone(), code));
             if let Some(state) = agents.get_mut(id) {
                 state.status = AgentStatus::Stopped;
                 state.pid = None;
+                state.last_exit_code = code;
             }
         }
     }
-    // 清理已停止的进程
-    processes.retain(|id, child| child.try_wait().ok().flatten().is_none() || {
-        agents.get(id).map(|s| s.status == AgentStatus::Running).unwrap_or(false)
-    });
 
+    // 修复 retain 逻辑：只保留仍在运行的进程句柄
+    processes.retain(|_id, child| child.try_wait().ok().flatten().is_none());
+
+    drop(processes);
+    drop(agents);
+
+    // 对已退出的 agent 触发自动重启检查（在独立线程中，不阻塞响应）
+    for (id, exit_code) in exited {
+        try_schedule_auto_restart(
+            &id,
+            exit_code,
+            &configs,
+            &store,
+        );
+    }
+
+    // 重新加锁构建返回值
+    let agents = store.agents.lock().unwrap();
     configs
         .values()
         .map(|config| {
             let state = agents.get(&config.id);
             let port_open = config.port.map(is_port_open).unwrap_or(false);
-            AgentState {
+            let mut result = AgentState {
                 status: state.map(|s| s.status.clone()).unwrap_or(AgentStatus::Stopped),
                 pid: state.and_then(|s| s.pid),
                 started_at: state.and_then(|s| s.started_at.clone()),
                 port_open,
                 config: config.clone(),
+                restart_count: state.map(|s| s.restart_count).unwrap_or(0),
+                last_exit_code: state.and_then(|s| s.last_exit_code),
+            };
+            // 如果端口已开但状态还是 Stopped，视为 Running（兼容外部启动）
+            if port_open && result.status == AgentStatus::Stopped && result.pid.is_none() {
+                result.status = AgentStatus::Running;
             }
+            result
         })
         .collect()
+}
+
+/// 检查是否应该自动重启，如果是则 spawn 一个带退避的重启线程
+fn try_schedule_auto_restart(
+    id: &str,
+    exit_code: Option<i32>,
+    configs: &HashMap<String, AgentConfig>,
+    store: &State<AgentStore>,
+) {
+    let config = match configs.get(id) {
+        Some(c) => c.clone(),
+        None => return,
+    };
+
+    // 必须开启 auto_restart
+    if !config.auto_restart {
+        return;
+    }
+
+    // 检查是否被 stop_agent 显式阻止
+    let restarting = store.restarting.lock().unwrap();
+    if let Some(&val) = restarting.get(id) {
+        if val == u32::MAX {
+            return; // 被显式停止，不再重启
+        }
+    }
+    drop(restarting);
+
+    // 检查重启次数
+    let agents = store.agents.lock().unwrap();
+    let current_count = agents.get(id).map(|s| s.restart_count).unwrap_or(0);
+    drop(agents);
+
+    if current_count >= restart_policy::MAX_RESTARTS {
+        push_log(&store.logs, id, LogLevel::Warn,
+            format!("Auto-restart skipped: reached max restarts ({})", restart_policy::MAX_RESTARTS));
+        return;
+    }
+
+    // 记录重启意图
+    {
+        let mut restarting = store.restarting.lock().unwrap();
+        restarting.insert(id.to_string(), current_count + 1);
+    }
+
+    push_log(&store.logs, id, LogLevel::Warn,
+        format!("Process exited (code={:?}), scheduling auto-restart #{} in {}ms...",
+                exit_code, current_count + 1, restart_policy::RESTART_BACKOFF_MS));
+
+    // spawn 重启线程
+    let id_owned = id.to_string();
+    let agents_arc = Arc::clone(&store.agents);
+    let processes_arc = Arc::clone(&store.processes);
+    let logs_arc = Arc::clone(&store.logs);
+    let restarting_arc = Arc::clone(&store.restarting);
+
+    std::thread::spawn(move || {
+        // 退避等待
+        std::thread::sleep(Duration::from_millis(restart_policy::RESTART_BACKOFF_MS));
+
+        // 再次检查是否被 stop
+        {
+            let restarting = restarting_arc.lock().unwrap();
+            if let Some(&val) = restarting.get(&id_owned) {
+                if val == u32::MAX {
+                    return; // 期间被用户停止
+                }
+            }
+        }
+
+        // 执行重启
+        match spawn_agent_with_arcs(&id_owned, &config, &agents_arc, &processes_arc, &logs_arc) {
+            Ok(pid) => {
+                push_log(&logs_arc, &id_owned, LogLevel::Info,
+                    format!("Auto-restarted successfully (PID {})", pid));
+                // 更新重启计数
+                {
+                    let mut agents = agents_arc.lock().unwrap();
+                    if let Some(state) = agents.get_mut(&id_owned) {
+                        state.restart_count += 1;
+                    }
+                }
+                // 清除重启标记
+                {
+                    let mut restarting = restarting_arc.lock().unwrap();
+                    restarting.remove(&id_owned);
+                }
+            }
+            Err(e) => {
+                push_log(&logs_arc, &id_owned, LogLevel::Error,
+                    format!("Auto-restart failed: {}", e));
+                {
+                    let mut agents = agents_arc.lock().unwrap();
+                    if let Some(state) = agents.get_mut(&id_owned) {
+                        state.status = AgentStatus::Error;
+                    }
+                }
+                let mut restarting = restarting_arc.lock().unwrap();
+                restarting.remove(&id_owned);
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -98,10 +244,164 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
     let configs = load_configs();
     let config = configs.get(&id).ok_or("Agent not found")?.clone();
 
+    // 已在运行则直接返回
+    {
+        let agents = store.agents.lock().unwrap();
+        if let Some(state) = agents.get(&id) {
+            if state.status == AgentStatus::Running && state.pid.is_some() {
+                return Ok(());
+            }
+        }
+    }
+
+    // 清除可能的重启阻止标记
+    {
+        let mut restarting = store.restarting.lock().unwrap();
+        restarting.remove(&id);
+    }
+
+    // 标记为 Starting
+    {
+        let mut agents = store.agents.lock().unwrap();
+        agents.insert(
+            id.clone(),
+            AgentState {
+                config: config.clone(),
+                status: AgentStatus::Starting,
+                pid: None,
+                started_at: Some(Utc::now().to_rfc3339()),
+                port_open: false,
+                restart_count: 0,
+                last_exit_code: None,
+            },
+        );
+    }
+    push_log(&store.logs, &id, LogLevel::Info, format!("Starting agent '{}'...", config.name));
+
+    // 记录本次启动前的日志基准索引，用于后续只收集本次启动产生的错误
+    let log_start_idx = {
+        let logs = store.logs.lock().unwrap();
+        logs.get(&id).map(|v| v.len()).unwrap_or(0)
+    };
+
+    // 执行实际的 spawn
+    let pid = spawn_agent_with_arcs(
+        &id,
+        &config,
+        &store.agents,
+        &store.processes,
+        &store.logs,
+    )?;
+
+    // 存活检查：等待一段时间后确认进程仍存活
+    std::thread::sleep(Duration::from_millis(restart_policy::HEALTH_CHECK_MS));
+    let (alive, exit_code) = {
+        let mut processes = store.processes.lock().unwrap();
+        match processes.get_mut(&id) {
+            Some(child) => match child.try_wait() {
+                Ok(None) => (true, None),
+                Ok(Some(status)) => (false, status.code()),
+                Err(_) => (false, None),
+            },
+            None => (false, None),
+        }
+    };
+
+    if !alive {
+        // 进程已退出 —— 再等一段时间让 stderr 后台线程把残留输出写入日志
+        std::thread::sleep(Duration::from_millis(500));
+
+        // 只收集本次启动后（log_start_idx 之后）产生的错误，避免累加上次的错误信息
+        let error_context = collect_errors_since(&store.logs, &id, log_start_idx);
+        let err_msg = if error_context.is_empty() {
+            format!("Agent exited immediately (code={:?}). Check command/path/env.", exit_code)
+        } else {
+            format!("Agent exited immediately (code={:?}):\n{}", exit_code, error_context)
+        };
+
+        // 更新状态为 Error
+        {
+            let mut agents = store.agents.lock().unwrap();
+            if let Some(state) = agents.get_mut(&id) {
+                state.status = AgentStatus::Error;
+                state.pid = None;
+                state.last_exit_code = exit_code;
+            }
+        }
+        // 清理句柄（关闭管道，让后台读线程收到 EOF 退出）
+        {
+            let mut processes = store.processes.lock().unwrap();
+            processes.remove(&id);
+        }
+        push_log(&store.logs, &id, LogLevel::Error, err_msg.clone());
+        return Err(err_msg);
+    }
+
+    let _ = pid;
+    Ok(())
+}
+
+/// 核心的 spawn 逻辑，接收 Arc 引用，可供 start_agent 命令和自动重启线程复用。
+/// 返回新进程的 PID。
+fn spawn_agent_with_arcs(
+    id: &str,
+    config: &AgentConfig,
+    agents: &Arc<Mutex<HashMap<String, AgentState>>>,
+    processes: &Arc<Mutex<HashMap<String, Child>>>,
+    logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>,
+) -> Result<u32, String> {
     // On Windows, resolve npm-global .cmd wrappers and route through cmd.exe
     let resolved_command = resolve_npm_global(&config.command)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| config.command.clone());
+
+    // On Windows: 对于非 npm 的普通命令名（如 python/node），通过 where.exe 解析出完整路径，
+    // 避免 CreateProcessW 搜索到 Windows Store stub（WindowsApps/python.exe）导致 exit 1/49。
+    #[cfg(windows)]
+    let resolved_command = {
+        let cmd_path = std::path::Path::new(&resolved_command);
+        // 只在非绝对路径、非 .cmd/.bat/npm wrapper 时做 where.exe 解析
+        if !cmd_path.is_absolute()
+            && !resolved_command.to_lowercase().ends_with(".cmd")
+            && !resolved_command.to_lowercase().ends_with(".bat")
+            && resolve_npm_global(&config.command).is_none()
+        {
+            if let Ok(output) = std::process::Command::new("where.exe")
+                .arg(&config.command)
+                .output()
+            {
+                if output.status.success() {
+                    let where_result = String::from_utf8_lossy(&output.stdout);
+                    // 取第一个结果，但跳过 Windows Store stub
+                    let real_exe = where_result.lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .find(|line| {
+                            let lower = line.to_lowercase();
+                            // 排除 WindowsApps 下的 Store stub 和 App Installer
+                            !lower.contains("\\windowsapps\\") && !lower.contains("appinstaller")
+                        })
+                        .map(|s| s.to_string());
+
+                    if let Some(exe_path) = real_exe {
+                        push_log(logs, id, LogLevel::Debug,
+                            format!("Resolved '{}' -> '{}'", config.command, exe_path));
+                        exe_path
+                    } else {
+                        push_log(logs, id, LogLevel::Warn,
+                            format!("where.exe found only Store stub for '{}', using raw name (may fail)", config.command));
+                        resolved_command
+                    }
+                } else {
+                    resolved_command
+                }
+            } else {
+                resolved_command
+            }
+        } else {
+            resolved_command
+        }
+    };
 
     #[cfg(windows)]
     let (exe, leading): (&str, Vec<String>) = {
@@ -127,7 +427,15 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
         cmd.env(k, v);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start: {}", e))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        // spawn 失败 —— 同步更新状态
+        let mut agents_guard = agents.lock().unwrap();
+        if let Some(state) = agents_guard.get_mut(id) {
+            state.status = AgentStatus::Error;
+        }
+        push_log(logs, id, LogLevel::Error, format!("Failed to spawn: {}", e));
+        format!("Failed to start: {}", e)
+    })?;
     let pid = child.id();
 
     // 取出 stdout/stderr 管道
@@ -136,38 +444,34 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
 
     // 存储进程
     {
-        let mut processes = store.processes.lock().unwrap();
-        processes.insert(id.clone(), child);
+        let mut processes_guard = processes.lock().unwrap();
+        processes_guard.insert(id.to_string(), child);
     }
 
-    // 更新状态
+    // 更新状态为 Running（保留已有的 restart_count）
     {
-        let mut agents = store.agents.lock().unwrap();
-        agents.insert(
-            id.clone(),
+        let mut agents_guard = agents.lock().unwrap();
+        let prev_restart_count = agents_guard.get(id).map(|s| s.restart_count).unwrap_or(0);
+        agents_guard.insert(
+            id.to_string(),
             AgentState {
                 config: config.clone(),
                 status: AgentStatus::Running,
                 pid: Some(pid),
                 started_at: Some(Utc::now().to_rfc3339()),
                 port_open: false,
+                restart_count: prev_restart_count,
+                last_exit_code: None,
             },
         );
     }
 
     // 记录启动日志
-    {
-        let mut logs = store.logs.lock().unwrap();
-        logs.entry(id.clone()).or_default().push(LogEntry {
-            timestamp: Utc::now().to_rfc3339(),
-            level: LogLevel::Info,
-            message: format!("Agent started (PID {})", pid),
-        });
-    }
+    push_log(logs, id, LogLevel::Info, format!("Agent started (PID {})", pid));
 
     // 后台线程读取 stdout
-    let logs_arc = Arc::clone(&store.logs);
-    let id_stdout = id.clone();
+    let logs_arc = Arc::clone(logs);
+    let id_stdout = id.to_string();
     if let Some(out) = stdout {
         std::thread::spawn(move || {
             let reader = BufReader::new(out);
@@ -178,8 +482,8 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
     }
 
     // 后台线程读取 stderr
-    let logs_arc2 = Arc::clone(&store.logs);
-    let id_stderr = id.clone();
+    let logs_arc2 = Arc::clone(logs);
+    let id_stderr = id.to_string();
     if let Some(err) = stderr {
         std::thread::spawn(move || {
             let reader = BufReader::new(err);
@@ -189,15 +493,38 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
         });
     }
 
-    Ok(())
+    Ok(pid)
+}
+
+/// 收集指定索引之后的错误日志（避免累加上次启动失败的错误信息）
+fn collect_errors_since(logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>, id: &str, since: usize) -> String {
+    let logs = logs.lock().unwrap();
+    if let Some(entries) = logs.get(id) {
+        let errors: Vec<String> = entries
+            .iter()
+            .skip(since)  // 只看本次启动后的日志
+            .filter(|e| matches!(e.level, LogLevel::Error))
+            .map(|e| e.message.clone())
+            .collect();
+        errors.join("\n")
+    } else {
+        String::new()
+    }
 }
 
 #[tauri::command]
 pub fn stop_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
+    // 标记为不再自动重启（哨兵值）
+    {
+        let mut restarting = store.restarting.lock().unwrap();
+        restarting.insert(id.clone(), u32::MAX);
+    }
+
+    // 使用进程树终止
     {
         let mut processes = store.processes.lock().unwrap();
         if let Some(child) = processes.get_mut(&id) {
-            let _ = child.kill();
+            kill_process_tree(child);
         }
         processes.remove(&id);
     }
@@ -207,13 +534,15 @@ pub fn stop_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
         state.status = AgentStatus::Stopped;
         state.pid = None;
     }
+    drop(agents);
 
-    let mut logs = store.logs.lock().unwrap();
-    logs.entry(id).or_default().push(LogEntry {
-        timestamp: Utc::now().to_rfc3339(),
-        level: LogLevel::Info,
-        message: "Agent stopped".to_string(),
-    });
+    // 清除重启标记
+    {
+        let mut restarting = store.restarting.lock().unwrap();
+        restarting.remove(&id);
+    }
+
+    push_log(&store.logs, &id, LogLevel::Info, "Agent stopped".to_string());
 
     Ok(())
 }
@@ -271,11 +600,17 @@ pub fn save_agent_config(config: Value) -> Result<String, String> {
 
 #[tauri::command]
 pub fn delete_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
-    // 先停止进程
+    // 标记不再重启
+    {
+        let mut restarting = store.restarting.lock().unwrap();
+        restarting.insert(id.clone(), u32::MAX);
+    }
+
+    // 先停止进程（进程树终止）
     {
         let mut processes = store.processes.lock().unwrap();
         if let Some(mut child) = processes.remove(&id) {
-            let _ = child.kill();
+            kill_process_tree(&mut child);
         }
     }
 
@@ -285,6 +620,12 @@ pub fn delete_agent(id: String, store: State<AgentStore>) -> Result<(), String> 
 
     let mut agents = store.agents.lock().unwrap();
     agents.remove(&id);
+
+    // 清理重启标记
+    {
+        let mut restarting = store.restarting.lock().unwrap();
+        restarting.remove(&id);
+    }
 
     Ok(())
 }

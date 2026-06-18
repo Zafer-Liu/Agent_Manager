@@ -21,6 +21,10 @@ export interface AgentState {
   pid?: number
   started_at?: string
   port_open: boolean
+  /** 自动重启累计次数 */
+  restart_count?: number
+  /** 最近一次进程退出码 */
+  last_exit_code?: number | null
 }
 
 export interface LogEntry {
