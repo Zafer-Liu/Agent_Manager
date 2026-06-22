@@ -72,6 +72,9 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      - name: Install root dependencies
+        run: npm ci
+
       - name: Install frontend dependencies
         run: cd frontend && npm ci
 
