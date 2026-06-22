@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+  release:
+    types: [published]   # 在 GitHub 网页发布 release 时也触发
 
 permissions:
   contents: write   # needed to create/upload Release assets
@@ -77,8 +79,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: '智管-Agent Manager ${{ github.ref_name }}'
+          tagName: ${{ github.event.release.tag_name || github.ref_name }}
+          releaseName: '智管-Agent Manager ${{ github.event.release.tag_name || github.ref_name }}'
           releaseBody: |
             ## 安装说明 / Installation
 
@@ -95,6 +97,6 @@ jobs:
 
             ---
             完整更新日志见 [CHANGELOG](https://github.com/Zafer-Liu/Agent_Manager/blob/main/CHANGELOG.md)（如有）。
-          releaseDraft: true    # 先创建草稿，确认无误后手动发布
+          releaseDraft: ${{ github.event_name == 'push' }}    # push 触发时创建草稿；release 触发时直接更新已发布的 release
           prerelease: false
           args: --target ${{ matrix.target }}
