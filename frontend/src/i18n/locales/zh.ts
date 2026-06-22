@@ -33,6 +33,7 @@ const zh = {
     mcpAgent: 'MCP Agent',
     ports: '端口管理',
     proxy: '代理发布',
+    settings: '设置',
   },
   app: {
     title: '智管-Agent Manager',
@@ -462,6 +463,27 @@ const zh = {
     userAdded: '用户 {{name}} 已添加',
     installCaddyFirst: '请先安装 Caddy',
     caddyNotFound: '未找到 Caddy，请先安装',
+  },
+  updater: {
+    title: '检查更新',
+    currentVersion: '当前版本：v{{version}}',
+    checkNow: '检查更新',
+    checking: '检查中…',
+    newVersionAvailable: '发现新版本：v{{version}}',
+    releasedOn: '发布于 {{date}}',
+    alreadyLatest: '已是最新版本 ✓',
+    downloadNow: '前往下载',
+    showNotes: '查看更新说明',
+    hideNotes: '收起',
+  },
+  settings: {
+    title: '设置',
+    subtitle: '应用配置与版本信息',
+    sectionUpdates: '更新',
+    sectionAbout: '关于',
+    aboutName: '应用名称',
+    aboutLicense: '许可证',
+    aboutSource: '源代码',
   },
 }
 

@@ -35,6 +35,7 @@ const en: TranslationSchema = {
     mcpAgent: 'MCP Agent',
     ports: 'Port Manager',
     proxy: 'Proxy',
+    settings: 'Settings',
   },
   app: {
     title: 'Agent Manager',
@@ -464,6 +465,27 @@ const en: TranslationSchema = {
     userAdded: 'User {{name}} added',
     installCaddyFirst: 'Install Caddy first',
     caddyNotFound: 'Caddy not found, please install it first',
+  },
+  updater: {
+    title: 'Check for Updates',
+    currentVersion: 'Current version: v{{version}}',
+    checkNow: 'Check Now',
+    checking: 'Checking…',
+    newVersionAvailable: 'New version available: v{{version}}',
+    releasedOn: 'Released on {{date}}',
+    alreadyLatest: 'You are on the latest version ✓',
+    downloadNow: 'Download',
+    showNotes: 'Show release notes',
+    hideNotes: 'Collapse',
+  },
+  settings: {
+    title: 'Settings',
+    subtitle: 'App configuration and version info',
+    sectionUpdates: 'Updates',
+    sectionAbout: 'About',
+    aboutName: 'App Name',
+    aboutLicense: 'License',
+    aboutSource: 'Source Code',
   },
 }
 
