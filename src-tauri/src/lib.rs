@@ -9,6 +9,7 @@ mod pty;
 mod proxy;
 mod github;
 mod ui_window;
+mod updater;
 
 use commands::*;
 use mcp::*;
@@ -20,6 +21,7 @@ use pty::*;
 use proxy::*;
 use github::*;
 use ui_window::*;
+use updater::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -102,6 +104,9 @@ pub fn run() {
             update_agent_ui_webview,
             fullscreen_agent_ui_webview,
             close_agent_ui_webview,
+            // Updater
+            check_for_update,
+            get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
