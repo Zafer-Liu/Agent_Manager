@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write   # needed to create/upload Release assets
+
 jobs:
   quality:
     name: Quality checks
@@ -13,18 +16,28 @@ jobs:
   release:
     needs: quality
     strategy:
+      fail-fast: false   # one platform failing won't cancel the others
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: macos-latest
-            target: x86_64-apple-darwin
+            label: Windows x64
+
           - os: macos-latest
             target: aarch64-apple-darwin
+            label: macOS Apple Silicon (ARM)
+
+          - os: macos-13
+            target: x86_64-apple-darwin
+            label: macOS Intel (x64)
+
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            label: Linux x64
 
+    name: Build · ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -32,29 +45,56 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Linux deps
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
 
-      - name: Install frontend deps
+      - name: Install frontend dependencies
         run: cd frontend && npm ci
 
-      - name: Build
+      - name: Build & publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Agent Manager ${{ github.ref_name }}'
-          releaseBody: 'See CHANGELOG for details.'
-          releaseDraft: true
+          releaseName: '智管-Agent Manager ${{ github.ref_name }}'
+          releaseBody: |
+            ## 安装说明 / Installation
+
+            | 平台 | 文件 |
+            |------|------|
+            | Windows | `.exe` (NSIS installer) |
+            | macOS Apple Silicon (M1/M2/M3) | `.dmg` (aarch64) |
+            | macOS Intel | `.dmg` (x86_64) |
+            | Linux | `.AppImage` / `.deb` |
+
+            > **macOS 提示**：首次打开 `.dmg` 安装后，若系统提示"无法验证开发者"，请右键点击应用图标 → 选择"打开" → 确认打开即可（仅首次需要）。
+            >
+            > **macOS note**: If macOS says it cannot verify the developer, right-click the app → Open → confirm. This is only needed once.
+
+            ---
+            完整更新日志见 [CHANGELOG](https://github.com/Zafer-Liu/Agent_Manager/blob/main/CHANGELOG.md)（如有）。
+          releaseDraft: true    # 先创建草稿，确认无误后手动发布
           prerelease: false
           args: --target ${{ matrix.target }}
