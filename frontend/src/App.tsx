@@ -7,11 +7,13 @@ import { AgentList } from './components/AgentList'
 import { AgentDetail } from './components/AgentDetail'
 import { AgentForm } from './components/AgentForm'
 import { TerminalPanel } from './components/TerminalPanel'
+import { UpdateChecker } from './components/UpdateChecker'
 import { PortManager } from './pages/PortManager'
 import { McpAgent } from './pages/McpAgent'
 import { Dashboard } from './pages/Dashboard'
 import { ManagerAgent, type ManagerSessionState } from './pages/ManagerAgent'
 import { ProxyManager } from './pages/ProxyManager'
+import { Settings } from './pages/Settings'
 import { useTheme } from './theme'
 import type { AgentState } from './types/agent'
 import { useResizable } from './hooks/useResizable'
@@ -19,11 +21,11 @@ import { NativeWebviewPanel, type OpenTab } from './components/NativeWebviewPane
 import {
   Plus, RefreshCw, Bot, X, Globe, Network, Cpu,
   Maximize2, Minimize2, TerminalSquare, Sun, Moon,
-  Crown, LayoutDashboard, Shield, Eraser,
+  Crown, LayoutDashboard, Shield, Eraser, Settings2,
 } from 'lucide-react'
 import logoUrl from '/logo.png'
 
-type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy'
+type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy' | 'settings'
 
 export default function App() {
   const {
@@ -48,6 +50,21 @@ export default function App() {
     minW: 200, maxW: 480, defaultW: 288,
     minH: 120, maxH: 800, defaultH: 380,
   })
+
+  // Silent update check: runs once per session; throttled to every 7 days in the component
+  const [hasUpdate, setHasUpdate] = useState(false)
+  useEffect(() => {
+    const LAST_CHECK_KEY = 'updater_last_check'
+    const CHECK_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
+    const last = localStorage.getItem(LAST_CHECK_KEY)
+    if (last && Date.now() - Number(last) < CHECK_INTERVAL_MS) return
+    invoke<{ has_update: boolean; latest: string }>('check_for_update')
+      .then(r => {
+        if (r.has_update) setHasUpdate(true)
+        localStorage.setItem(LAST_CHECK_KEY, String(Date.now()))
+      })
+      .catch(() => {})
+  }, [])
 
   const selectedAgent = agents.find(a => a.config.id === selectedId) ?? null
   const agentLogs = selectedId ? (logs[selectedId] ?? []) : []
@@ -168,7 +185,18 @@ export default function App() {
             <img src={logoUrl} alt={t('app.title')} className="h-7 w-7 rounded-lg" />
             <div className="flex flex-col leading-tight">
               <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('app.title')}</span>
-              <span className="text-[10px] text-gray-400 dark:text-gray-500">v0.2.3</span>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-400 dark:text-gray-500">v0.2.3</span>
+                {hasUpdate && (
+                  <button
+                    onClick={() => setPage('settings')}
+                    className="rounded-full bg-blue-100 px-1.5 py-0 text-[9px] font-semibold text-blue-700 hover:bg-blue-200 dark:bg-blue-900/50 dark:text-blue-300"
+                    title={t('updater.newVersionAvailable', { version: '' })}
+                  >
+                    UPDATE
+                  </button>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-0.5">
@@ -192,6 +220,7 @@ export default function App() {
             { id: 'mcp-agent', icon: <Cpu className="h-4 w-4" />,             label: t('nav.mcpAgent') },
             { id: 'ports',     icon: <Network className="h-4 w-4" />,         label: t('nav.ports') },
             { id: 'proxy',     icon: <Shield className="h-4 w-4" />,          label: t('nav.proxy') },
+            { id: 'settings',  icon: <Settings2 className="h-4 w-4" />,       label: t('nav.settings') },
           ] as const).map(nav => (
             <button
               key={nav.id}
@@ -280,6 +309,7 @@ export default function App() {
         {page === 'mcp-agent' && <McpAgent />}
         {page === 'ports' && <PortManager agents={agents} />}
         {page === 'proxy' && <ProxyManager agents={agents} />}
+        {page === 'settings' && <Settings />}
 
         {/* Keep the workspace mounted so terminals and iframe state survive navigation. */}
         <div className={`flex flex-1 flex-col overflow-hidden ${page === 'agents' ? '' : 'hidden'}`}>
