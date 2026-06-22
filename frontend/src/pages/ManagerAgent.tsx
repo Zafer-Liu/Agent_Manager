@@ -135,39 +135,79 @@ export function ManagerAgent({
     )
   }
 
-  async function executeActions(actions: ManagerAction[]) {
+  async function executeActions(actions: ManagerAction[]): Promise<string[]> {
     setExecutingActions(true)
     let shouldNavigateToAgents = false
+    const results: string[] = []
     try {
       for (const action of actions) {
         if (action.type === 'open_ui') {
           const agent = resolveAgent(action.agentId, action.agentName)
-          if (agent) { onOpenAgentUI(agent); shouldNavigateToAgents = true }
+          if (agent) {
+            onOpenAgentUI(agent)
+            shouldNavigateToAgents = true
+            results.push(`✓ ${t('manager.actionOpenUi')} · ${action.agentName}: ${t('manager.actionSuccess')}`)
+          } else {
+            results.push(`✗ ${t('manager.actionOpenUi')} · ${action.agentName}: ${t('manager.actionAgentNotFound')}`)
+          }
         } else if (action.type === 'open_terminal') {
           const agent = resolveAgent(action.agentId, action.agentName)
-          if (agent) { onOpenAgentTerminal(agent); shouldNavigateToAgents = true }
+          if (agent) {
+            onOpenAgentTerminal(agent)
+            shouldNavigateToAgents = true
+            results.push(`✓ ${t('manager.actionOpenTerminal')} · ${action.agentName}: ${t('manager.actionSuccess')}`)
+          } else {
+            results.push(`✗ ${t('manager.actionOpenTerminal')} · ${action.agentName}: ${t('manager.actionAgentNotFound')}`)
+          }
         } else if (action.type === 'start_agent') {
           const agent = resolveAgent(action.agentId, action.agentName)
-          if (agent) await onStartAgent(agent.config.id)
+          if (agent) {
+            try {
+              await onStartAgent(agent.config.id)
+              results.push(`✓ ${t('manager.actionStart')} · ${action.agentName}: ${t('manager.actionSuccess')}`)
+            } catch (e) {
+              results.push(`✗ ${t('manager.actionStart')} · ${action.agentName}: ${t('manager.actionFailed', { error: String(e) })}`)
+            }
+          } else {
+            results.push(`✗ ${t('manager.actionStart')} · ${action.agentName}: ${t('manager.actionAgentNotFound')}`)
+          }
         } else if (action.type === 'stop_agent') {
           const agent = resolveAgent(action.agentId, action.agentName)
-          if (agent) await onStopAgent(agent.config.id)
+          if (agent) {
+            try {
+              await onStopAgent(agent.config.id)
+              results.push(`✓ ${t('manager.actionStop')} · ${action.agentName}: ${t('manager.actionSuccess')}`)
+            } catch (e) {
+              results.push(`✗ ${t('manager.actionStop')} · ${action.agentName}: ${t('manager.actionFailed', { error: String(e) })}`)
+            }
+          } else {
+            results.push(`✗ ${t('manager.actionStop')} · ${action.agentName}: ${t('manager.actionAgentNotFound')}`)
+          }
         } else if (action.type === 'navigate') {
           onNavigate(action.page)
+          results.push(`✓ ${t('manager.actionNavigate')} · ${action.page}`)
         } else if (action.type === 'send_message') {
           try {
-            await fetch(`http://localhost:${action.port}/message`, {
+            const resp = await fetch(`http://localhost:${action.port}/message`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ message: action.message }),
             })
-          } catch { /* agent may not support this */ }
+            if (resp.ok) {
+              results.push(`✓ ${t('manager.actionSendMessage')} · ${action.agentName}: ${t('manager.actionSuccess')}`)
+            } else {
+              results.push(`✗ ${t('manager.actionSendMessage')} · ${action.agentName}: ${t('manager.actionFailed', { error: `HTTP ${resp.status}` })}`)
+            }
+          } catch (e) {
+            results.push(`✗ ${t('manager.actionSendMessage')} · ${action.agentName}: ${t('manager.actionFailed', { error: String(e) })}`)
+          }
         }
       }
     } finally {
       setExecutingActions(false)
       if (shouldNavigateToAgents) onNavigate('agents')
     }
+    return results
   }
 
   async function send() {
@@ -211,9 +251,21 @@ export function ManagerAgent({
         steps: result.steps.length ? result.steps : undefined,
         actions: toolActions.length ? toolActions : undefined,
       }
-      onSessionChange({ ...session, messages: [...nextMessages, assistantMsg] })
 
-      if (toolActions.length > 0) await executeActions(toolActions)
+      if (toolActions.length > 0) {
+        const actionResults = await executeActions(toolActions)
+        if (actionResults.length > 0) {
+          const feedbackMsg: ManagerChatMessage = {
+            role: 'assistant',
+            content: `${t('manager.actionResultsTitle')}\n\n${actionResults.join('\n')}`,
+          }
+          onSessionChange({ ...session, messages: [...nextMessages, assistantMsg, feedbackMsg] })
+        } else {
+          onSessionChange({ ...session, messages: [...nextMessages, assistantMsg] })
+        }
+      } else {
+        onSessionChange({ ...session, messages: [...nextMessages, assistantMsg] })
+      }
     } catch (e) {
       const errMsg: ManagerChatMessage = { role: 'assistant', content: t('manager.errorPrefix', { error: String(e) }) }
       onSessionChange({ ...session, messages: [...nextMessages, errMsg] })

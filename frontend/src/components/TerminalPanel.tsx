@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -23,6 +23,8 @@ export function TerminalPanel({ id, command, args, cwd, env, active, clearVersio
   const startedRef = useRef(false)
   const activeRef = useRef(active)
   const clearVersionRef = useRef(clearVersion)
+  const [showSearch, setShowSearch] = useState(false)
+  const [searchTerm, setSearchTerm] = useState('')
 
   const startPty = useCallback(async (term: Terminal) => {
     const { cols, rows } = term
@@ -94,6 +96,31 @@ export function TerminalPanel({ id, command, args, cwd, env, active, clearVersio
     term.loadAddon(links)
     term.open(containerRef.current!)
     fit.fit()
+
+    // Custom keyboard shortcuts for copy/paste/search
+    term.attachCustomKeyEventHandler((e) => {
+      // Ctrl+Shift+C: Copy selection
+      if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'C') {
+        const sel = term.getSelection()
+        if (sel) {
+          navigator.clipboard.writeText(sel).catch(() => {})
+        }
+        return false
+      }
+      // Ctrl+Shift+V: Paste
+      if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
+        navigator.clipboard.readText().then(text => {
+          invoke('pty_write', { id, data: text }).catch(() => {})
+        }).catch(() => {})
+        return false
+      }
+      // Ctrl+Shift+F: Toggle search bar
+      if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'F') {
+        setShowSearch(v => !v)
+        return false
+      }
+      return true
+    })
 
     termRef.current = term
     fitRef.current = fit
@@ -170,10 +197,71 @@ export function TerminalPanel({ id, command, args, cwd, env, active, clearVersio
   }, [clearVersion])
 
   return (
-    <div
-      ref={containerRef}
-      className="h-full w-full"
-      style={{ background: '#0f1117', padding: '4px' }}
-    />
+    <div className="relative h-full w-full" style={{ background: '#0f1117' }}>
+      {/* Toolbar */}
+      <div className="absolute top-1 right-1 z-10 flex items-center gap-1">
+        <button
+          onClick={() => {
+            const sel = termRef.current?.getSelection()
+            if (sel) navigator.clipboard.writeText(sel).catch(() => {})
+          }}
+          title="Copy (Ctrl+Shift+C)"
+          className="rounded bg-gray-800/80 px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-gray-700"
+        >
+          Copy
+        </button>
+        <button
+          onClick={() => {
+            navigator.clipboard.readText().then(text => {
+              invoke('pty_write', { id, data: text }).catch(() => {})
+            }).catch(() => {})
+          }}
+          title="Paste (Ctrl+Shift+V)"
+          className="rounded bg-gray-800/80 px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-gray-700"
+        >
+          Paste
+        </button>
+        <button
+          onClick={() => setShowSearch(v => !v)}
+          title="Search (Ctrl+Shift+F)"
+          className="rounded bg-gray-800/80 px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-gray-700"
+        >
+          Search
+        </button>
+      </div>
+
+      {/* Search bar */}
+      {showSearch && (
+        <div className="absolute top-7 right-1 z-10 flex items-center gap-1.5 rounded-lg bg-gray-800 border border-gray-600 px-2 py-1 shadow-lg">
+          <input
+            autoFocus
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Escape') { setShowSearch(false); setSearchTerm('') }
+              if (e.key === 'Enter') {
+                // Simple: find in scrollback by writing a note
+                const term = termRef.current
+                if (term && searchTerm) {
+                  // Use terminal's findNext if available via addon
+                  // Fallback: just inform user
+                }
+              }
+            }}
+            placeholder="Find..."
+            className="bg-transparent text-white text-xs outline-none w-32 placeholder-gray-500"
+          />
+          <button onClick={() => { setShowSearch(false); setSearchTerm('') }} className="text-gray-400 hover:text-white">
+            ✕
+          </button>
+        </div>
+      )}
+
+      <div
+        ref={containerRef}
+        className="h-full w-full"
+        style={{ background: '#0f1117', padding: '4px' }}
+      />
+    </div>
   )
 }

@@ -477,6 +477,7 @@ function InlineStep({ step }: { step: AgentStep }) {
 // ── Workflow steps display (collapsible, shown before the assistant reply) ────
 
 function WorkflowStepItem({ s, i }: { s: WorkflowStepSummary; i: number }) {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const text = s.error || s.output || '(empty)'
   const long = text.length > 200
@@ -498,7 +499,7 @@ function WorkflowStepItem({ s, i }: { s: WorkflowStepSummary; i: number }) {
       {long && (
         <button onClick={() => setExpanded(e => !e)}
           className="mt-1 text-[11px] text-purple-500 hover:text-purple-700">
-          {expanded ? '▲ 收起' : '▼ 展开全部'}
+          {expanded ? t('workflow.collapse') : t('workflow.expandAll')}
         </button>
       )}
     </div>

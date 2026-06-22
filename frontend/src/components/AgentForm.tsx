@@ -43,7 +43,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
   const [name, setName] = useState(initial?.name ?? '')
   const [description, setDescription] = useState(initial?.description ?? '')
   const [command, setCommand] = useState(initial?.command ?? '')
-  const [argInput, setArgInput] = useState((initial?.args ?? []).join(' '))
+  const [args, setArgs] = useState<string[]>(initial?.args ?? [])
   const [workingDir, setWorkingDir] = useState(initial?.working_dir ?? '')
   const [port, setPort] = useState(initial?.port?.toString() ?? '')
   const [uiToken, setUiToken] = useState(initial?.ui_token ?? '')
@@ -63,7 +63,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
     if (partial.name !== undefined) setName(partial.name)
     if (partial.description !== undefined) setDescription(partial.description)
     if (partial.command !== undefined) setCommand(partial.command)
-    if (partial.args !== undefined) setArgInput(partial.args.join(' '))
+    if (partial.args !== undefined) setArgs(partial.args)
     if (partial.working_dir !== undefined) setWorkingDir(partial.working_dir)
     if (partial.port !== undefined) setPort(partial.port.toString())
     if (partial.env !== undefined) setEnvPairs(Object.entries(partial.env))
@@ -96,7 +96,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
       if (!name) setName(result.name)
       if (!description && result.description) setDescription(result.description)
       if (!command && result.command) setCommand(result.command)
-      if (!argInput && result.args.length) setArgInput(result.args.join(' '))
+      if (args.length === 0 && result.args.length) setArgs(result.args)
       if (!port && result.port) setPort(result.port.toString())
 
       if (result.project_type !== 'unknown') {
@@ -137,7 +137,7 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
         name: name.trim(),
         description: description.trim(),
         command: command.trim(),
-        args: argInput.trim() ? argInput.trim().split(/\s+/) : [],
+        args: args.filter(a => a.trim()),
         working_dir: workingDir.trim(),
         env,
         port: port ? Number(port) : undefined,
@@ -245,8 +245,24 @@ export function AgentForm({ initial, onSave, onClose }: Props) {
             </Field>
 
             <Field label={t('agentForm.args')}>
-              <input value={argInput} onChange={e => setArgInput(e.target.value)}
-                placeholder={t('agentForm.argsPlaceholder')} className="field-input font-mono" />
+              <div className="space-y-1.5">
+                {args.map((arg, i) => (
+                  <div key={i} className="flex gap-2">
+                    <input value={arg}
+                      onChange={e => setArgs(prev => prev.map((a, j) => j === i ? e.target.value : a))}
+                      placeholder={t('agentForm.argsPlaceholder')} className="field-input flex-1 font-mono text-xs" />
+                    <button type="button"
+                      onClick={() => setArgs(prev => prev.filter((_, j) => j !== i))}
+                      className="text-gray-400 hover:text-red-500 dark:text-gray-600 dark:hover:text-red-400">
+                      <Minus className="h-4 w-4" />
+                    </button>
+                  </div>
+                ))}
+                <button type="button" onClick={() => setArgs(prev => [...prev, ''])}
+                  className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300">
+                  <Plus className="h-3.5 w-3.5" /> {t('agentForm.addArg')}
+                </button>
+              </div>
             </Field>
 
             <div className="grid grid-cols-2 gap-3">

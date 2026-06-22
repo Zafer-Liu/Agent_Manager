@@ -18,8 +18,6 @@ interface DashboardProps {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const COLS = 4
-const ROWS = 3
-const TOTAL_SEATS = COLS * ROWS
 
 // ── Dashboard ────────────────────────────────────────────────────────────────
 
@@ -57,12 +55,6 @@ export function Dashboard({
     }
   }
 
-  // Fill seats with agents, pad with null for empty seats
-  const seats: (AgentState | null)[] = [
-    ...agents.slice(0, TOTAL_SEATS),
-    ...Array(Math.max(0, TOTAL_SEATS - agents.length)).fill(null),
-  ]
-
   const runningCount = agents.filter(a => a.status === 'running').length
   const errorCount = agents.filter(a => a.status === 'error').length
 
@@ -87,7 +79,36 @@ export function Dashboard({
                 {t('dashboard.errors', { count: errorCount })}
               </span>
             )}
-            <span>{t('dashboard.seats', { count: agents.length, total: TOTAL_SEATS })}</span>
+            <span>{t('dashboard.seats', { count: agents.length })}</span>
+            {/* 批量操作 */}
+            <div className="flex items-center gap-2 ml-2">
+              <button
+                onClick={async () => {
+                  const stopped = agents.filter(a => a.status === 'stopped' || a.status === 'error')
+                  for (const a of stopped) {
+                    setActionLoading(a.config.id)
+                    try { await onStartAgent(a.config.id) } finally { setActionLoading(null) }
+                  }
+                }}
+                className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800"
+                title={t('dashboard.startAll')}
+              >
+                <Play className="inline h-3 w-3 mr-1" />{t('dashboard.startAll')}
+              </button>
+              <button
+                onClick={async () => {
+                  const running = agents.filter(a => a.status === 'running')
+                  for (const a of running) {
+                    setActionLoading(a.config.id)
+                    try { await onStopAgent(a.config.id) } finally { setActionLoading(null) }
+                  }
+                }}
+                className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800"
+                title={t('dashboard.stopAll')}
+              >
+                <Square className="inline h-3 w-3 mr-1" />{t('dashboard.stopAll')}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -149,29 +170,23 @@ export function Dashboard({
               maxWidth: COLS * 200,
             }}
           >
-            {seats.map((agent, i) => (
+            {agents.map((agent, i) => (
               <SeatCard
-                key={agent ? agent.config.id : `empty-${i}`}
+                key={agent.config.id}
                 agent={agent}
                 seatIndex={i}
                 isHovered={hoveredSeat === i}
-                isLoading={agent ? actionLoading === agent.config.id : false}
+                isLoading={actionLoading === agent.config.id}
                 onHover={() => setHoveredSeat(i)}
                 onLeave={() => setHoveredSeat(null)}
-                onClick={() => agent && handleSeatClick(agent)}
-                onStart={(e) => agent && handleStart(agent.config.id, e)}
-                onStop={(e) => agent && handleStop(agent.config.id, e)}
+                onClick={() => handleSeatClick(agent)}
+                onStart={(e) => handleStart(agent.config.id, e)}
+                onStop={(e) => handleStop(agent.config.id, e)}
               />
             ))}
           </div>
         )}
 
-        {/* Overflow agents hint */}
-        {agents.length > TOTAL_SEATS && (
-          <div className="mt-4 text-center text-xs text-gray-400">
-            {t('dashboard.overflowHint', { count: agents.length - TOTAL_SEATS })}
-          </div>
-        )}
       </div>
     </div>
   )

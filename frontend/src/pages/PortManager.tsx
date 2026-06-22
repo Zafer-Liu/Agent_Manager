@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
 import { RefreshCw, Zap, Search, AlertTriangle } from 'lucide-react'
+import type { AgentState } from '../types/agent'
 
 interface PortInfo {
   port: number
@@ -11,7 +12,11 @@ interface PortInfo {
   state: string
 }
 
-export function PortManager() {
+interface PortManagerProps {
+  agents: AgentState[]
+}
+
+export function PortManager({ agents }: PortManagerProps) {
   const { t } = useTranslation()
   const [ports, setPorts] = useState<PortInfo[]>([])
   const [loading, setLoading] = useState(false)
@@ -19,6 +24,16 @@ export function PortManager() {
   const [killing, setKilling] = useState<number | null>(null)
   const [killResult, setKillResult] = useState<{ port: number; msg: string; ok: boolean } | null>(null)
   const [confirmKill, setConfirmKill] = useState<PortInfo | null>(null)
+
+  const managedPorts = useMemo(() => {
+    const map = new Map<number, string>()
+    for (const a of agents) {
+      if (a.config.port) {
+        map.set(a.config.port, a.config.name)
+      }
+    }
+    return map
+  }, [agents])
 
   async function load() {
     setLoading(true)
@@ -81,7 +96,7 @@ export function PortManager() {
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder={t('ports.filterPlaceholder')}
-            className="field-input pl-9"
+            className="field-input !pl-10"
           />
         </div>
       </div>
@@ -108,13 +123,14 @@ export function PortManager() {
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.process')}</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.pid')}</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.state')}</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.agent')}</th>
                 <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">{t('ports.action')}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50 dark:divide-gray-800">
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-gray-400">
+                  <td colSpan={7} className="py-12 text-center text-gray-400">
                     {loading ? t('ports.loading') : t('ports.noPorts')}
                   </td>
                 </tr>
@@ -140,6 +156,16 @@ export function PortManager() {
                       <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
                       {p.state}
                     </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    {managedPorts.has(p.port) ? (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700 dark:bg-blue-900/20 dark:text-blue-400">
+                        <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+                        {managedPorts.get(p.port)}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-300 dark:text-gray-700">—</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <button

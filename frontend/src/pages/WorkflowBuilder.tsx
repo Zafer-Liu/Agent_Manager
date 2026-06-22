@@ -6,7 +6,7 @@ import {
 } from '@dnd-kit/core'
 import {
   Plus, Trash2, Save, Loader2, Wrench, Sparkles,
-  ArrowUp, ArrowDown, GripVertical, AlertCircle, ChevronDown, ChevronRight, X, Bot,
+  ArrowUp, ArrowDown, GripVertical, AlertCircle, ChevronDown, ChevronRight, X, Bot, Play,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -64,6 +64,10 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [activeDrag, setActiveDrag] = useState<McpToolInfo | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testInput, setTestInput] = useState('')
+  const [testResult, setTestResult] = useState<{ steps: { kind: string; content: string; tool?: string }[]; finalAnswer: string; error?: string } | null>(null)
+  const [showTestDialog, setShowTestDialog] = useState(false)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
 
@@ -165,6 +169,27 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
     await invoke('delete_workflow', { id })
     await loadWorkflows()
     if (editing?.id === id) setEditing(null)
+  }
+
+  async function testRun() {
+    if (!editing || editing.nodes.length === 0) return
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const result = await invoke<{ steps: { kind: string; content: string; tool?: string }[]; final_answer: string; success: boolean; error?: string }>('run_workflow', {
+        workflow: editing,
+        input: testInput || '',
+      })
+      setTestResult({
+        steps: result.steps || [],
+        finalAnswer: result.final_answer || '',
+        error: result.error,
+      })
+    } catch (e) {
+      setTestResult({ steps: [], finalAnswer: '', error: String(e) })
+    } finally {
+      setTesting(false)
+    }
   }
 
   function onDragStart(e: DragStartEvent) {
@@ -305,6 +330,13 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                   className="flex items-center gap-1.5 rounded-lg bg-gray-900 px-2.5 py-1.5 text-xs text-white hover:bg-gray-700 disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900">
                   {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} {t('mcpAgent.saveWorkflow')}
                 </button>
+                <button
+                  onClick={() => { setShowTestDialog(true); setTestResult(null) }}
+                  disabled={testing || !editing || editing.nodes.length === 0}
+                  className="flex items-center gap-1.5 rounded-lg border border-purple-200 px-2.5 py-1.5 text-xs text-purple-600 hover:bg-purple-50 disabled:opacity-40 dark:border-purple-800 dark:text-purple-400 dark:hover:bg-purple-900/20"
+                >
+                  <Play className="h-3.5 w-3.5" /> {t('mcpAgent.testRun')}
+                </button>
                 <span className="text-xs text-gray-400">{t('mcpAgent.workflowRunInChat')}</span>
               </div>
 
@@ -317,6 +349,72 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
               {/* Canvas (droppable pipeline) */}
               <Canvas nodes={editing.nodes}
                 onUpdate={updateNode} onRemove={removeNode} onMove={moveNode} />
+
+              {/* Test run dialog */}
+              {showTestDialog && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                  <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-xl dark:border-gray-700 dark:bg-gray-900 w-[480px] max-h-[80vh] flex flex-col">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('mcpAgent.testRunTitle')}</h3>
+                      <button onClick={() => setShowTestDialog(false)} className="text-gray-400 hover:text-gray-600">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+
+                    <div className="space-y-3 flex-1 overflow-y-auto">
+                      {/* Input */}
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-gray-500">{t('mcpAgent.testInput')}</label>
+                        <textarea
+                          value={testInput}
+                          onChange={e => setTestInput(e.target.value)}
+                          rows={2}
+                          placeholder={t('mcpAgent.testInputPlaceholder')}
+                          className="field-input resize-none text-xs"
+                        />
+                      </div>
+
+                      {/* Run button */}
+                      <button
+                        onClick={testRun}
+                        disabled={testing}
+                        className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs text-white hover:bg-purple-500 disabled:opacity-60"
+                      >
+                        {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                        {testing ? t('mcpAgent.running') : t('mcpAgent.run')}
+                      </button>
+
+                      {/* Results */}
+                      {testResult && (
+                        <div className="space-y-2">
+                          {testResult.error && (
+                            <div className="rounded-lg bg-red-50 dark:bg-red-900/20 px-3 py-2 text-xs text-red-600 dark:text-red-400">
+                              {testResult.error}
+                            </div>
+                          )}
+                          {testResult.steps.map((step, i) => (
+                            <div key={i} className="rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-2">
+                              <p className="text-[10px] font-mono text-purple-500 mb-1">
+                                Step {i + 1}: {step.kind}
+                                {step.tool && ` · ${step.tool}`}
+                              </p>
+                              <pre className="overflow-x-auto text-[11px] font-mono text-gray-600 dark:text-gray-400 whitespace-pre-wrap max-h-32 overflow-y-auto">
+                                {step.content}
+                              </pre>
+                            </div>
+                          ))}
+                          {testResult.finalAnswer && (
+                            <div className="rounded-lg bg-green-50 dark:bg-green-900/20 px-3 py-2">
+                              <p className="text-[10px] font-mono text-green-600 mb-1">{t('mcpAgent.finalAnswer')}</p>
+                              <p className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{testResult.finalAnswer}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex h-full items-center justify-center text-gray-400">

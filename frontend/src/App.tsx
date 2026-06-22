@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
 import { useAgentStore } from './store/agentStore'
@@ -14,6 +14,8 @@ import { ManagerAgent, type ManagerSessionState } from './pages/ManagerAgent'
 import { ProxyManager } from './pages/ProxyManager'
 import { useTheme } from './theme'
 import type { AgentState } from './types/agent'
+import { useResizable } from './hooks/useResizable'
+import { NativeWebviewPanel, type OpenTab } from './components/NativeWebviewPanel'
 import {
   Plus, RefreshCw, Bot, X, Globe, Network, Cpu,
   Maximize2, Minimize2, TerminalSquare, Sun, Moon,
@@ -22,24 +24,6 @@ import {
 import logoUrl from '/logo.png'
 
 type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy'
-interface OpenTab {
-  agentId: string
-  label: string
-  kind: 'ui' | 'terminal'
-  port?: number
-  token?: string
-  command?: string
-  args?: string[]
-  cwd?: string
-  env?: Record<string, string>
-}
-
-const MIN_SIDEBAR = 200
-const MAX_SIDEBAR = 480
-const DEFAULT_SIDEBAR = 288
-const MIN_PANEL_H = 120
-const MAX_PANEL_H = 800
-const DEFAULT_PANEL_H = 380
 
 export default function App() {
   const {
@@ -54,20 +38,16 @@ export default function App() {
   const [page, setPage] = useState<NavPage>('agents')
   const [showForm, setShowForm] = useState(false)
   const [editingAgent, setEditingAgent] = useState<AgentState | null>(null)
-  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR)
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([])
   const [activeTabKey, setActiveTabKey] = useState<string | null>(null)
   const [terminalClearVersions, setTerminalClearVersions] = useState<Record<string, number>>({})
-  const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_H)
   const [panelFullscreen, setPanelFullscreen] = useState(false)
   const [managerSession, setManagerSession] = useState<ManagerSessionState>({ messages: [], selectedProvider: '' })
 
-  const colDragging = useRef(false)
-  const colStartX = useRef(0)
-  const colStartW = useRef(DEFAULT_SIDEBAR)
-  const rowDragging = useRef(false)
-  const rowStartY = useRef(0)
-  const rowStartH = useRef(DEFAULT_PANEL_H)
+  const { width: sidebarWidth, height: panelHeight, onColMouseDown, onRowMouseDown } = useResizable({
+    minW: 200, maxW: 480, defaultW: 288,
+    minH: 120, maxH: 800, defaultH: 380,
+  })
 
   const selectedAgent = agents.find(a => a.config.id === selectedId) ?? null
   const agentLogs = selectedId ? (logs[selectedId] ?? []) : []
@@ -81,57 +61,15 @@ export default function App() {
 
   useEffect(() => {
     fetchAgents()
-    const id = setInterval(fetchAgents, 3000)
+    const id = setInterval(fetchAgents, 5000)
     return () => clearInterval(id)
   }, [fetchAgents])
 
   useEffect(() => {
     if (!selectedId) return
-    const id = setInterval(() => useAgentStore.getState().fetchLogs(selectedId), 2000)
+    const id = setInterval(() => useAgentStore.getState().fetchLogs(selectedId), 3000)
     return () => clearInterval(id)
   }, [selectedId])
-
-  const onColMouseDown = useCallback((e: React.MouseEvent) => {
-    colDragging.current = true
-    colStartX.current = e.clientX
-    colStartW.current = sidebarWidth
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-  }, [sidebarWidth])
-
-  const onRowMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    rowDragging.current = true
-    rowStartY.current = e.clientY
-    rowStartH.current = panelHeight
-    document.body.style.cursor = 'row-resize'
-    document.body.style.userSelect = 'none'
-  }, [panelHeight])
-
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      if (colDragging.current) {
-        const d = e.clientX - colStartX.current
-        setSidebarWidth(Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, colStartW.current + d)))
-      }
-      if (rowDragging.current) {
-        const d = e.clientY - rowStartY.current
-        setPanelHeight(Math.min(MAX_PANEL_H, Math.max(MIN_PANEL_H, rowStartH.current + d)))
-      }
-    }
-    const onUp = () => {
-      colDragging.current = false
-      rowDragging.current = false
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-  }, [])
 
   function openAgentUI(agent: AgentState) {
     if (!agent.config.port) return
@@ -340,7 +278,7 @@ export default function App() {
         </div>
 
         {page === 'mcp-agent' && <McpAgent />}
-        {page === 'ports' && <PortManager />}
+        {page === 'ports' && <PortManager agents={agents} />}
         {page === 'proxy' && <ProxyManager agents={agents} />}
 
         {/* Keep the workspace mounted so terminals and iframe state survive navigation. */}
@@ -510,83 +448,4 @@ export default function App() {
       )}
     </div>
   )
-}
-
-function NativeWebviewPanel({ tab, active }: { tab: OpenTab; active: boolean }) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const openedRef = useRef(false)
-  const activeRef = useRef(active)
-  const base = `http://127.0.0.1:${tab.port}/`
-  const url = tab.token ? `${base}#token=${encodeURIComponent(tab.token)}` : base
-
-  const getBounds = useCallback(() => {
-    const rect = containerRef.current?.getBoundingClientRect()
-    if (!rect) return null
-    return {
-      x: rect.left,
-      y: rect.top,
-      width: rect.width,
-      height: rect.height,
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    const frame = requestAnimationFrame(async () => {
-      const bounds = getBounds()
-      if (!bounds) return
-      try {
-        await invoke('open_agent_ui_webview', {
-          agentId: tab.agentId,
-          url,
-          ...bounds,
-        })
-        openedRef.current = true
-        if (cancelled || !activeRef.current) {
-          invoke('update_agent_ui_webview', {
-            agentId: tab.agentId,
-            ...bounds,
-            visible: false,
-          }).catch(() => {})
-        }
-      } catch (error) {
-        console.error('Failed to embed agent UI', error)
-      }
-    })
-    return () => {
-      cancelled = true
-      cancelAnimationFrame(frame)
-    }
-  }, [getBounds, tab.agentId, url])
-
-  useEffect(() => {
-    activeRef.current = active
-    const syncBounds = () => {
-      const bounds = getBounds()
-      if (!bounds || !openedRef.current) return
-      invoke('update_agent_ui_webview', {
-        agentId: tab.agentId,
-        ...bounds,
-        visible: active,
-      }).catch(() => {})
-    }
-
-    const observer = new ResizeObserver(syncBounds)
-    if (containerRef.current) observer.observe(containerRef.current)
-    window.addEventListener('resize', syncBounds)
-    requestAnimationFrame(syncBounds)
-
-    return () => {
-      observer.disconnect()
-      window.removeEventListener('resize', syncBounds)
-      const bounds = getBounds() ?? { x: 0, y: 0, width: 1, height: 1 }
-      invoke('update_agent_ui_webview', {
-        agentId: tab.agentId,
-        ...bounds,
-        visible: false,
-      }).catch(() => {})
-    }
-  }, [active, getBounds, tab.agentId])
-
-  return <div ref={containerRef} className="h-full w-full bg-white dark:bg-gray-950" />
 }

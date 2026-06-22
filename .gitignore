@@ -1,12 +1,62 @@
+# ---------- Dependencies ----------
 node_modules/
 frontend/node_modules/
 frontend/dist/
+
+# ---------- Rust / Tauri ----------
 src-tauri/target/
 src-tauri/gen/
+src-tauri/.tauri/
+# Cargo.lock 应保留（二进制应用），如需忽略请取消下一行注释
+# Cargo.lock
+
+# ---------- Build artifacts ----------
 *.log
+*.tsbuildinfo
+frontend/.vite/
+
+# ---------- 二进制安装包（应通过 GitHub Releases 发布，不要进 git） ----------
+Releases/*.exe
+Releases/*.msi
+Releases/*.dmg
+Releases/*.app
+Releases/*.AppImage
+Releases/*.deb
+Releases/*.rpm
+Releases/*.snap
+
+# ---------- 临时 / 工具产物 ----------
+.playwright-mcp/
+src-tauri/.playwright-mcp/
+agent-manager-review/
+.trae/
+.workbuddy
+.cache/
+
+# ---------- 环境变量与密钥 ----------
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+
+# ---------- 操作系统 ----------
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# ---------- 编辑器 / IDE ----------
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ---------- 项目特定 ----------
 Banner.psd
 DEVELOPMENT.md
 docs/
-.workbuddy

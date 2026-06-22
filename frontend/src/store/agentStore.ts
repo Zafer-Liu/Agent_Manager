@@ -83,6 +83,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       const raw = await invoke<AgentState[]>('list_agents')
       const current = get()
+      // 去重：如果数据没变化则跳过更新
+      const prevJson = JSON.stringify(current.agents.map(a => ({
+        status: a.status,
+        pid: a.pid,
+        port_open: a.port_open,
+        restart_count: a.restart_count,
+        last_exit_code: a.last_exit_code,
+      })))
+      const newJson = JSON.stringify(raw.map(a => ({
+        status: a.status,
+        pid: a.pid,
+        port_open: a.port_open,
+        restart_count: a.restart_count,
+        last_exit_code: a.last_exit_code,
+      })))
+      if (prevJson === newJson) {
+        set({ loading: false })
+        return // 数据没变化，跳过更新
+      }
       const reconciled = reconcileOrder(raw, current.order, current.agents)
       saveOrder(reconciled.order)
       set({ agents: reconciled.agents, order: reconciled.order, loading: false })
@@ -133,6 +152,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   fetchLogs: async (id) => {
     const logs = await invoke<LogEntry[]>('get_agent_logs', { id })
+    const current = get().logs[id]
+    // 如果日志条数没变且最后一条相同，跳过更新
+    if (current && current.length === logs.length && current.length > 0) {
+      if (current[current.length - 1].timestamp === logs[logs.length - 1].timestamp) {
+        return
+      }
+    }
     set(s => ({ logs: { ...s.logs, [id]: logs } }))
   },
 }))

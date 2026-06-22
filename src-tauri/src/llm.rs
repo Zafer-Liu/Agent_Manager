@@ -1,6 +1,71 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use aes_gcm::aead::{Aead, KeyInit, Key};
+use aes_gcm::{Aes256Gcm, Nonce};
+use sha2::{Digest, Sha256};
+
+/// 基于应用标识 + 机器名派生固定 32 字节 AES-256 密钥
+fn derive_key() -> [u8; 32] {
+    let machine_id = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "agent-manager".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(b"agent-manager-key-v1");
+    hasher.update(machine_id.as_bytes());
+    let result = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&result);
+    key
+}
+
+/// 将字节数组编码为十六进制字符串
+fn hex_encode(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// 将十六进制字符串解码为字节数组，失败返回 None
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// 使用 AES-256-GCM 加密 API Key，返回 hex 编码密文
+fn encrypt_api_key(plain: &str) -> String {
+    if plain.is_empty() {
+        return String::new();
+    }
+    let key = derive_key();
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let nonce = Nonce::from_slice(b"agent-mgr-nonce-01");
+    let ciphertext = cipher.encrypt(nonce, plain.as_bytes()).unwrap_or_default();
+    hex_encode(&ciphertext)
+}
+
+/// 使用 AES-256-GCM 解密 API Key。解密失败或非 hex 格式时返回原文（向后兼容旧版明文）
+fn decrypt_api_key(cipher_text: &str) -> String {
+    if cipher_text.is_empty() {
+        return String::new();
+    }
+    let ciphertext = match hex_decode(cipher_text) {
+        Some(data) if !data.is_empty() => data,
+        _ => return cipher_text.to_string(), // 不是 hex 格式，可能是旧版明文，直接返回
+    };
+    let key = derive_key();
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let nonce = Nonce::from_slice(b"agent-mgr-nonce-01");
+    cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| cipher_text.to_string()) // 解密失败，返回原文（向后兼容）
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmProvider {
     pub id: String,
@@ -32,10 +97,15 @@ fn config_path() -> std::path::PathBuf {
 
 fn load_providers() -> Vec<LlmProvider> {
     let path = config_path();
-    std::fs::read_to_string(&path)
+    let mut providers: Vec<LlmProvider> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // 解密所有 api_key（向后兼容旧版明文）
+    for provider in &mut providers {
+        provider.api_key = decrypt_api_key(&provider.api_key);
+    }
+    providers
 }
 
 fn save_providers(providers: &[LlmProvider]) {
@@ -43,7 +113,16 @@ fn save_providers(providers: &[LlmProvider]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string_pretty(providers) {
+    // 加密所有 api_key 后再序列化
+    let encrypted: Vec<LlmProvider> = providers
+        .iter()
+        .map(|p| {
+            let mut cloned = p.clone();
+            cloned.api_key = encrypt_api_key(&p.api_key);
+            cloned
+        })
+        .collect();
+    if let Ok(json) = serde_json::to_string_pretty(&encrypted) {
         let _ = std::fs::write(path, json);
     }
 }

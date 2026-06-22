@@ -12,6 +12,11 @@ use std::time::Duration;
 use tauri::State;
 use uuid::Uuid;
 
+/// 安全获取 Mutex 锁，即使 poison 也恢复数据，避免 panic
+fn lock_safe<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn get_data_dir() -> std::path::PathBuf {
     dirs_next::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -44,7 +49,7 @@ fn is_port_open(port: u16) -> bool {
 }
 
 fn push_log(logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>, id: &str, level: LogLevel, message: String) {
-    let mut logs = logs.lock().unwrap();
+    let mut logs = lock_safe(logs);
     let entries = logs.entry(id.to_string()).or_default();
     // 最多保留 2000 条
     if entries.len() >= 2000 {
@@ -79,10 +84,10 @@ fn kill_process_tree(child: &mut std::process::Child) {
 #[tauri::command]
 pub fn list_agents(store: State<AgentStore>) -> Vec<AgentState> {
     let configs = load_configs();
-    let mut agents = store.agents.lock().unwrap();
+    let mut agents = lock_safe(&store.agents);
 
     // 检查进程是否还活着，同步更新状态
-    let mut processes = store.processes.lock().unwrap();
+    let mut processes = lock_safe(&store.processes);
     let mut exited: Vec<(String, Option<i32>)> = Vec::new();
     for (id, child) in processes.iter_mut() {
         if let Ok(Some(status)) = child.try_wait() {
@@ -113,7 +118,7 @@ pub fn list_agents(store: State<AgentStore>) -> Vec<AgentState> {
     }
 
     // 重新加锁构建返回值
-    let agents = store.agents.lock().unwrap();
+    let agents = lock_safe(&store.agents);
     configs
         .values()
         .map(|config| {
@@ -155,7 +160,7 @@ fn try_schedule_auto_restart(
     }
 
     // 检查是否被 stop_agent 显式阻止
-    let restarting = store.restarting.lock().unwrap();
+    let restarting = lock_safe(&store.restarting);
     if let Some(&val) = restarting.get(id) {
         if val == u32::MAX {
             return; // 被显式停止，不再重启
@@ -164,7 +169,7 @@ fn try_schedule_auto_restart(
     drop(restarting);
 
     // 检查重启次数
-    let agents = store.agents.lock().unwrap();
+    let agents = lock_safe(&store.agents);
     let current_count = agents.get(id).map(|s| s.restart_count).unwrap_or(0);
     drop(agents);
 
@@ -176,7 +181,7 @@ fn try_schedule_auto_restart(
 
     // 记录重启意图
     {
-        let mut restarting = store.restarting.lock().unwrap();
+        let mut restarting = lock_safe(&store.restarting);
         restarting.insert(id.to_string(), current_count + 1);
     }
 
@@ -197,7 +202,7 @@ fn try_schedule_auto_restart(
 
         // 再次检查是否被 stop
         {
-            let restarting = restarting_arc.lock().unwrap();
+            let restarting = lock_safe(&restarting_arc);
             if let Some(&val) = restarting.get(&id_owned) {
                 if val == u32::MAX {
                     return; // 期间被用户停止
@@ -212,14 +217,14 @@ fn try_schedule_auto_restart(
                     format!("Auto-restarted successfully (PID {})", pid));
                 // 更新重启计数
                 {
-                    let mut agents = agents_arc.lock().unwrap();
+                    let mut agents = lock_safe(&agents_arc);
                     if let Some(state) = agents.get_mut(&id_owned) {
                         state.restart_count += 1;
                     }
                 }
                 // 清除重启标记
                 {
-                    let mut restarting = restarting_arc.lock().unwrap();
+                    let mut restarting = lock_safe(&restarting_arc);
                     restarting.remove(&id_owned);
                 }
             }
@@ -227,12 +232,12 @@ fn try_schedule_auto_restart(
                 push_log(&logs_arc, &id_owned, LogLevel::Error,
                     format!("Auto-restart failed: {}", e));
                 {
-                    let mut agents = agents_arc.lock().unwrap();
+                    let mut agents = lock_safe(&agents_arc);
                     if let Some(state) = agents.get_mut(&id_owned) {
                         state.status = AgentStatus::Error;
                     }
                 }
-                let mut restarting = restarting_arc.lock().unwrap();
+                let mut restarting = lock_safe(&restarting_arc);
                 restarting.remove(&id_owned);
             }
         }
@@ -240,13 +245,13 @@ fn try_schedule_auto_restart(
 }
 
 #[tauri::command]
-pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
+pub async fn start_agent(id: String, store: State<'_, AgentStore>) -> Result<(), String> {
     let configs = load_configs();
     let config = configs.get(&id).ok_or("Agent not found")?.clone();
 
     // 已在运行则直接返回
     {
-        let agents = store.agents.lock().unwrap();
+        let agents = lock_safe(&store.agents);
         if let Some(state) = agents.get(&id) {
             if state.status == AgentStatus::Running && state.pid.is_some() {
                 return Ok(());
@@ -256,13 +261,13 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
 
     // 清除可能的重启阻止标记
     {
-        let mut restarting = store.restarting.lock().unwrap();
+        let mut restarting = lock_safe(&store.restarting);
         restarting.remove(&id);
     }
 
     // 标记为 Starting
     {
-        let mut agents = store.agents.lock().unwrap();
+        let mut agents = lock_safe(&store.agents);
         agents.insert(
             id.clone(),
             AgentState {
@@ -280,7 +285,7 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
 
     // 记录本次启动前的日志基准索引，用于后续只收集本次启动产生的错误
     let log_start_idx = {
-        let logs = store.logs.lock().unwrap();
+        let logs = lock_safe(&store.logs);
         logs.get(&id).map(|v| v.len()).unwrap_or(0)
     };
 
@@ -294,9 +299,9 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
     )?;
 
     // 存活检查：等待一段时间后确认进程仍存活
-    std::thread::sleep(Duration::from_millis(restart_policy::HEALTH_CHECK_MS));
+    tokio::time::sleep(Duration::from_millis(restart_policy::HEALTH_CHECK_MS)).await;
     let (alive, exit_code) = {
-        let mut processes = store.processes.lock().unwrap();
+        let mut processes = lock_safe(&store.processes);
         match processes.get_mut(&id) {
             Some(child) => match child.try_wait() {
                 Ok(None) => (true, None),
@@ -309,7 +314,7 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
 
     if !alive {
         // 进程已退出 —— 再等一段时间让 stderr 后台线程把残留输出写入日志
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // 只收集本次启动后（log_start_idx 之后）产生的错误，避免累加上次的错误信息
         let error_context = collect_errors_since(&store.logs, &id, log_start_idx);
@@ -321,7 +326,7 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
 
         // 更新状态为 Error
         {
-            let mut agents = store.agents.lock().unwrap();
+            let mut agents = lock_safe(&store.agents);
             if let Some(state) = agents.get_mut(&id) {
                 state.status = AgentStatus::Error;
                 state.pid = None;
@@ -330,7 +335,7 @@ pub fn start_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
         }
         // 清理句柄（关闭管道，让后台读线程收到 EOF 退出）
         {
-            let mut processes = store.processes.lock().unwrap();
+            let mut processes = lock_safe(&store.processes);
             processes.remove(&id);
         }
         push_log(&store.logs, &id, LogLevel::Error, err_msg.clone());
@@ -429,7 +434,7 @@ fn spawn_agent_with_arcs(
 
     let mut child = cmd.spawn().map_err(|e| {
         // spawn 失败 —— 同步更新状态
-        let mut agents_guard = agents.lock().unwrap();
+        let mut agents_guard = lock_safe(agents);
         if let Some(state) = agents_guard.get_mut(id) {
             state.status = AgentStatus::Error;
         }
@@ -444,13 +449,13 @@ fn spawn_agent_with_arcs(
 
     // 存储进程
     {
-        let mut processes_guard = processes.lock().unwrap();
+        let mut processes_guard = lock_safe(processes);
         processes_guard.insert(id.to_string(), child);
     }
 
     // 更新状态为 Running（保留已有的 restart_count）
     {
-        let mut agents_guard = agents.lock().unwrap();
+        let mut agents_guard = lock_safe(agents);
         let prev_restart_count = agents_guard.get(id).map(|s| s.restart_count).unwrap_or(0);
         agents_guard.insert(
             id.to_string(),
@@ -498,7 +503,7 @@ fn spawn_agent_with_arcs(
 
 /// 收集指定索引之后的错误日志（避免累加上次启动失败的错误信息）
 fn collect_errors_since(logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>, id: &str, since: usize) -> String {
-    let logs = logs.lock().unwrap();
+    let logs = lock_safe(logs);
     if let Some(entries) = logs.get(id) {
         let errors: Vec<String> = entries
             .iter()
@@ -516,20 +521,20 @@ fn collect_errors_since(logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>, id: &
 pub fn stop_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
     // 标记为不再自动重启（哨兵值）
     {
-        let mut restarting = store.restarting.lock().unwrap();
+        let mut restarting = lock_safe(&store.restarting);
         restarting.insert(id.clone(), u32::MAX);
     }
 
     // 使用进程树终止
     {
-        let mut processes = store.processes.lock().unwrap();
+        let mut processes = lock_safe(&store.processes);
         if let Some(child) = processes.get_mut(&id) {
             kill_process_tree(child);
         }
         processes.remove(&id);
     }
 
-    let mut agents = store.agents.lock().unwrap();
+    let mut agents = lock_safe(&store.agents);
     if let Some(state) = agents.get_mut(&id) {
         state.status = AgentStatus::Stopped;
         state.pid = None;
@@ -538,7 +543,7 @@ pub fn stop_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
 
     // 清除重启标记
     {
-        let mut restarting = store.restarting.lock().unwrap();
+        let mut restarting = lock_safe(&store.restarting);
         restarting.remove(&id);
     }
 
@@ -549,7 +554,7 @@ pub fn stop_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_agent_logs(id: String, store: State<AgentStore>) -> Vec<LogEntry> {
-    let logs = store.logs.lock().unwrap();
+    let logs = lock_safe(&store.logs);
     logs.get(&id).cloned().unwrap_or_default()
 }
 
@@ -602,13 +607,13 @@ pub fn save_agent_config(config: Value) -> Result<String, String> {
 pub fn delete_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
     // 标记不再重启
     {
-        let mut restarting = store.restarting.lock().unwrap();
+        let mut restarting = lock_safe(&store.restarting);
         restarting.insert(id.clone(), u32::MAX);
     }
 
     // 先停止进程（进程树终止）
     {
-        let mut processes = store.processes.lock().unwrap();
+        let mut processes = lock_safe(&store.processes);
         if let Some(mut child) = processes.remove(&id) {
             kill_process_tree(&mut child);
         }
@@ -618,12 +623,12 @@ pub fn delete_agent(id: String, store: State<AgentStore>) -> Result<(), String> 
     configs.remove(&id);
     save_configs(&configs);
 
-    let mut agents = store.agents.lock().unwrap();
+    let mut agents = lock_safe(&store.agents);
     agents.remove(&id);
 
     // 清理重启标记
     {
-        let mut restarting = store.restarting.lock().unwrap();
+        let mut restarting = lock_safe(&store.restarting);
         restarting.remove(&id);
     }
 

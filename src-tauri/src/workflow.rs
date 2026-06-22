@@ -1,6 +1,6 @@
 use crate::llm::LlmProvider;
 use crate::mcp::McpServer;
-use crate::mcp_agent::{chat, McpClient};
+use crate::mcp_agent::{chat, McpClient, McpTransport};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -54,7 +54,7 @@ pub struct Workflow {
 fn workflows_path() -> std::path::PathBuf {
     dirs_next::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Claude")
+        .join("agent-manager")
         .join("agent_manager_workflows.json")
 }
 
@@ -132,11 +132,8 @@ pub async fn list_mcp_tools(servers: Vec<McpServer>) -> Result<Vec<McpToolInfo>,
     tokio::task::spawn_blocking(move || {
         let mut out: Vec<McpToolInfo> = vec![];
         for server in &servers {
-            // stdio transport only; SSE not supported for tool discovery here.
-            if server.transport == "sse" {
-                continue;
-            }
-            let mut client = match McpClient::start(server) {
+            // Support both stdio and SSE transports via the unified transport layer.
+            let mut client = match McpTransport::from_server_config(server) {
                 Ok(c) => c,
                 Err(_) => continue,
             };

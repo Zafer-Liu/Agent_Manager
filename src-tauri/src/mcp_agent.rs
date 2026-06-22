@@ -1,5 +1,6 @@
 use crate::llm::LlmProvider;
 use crate::mcp::McpServer;
+use reqwest::blocking::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -170,6 +171,196 @@ impl McpClient {
     }
 }
 
+// ── MCP SSE client ──────────────────────────────────────────────────────────
+
+/// MCP client over HTTP/SSE transport.
+///
+/// Uses `reqwest::blocking` so the sync `list_tools` / `call_tool` interface
+/// matches [`McpClient`]. The `reqwest::blocking::Client` internally owns a
+/// tokio runtime that panics if dropped inside an async context, so [`Drop`]
+/// moves it to a dedicated OS thread for safe cleanup.
+pub(crate) struct McpSseClient {
+    base_url: String,
+    http: Option<HttpClient>,
+    session_id: Option<String>,
+}
+
+impl McpSseClient {
+    pub(crate) fn new(
+        url: &str,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<Self, String> {
+        let mut builder = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(30));
+        let mut header_map = reqwest::header::HeaderMap::new();
+        for (k, v) in headers {
+            if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
+                if let Ok(val) = reqwest::header::HeaderValue::from_str(v) {
+                    header_map.insert(name, val);
+                }
+            }
+        }
+        if !header_map.is_empty() {
+            builder = builder.default_headers(header_map);
+        }
+        let http = builder
+            .build()
+            .map_err(|e| format!("HTTP client error: {}", e))?;
+
+        Ok(Self {
+            base_url: url.trim_end_matches('/').to_string(),
+            http: Some(http),
+            session_id: None,
+        })
+    }
+
+    fn send_request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+        });
+        if !params.is_null() {
+            body["params"] = params;
+        }
+
+        let url = format!("{}/messages", self.base_url);
+        let http = self.http.as_ref().ok_or("HTTP client already shut down")?;
+        let mut req = http.post(&url).json(&body);
+        if let Some(ref sid) = self.session_id {
+            req = req.header("X-Session-Id", sid);
+        }
+
+        let resp = req
+            .send()
+            .map_err(|e| format!("SSE request failed: {}", e))?;
+
+        // Capture session id from response headers if present.
+        if let Some(sid) = resp.headers().get("X-Session-Id") {
+            if let Ok(s) = sid.to_str() {
+                self.session_id = Some(s.to_string());
+            }
+        }
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .map_err(|e| format!("Read response failed: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("SSE request returned {}: {}", status, text));
+        }
+
+        // Notifications (e.g. notifications/initialized) may receive an empty
+        // or non-JSON 202 body — treat that as success.
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+
+        let json: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("Parse SSE response failed: {}", e))?;
+
+        if let Some(err) = json.get("error") {
+            return Err(format!("RPC error: {}", err));
+        }
+
+        Ok(json.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    pub(crate) fn initialize(&mut self) -> Result<(), String> {
+        self.send_request(
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "agent-manager",
+                    "version": "0.2.3"
+                }
+            }),
+        )?;
+        // Send initialized notification (best-effort — server may reply 202).
+        let _ = self.send_request("notifications/initialized", Value::Null);
+        Ok(())
+    }
+
+    pub(crate) fn list_tools(&mut self) -> Result<Vec<Value>, String> {
+        let result = self.send_request("tools/list", json!({}))?;
+        Ok(result
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub(crate) fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<Value, String> {
+        self.send_request(
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": arguments
+            }),
+        )
+    }
+}
+
+impl Drop for McpSseClient {
+    fn drop(&mut self) {
+        if let Some(http) = self.http.take() {
+            // reqwest::blocking::Client owns a tokio runtime that panics if
+            // dropped inside an async context. Move it to a separate OS thread
+            // so cleanup is always safe. If the thread cannot be spawned the
+            // client is simply leaked (avoids the panic).
+            let _ = std::thread::Builder::new()
+                .name("mcp-sse-cleanup".to_string())
+                .spawn(move || drop(http));
+        }
+    }
+}
+
+// ── Unified MCP transport ───────────────────────────────────────────────────
+
+/// Unified MCP client that abstracts over stdio and SSE transports.
+pub(crate) enum McpTransport {
+    Stdio(McpClient),
+    Sse(McpSseClient),
+}
+
+impl McpTransport {
+    /// Create a transport from an [`McpServer`] config, supporting both
+    /// `stdio` (default) and `sse` transports.
+    pub(crate) fn from_server_config(server: &McpServer) -> Result<Self, String> {
+        match server.transport.as_str() {
+            "sse" => {
+                if server.url.is_empty() {
+                    return Err(format!("SSE server '{}' missing url", server.name));
+                }
+                let mut client = McpSseClient::new(&server.url, &server.headers)?;
+                client.initialize()?;
+                Ok(McpTransport::Sse(client))
+            }
+            _ => {
+                let client = McpClient::start(server)?;
+                Ok(McpTransport::Stdio(client))
+            }
+        }
+    }
+
+    pub(crate) fn list_tools(&mut self) -> Result<Vec<Value>, String> {
+        match self {
+            McpTransport::Stdio(c) => c.list_tools(),
+            McpTransport::Sse(c) => c.list_tools(),
+        }
+    }
+
+    pub(crate) fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<Value, String> {
+        match self {
+            McpTransport::Stdio(c) => c.call_tool(name, arguments),
+            McpTransport::Sse(c) => c.call_tool(name, arguments),
+        }
+    }
+}
+
 // ── LLM chat helper ─────────────────────────────────────────────────────────
 
 pub(crate) async fn chat(
@@ -233,11 +424,11 @@ async fn run_agent_inner(request: RunAgentRequest) -> Result<RunAgentResult, Str
     let mut steps: Vec<AgentStep> = vec![];
 
     // ── 1. Start MCP servers and collect tools ──────────────────────────────
-    let mut clients: Vec<(String, McpClient)> = vec![];
+    let mut clients: Vec<(String, McpTransport)> = vec![];
     let mut all_tools: Vec<Value> = vec![];
 
     for server in &request.mcp_servers {
-        match McpClient::start(server) {
+        match McpTransport::from_server_config(server) {
             Ok(mut client) => {
                 match client.list_tools() {
                     Ok(tools) => {
@@ -343,13 +534,15 @@ async fn run_agent_inner(request: RunAgentRequest) -> Result<RunAgentResult, Str
                     if let Some((_, client)) = clients.iter_mut().find(|(n, _)| n == server_name) {
                         match client.call_tool(tool_name, &fn_args) {
                             Ok(result) => {
-                                let content = result["content"]
+                                // 完整提取所有 content 项的 text，而非仅取第一个
+                                result["content"]
                                     .as_array()
-                                    .and_then(|arr| arr.first())
-                                    .and_then(|c| c["text"].as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                content
+                                    .map(|arr| arr.iter()
+                                        .filter_map(|c| c["text"].as_str().map(|s| s.to_string()))
+                                        .collect::<Vec<_>>()
+                                        .join("\n"))
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| serde_json::to_string(&result).unwrap_or_default())
                             }
                             Err(e) => format!("Tool error: {}", e),
                         }
@@ -454,11 +647,11 @@ async fn chat_turn_inner(request: ChatRequest) -> Result<ChatTurn, String> {
     let mut steps: Vec<AgentStep> = vec![];
 
     // Start MCP servers and collect tools
-    let mut clients: Vec<(String, McpClient)> = vec![];
+    let mut clients: Vec<(String, McpTransport)> = vec![];
     let mut all_tools: Vec<Value> = vec![];
 
     for server in &request.mcp_servers {
-        if let Ok(mut client) = McpClient::start(server) {
+        if let Ok(mut client) = McpTransport::from_server_config(server) {
             if let Ok(tools) = client.list_tools() {
                 for tool in &tools {
                     all_tools.push(json!({
@@ -526,12 +719,15 @@ async fn chat_turn_inner(request: ChatRequest) -> Result<ChatTurn, String> {
                     if let Some((_, client)) = clients.iter_mut().find(|(n, _)| n == server_name) {
                         match client.call_tool(tool_name, &fn_args) {
                             Ok(result) => {
+                                // 完整提取所有 content 项的 text，而非仅取第一个
                                 result["content"]
                                     .as_array()
-                                    .and_then(|arr| arr.first())
-                                    .and_then(|c| c["text"].as_str())
-                                    .unwrap_or("")
-                                    .to_string()
+                                    .map(|arr| arr.iter()
+                                        .filter_map(|c| c["text"].as_str().map(|s| s.to_string()))
+                                        .collect::<Vec<_>>()
+                                        .join("\n"))
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| serde_json::to_string(&result).unwrap_or_default())
                             }
                             Err(e) => format!("Tool error: {}", e),
                         }
