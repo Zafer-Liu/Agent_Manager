@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useTranslation } from 'react-i18next'
 import { RefreshCw, Download, CheckCircle, XCircle, ArrowUpCircle } from 'lucide-react'
@@ -36,15 +36,7 @@ export function UpdateChecker({ autoCheck = false, compact = false }: UpdateChec
     invoke<string>('get_app_version').then(setCurrentVersion).catch(() => {})
   }, [])
 
-  useEffect(() => {
-    if (!autoCheck) return
-    const last = localStorage.getItem(LAST_CHECK_KEY)
-    if (last && Date.now() - Number(last) < CHECK_INTERVAL_MS) return
-    check(true)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoCheck])
-
-  async function check(silent = false) {
+  const check = useCallback(async (silent = false) => {
     setState('checking')
     setError('')
     try {
@@ -55,24 +47,30 @@ export function UpdateChecker({ autoCheck = false, compact = false }: UpdateChec
     } catch (e) {
       const msg = String(e)
       setError(msg)
-      setState('error')
-      if (silent) setState('idle') // swallow errors in silent mode
+      // swallow errors in silent/auto-check mode so the UI stays clean
+      setState(silent ? 'idle' : 'error')
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    if (!autoCheck) return
+    const last = localStorage.getItem(LAST_CHECK_KEY)
+    if (last && Date.now() - Number(last) < CHECK_INTERVAL_MS) return
+    check(true)
+  }, [autoCheck, check])
 
   function openRelease() {
     if (info?.release_url) {
-      invoke('tauri', {}).catch(() => {})
       window.open(info.release_url, '_blank')
     }
   }
 
-  // ── Compact badge mode (used in sidebar title area) ──────────────────
+  // ── Compact badge mode (used in sidebar / title area) ────────────────
   if (compact) {
     if (state === 'done' && info?.has_update) {
       return (
         <button
-          onClick={() => openRelease()}
+          onClick={openRelease}
           className="flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:hover:bg-blue-800/60"
           title={t('updater.newVersionAvailable', { version: info.latest })}
         >
