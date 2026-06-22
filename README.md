@@ -284,12 +284,8 @@ brew install cloudflared
 
 ### 下载预构建安装包（推荐）
 
-从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/tree/main/Releases) 下载最新版本：
+从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/Releases) 下载最新版本：
 
-| 平台 | 文件 |
-|------|------|
-| Windows (x64) | `智管-Agent Manager_0.2.3_x64-setup.exe` |
-| macOS | 即将发布 |
 
 双击安装包，按提示安装即可。
 
