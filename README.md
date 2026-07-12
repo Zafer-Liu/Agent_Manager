@@ -415,7 +415,31 @@ Manager Agent 和 MCP Agent 都需要 LLM 驱动。在 **MCP Agent → LLM 设�
 
 # 🗺️ 版本更新
 
-> **当前版本 `v0.2.3`** · 2026 年 6 月 13 日
+> **当前版本 `v0.3.0`** · 2026 年 7 月 12 日
+
+## v0.3.0 主要更新
+
+**阶段四：外部协作能力（P0-P2 全部完成）**
+
+- ✅ **本地 Hook Server**：默认 `127.0.0.1:9420`，外部系统通过 HTTP 推任务进 Agent Manager，端口和 auth_token 可配置
+- ✅ **agent_task 节点**：工作流可调度本地/远程子 Agent（不限于 MCP Server），oneshot channel 挂起等待结果
+- ✅ **Callback 出站通知**：Run 终态时回调外部 URL，指数退避重试 3 次
+- ✅ **Fan-out 并行执行**：支持 static/by_field/llm_split 拆分策略，`join_all` 并行执行子任务
+- ✅ **DispatchStrategy 调度策略**：Fixed / Failover / CapabilityMatch / Random 四种策略
+- ✅ **定时触发（cron）**：自建 5 字段 cron 解析器，后台线程每分钟检查模板 schedule 字段
+- ✅ **McpTransport Http 变体**：支持远程 MCP Server（Streamable HTTP transport）
+- ✅ **前端 SVG DAG 画布**：从线性列表升级为 SVG 绘制的 DAG 画布，支持拖拽定位和工具栏
+- ✅ **ExternalTriggers 设置页**：Hook Server 状态显示、端口/Token 配置、curl 示例、重启功能
+- ✅ **运行历史来源列**：区分手动/外部/返工/定时触发，彩色标签
+- ✅ **Cloudflare Tunnel 隧道条目**：ProxyManager 动态获取 Hook 端口传入隧道配置
+- ✅ **工作流验收面板**：Acceptance/Rework 闭环，对话流内嵌验收卡片
+- ✅ **Sweeper 自愈巡检**：后台 30s interval 检测 Step 超时并标记 failed
+- ✅ **FailureTrace 诊断链路**：MCP stderr ring buffer + 失败原因分类 + 重试历史
+- ✅ **Metrics 事件源**：append-only JSONL 事件源 + 前端四卡片本地聚合
+
+📖 [查看完整 Changelog](https://github.com/Zafer-Liu/Agent_Manager/releases)
+
+---
 
 ## v0.2.3 主要更新
 

@@ -61,20 +61,11 @@ pub async fn check_for_update() -> Result<VersionInfo, String> {
         .trim_start_matches('v')
         .to_string();
 
-    let release_url = json["html_url"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let release_url = json["html_url"].as_str().unwrap_or("").to_string();
 
-    let release_notes = json["body"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let release_notes = json["body"].as_str().unwrap_or("").to_string();
 
-    let published_at = json["published_at"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let published_at = json["published_at"].as_str().unwrap_or("").to_string();
 
     let has_update = !latest_tag.is_empty() && is_newer(&latest_tag, CURRENT_VERSION);
 

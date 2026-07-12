@@ -11,7 +11,8 @@ import { open } from '@tauri-apps/plugin-dialog'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
-import { useMcpAgentStore, type AgentStep, type ChatMessage, type WorkflowStepSummary } from '../store/mcpAgentStore'
+import { useMcpAgentStore, type AgentStep, type ChatMessage, type WorkflowStepSummary, type ChatAcceptance } from '../store/mcpAgentStore'
+import { useWorkflowStore } from '../store/workflowStore'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -163,8 +164,11 @@ function ChatPanel({ provider, mcpServers, allProviders, selectedProvider, onSel
   const clearMessages = useMcpAgentStore(s => s.clearMessages)
   const selectedWorkflowId = useMcpAgentStore(s => s.selectedWorkflowId)
   const setSelectedWorkflowId = useMcpAgentStore(s => s.setSelectedWorkflowId)
+  const setPendingAcceptance = useMcpAgentStore(s => s.setPendingAcceptance)
+  const { approveRun, rejectRun } = useWorkflowStore()
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [acceptanceBusy, setAcceptanceBusy] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   const selectedWorkflow = workflows.find(w => w.id === selectedWorkflowId) ?? null
@@ -226,6 +230,26 @@ function ChatPanel({ provider, mcpServers, allProviders, selectedProvider, onSel
           }))
         })
 
+        // 阶段二：监听 acceptance-requested 事件（工作流到达验收节点时）
+        let acceptanceReq: ChatAcceptance | null = null
+        const unlistenAcceptance = await listen<{
+          run_id: string
+          node_id: string
+          label: string
+          allow_reject_to: string[]
+          executed_node_ids: string[]
+        }>('workflow-acceptance-requested', (event) => {
+          const p = event.payload
+          acceptanceReq = {
+            runId: p.run_id,
+            nodeId: p.node_id,
+            label: p.label,
+            allowRejectTo: p.allow_reject_to.length > 0 ? p.allow_reject_to : p.executed_node_ids,
+            executedNodeIds: p.executed_node_ids,
+          }
+          setPendingAcceptance(acceptanceReq)
+        })
+
         try {
           const res = await invoke<{
             steps: StepEvent[]
@@ -244,19 +268,24 @@ function ChatPanel({ provider, mcpServers, allProviders, selectedProvider, onSel
           // Replace placeholder with final complete message.
           setMessages(m => m.map((msg, i) => {
             if (i !== wfMsgIndex) return msg
+            const isAcceptanceWaiting = !res.success && acceptanceReq
             return {
               ...msg,
-              content: res.final_output || (res.error ?? t('mcpAgent.workflowFailed')),
+              content: isAcceptanceWaiting
+                ? t('mcpAgent.acceptanceWaiting', { label: acceptanceReq!.label })
+                : (res.final_output || (res.error ?? t('mcpAgent.workflowFailed'))),
               workflowSteps: res.steps.map(s => ({
                 label: s.label,
                 kind: s.kind,
                 output: s.output,
                 error: s.error ?? undefined,
               })),
+              acceptance: isAcceptanceWaiting ? acceptanceReq! : undefined,
             }
           }))
         } finally {
           unlisten()
+          unlistenAcceptance()
         }
       } else {
         // ── Normal chat mode ─────────────────────────────────────────────────
@@ -343,6 +372,54 @@ function ChatPanel({ provider, mcpServers, allProviders, selectedProvider, onSel
                 }
               </div>
             </div>
+            {/* 阶段二：验收入口（对话流内嵌） */}
+            {msg.role === 'assistant' && msg.acceptance && !msg.acceptanceResult && (
+              <ChatAcceptanceCard
+                acceptance={msg.acceptance}
+                busy={acceptanceBusy}
+                onApprove={async () => {
+                  setAcceptanceBusy(true)
+                  await approveRun(msg.acceptance!.runId)
+                  setAcceptanceBusy(false)
+                  setPendingAcceptance(null)
+                  setMessages(m => m.map((mm, mi) =>
+                    mi === i ? { ...mm, acceptanceResult: 'approved' as const } : mm
+                  ))
+                  setMessages(m => [...m, {
+                    role: 'assistant',
+                    content: t('workflow.acceptance.approved'),
+                  }])
+                }}
+                onReject={async (rejectTo, reason) => {
+                  setAcceptanceBusy(true)
+                  await rejectRun(msg.acceptance!.runId, rejectTo, reason)
+                  setAcceptanceBusy(false)
+                  setPendingAcceptance(null)
+                  setMessages(m => m.map((mm, mi) =>
+                    mi === i ? { ...mm, acceptanceResult: 'rejected' as const, acceptanceRejectTo: rejectTo } : mm
+                  ))
+                  setMessages(m => [...m, {
+                    role: 'assistant',
+                    content: t('workflow.acceptance.rejected'),
+                  }])
+                }}
+              />
+            )}
+            {/* 验收已完成的状态徽章 */}
+            {msg.role === 'assistant' && msg.acceptanceResult && (
+              <div className="flex justify-start mt-1">
+                <span className={`text-xs px-3 py-1 rounded-full ${
+                  msg.acceptanceResult === 'approved'
+                    ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+                }`}>
+                  {msg.acceptanceResult === 'approved'
+                    ? `✓ ${t('workflow.acceptance.approved')}`
+                    : `↻ ${t('workflow.acceptance.rejected')}`
+                  }
+                </span>
+              </div>
+            )}
           </div>
         ))}
 
@@ -417,6 +494,67 @@ function ChatPanel({ provider, mcpServers, allProviders, selectedProvider, onSel
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ── 对话流内嵌验收卡片（阶段二）─────────────────────────────────────────────
+
+function ChatAcceptanceCard({ acceptance, busy, onApprove, onReject }: {
+  acceptance: ChatAcceptance
+  busy: boolean
+  onApprove: () => void
+  onReject: (rejectTo: string, reason: string) => void
+}) {
+  const { t } = useTranslation()
+  const [reason, setReason] = useState('')
+  const [rejectTo, setRejectTo] = useState(acceptance.allowRejectTo[0] ?? '')
+
+  return (
+    <div className="mt-2 border-2 border-blue-400 dark:border-blue-600 rounded-lg p-4 bg-blue-50 dark:bg-blue-900/20">
+      <h3 className="text-sm font-semibold text-blue-700 dark:text-blue-300">
+        {t('workflow.acceptance.title')}
+      </h3>
+
+      <div className="flex flex-wrap items-center gap-2 mt-3">
+        <button
+          onClick={onApprove}
+          disabled={busy}
+          className="bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm px-4 py-1.5 rounded transition-colors"
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin inline" /> : null}
+          {t('workflow.acceptance.approve')}
+        </button>
+
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          {t('workflow.acceptance.rejectTo')}:
+        </span>
+        <select
+          value={rejectTo}
+          onChange={(e) => setRejectTo(e.target.value)}
+          className="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300"
+        >
+          {acceptance.allowRejectTo.map((nodeId) => (
+            <option key={nodeId} value={nodeId}>{nodeId}</option>
+          ))}
+        </select>
+
+        <button
+          onClick={() => onReject(rejectTo, reason)}
+          disabled={busy || !rejectTo}
+          className="bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm px-4 py-1.5 rounded transition-colors"
+        >
+          {t('workflow.acceptance.reject')}
+        </button>
+      </div>
+
+      <textarea
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        placeholder={t('workflow.acceptance.reasonPlaceholder')}
+        className="w-full mt-2 text-sm border border-gray-300 dark:border-gray-600 rounded p-2 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 resize-none"
+        rows={2}
+      />
     </div>
   )
 }

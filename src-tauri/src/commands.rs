@@ -48,7 +48,12 @@ fn is_port_open(port: u16) -> bool {
     .is_ok()
 }
 
-fn push_log(logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>, id: &str, level: LogLevel, message: String) {
+fn push_log(
+    logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>,
+    id: &str,
+    level: LogLevel,
+    message: String,
+) {
     let mut logs = lock_safe(logs);
     let entries = logs.entry(id.to_string()).or_default();
     // 最多保留 2000 条
@@ -109,12 +114,7 @@ pub fn list_agents(store: State<AgentStore>) -> Vec<AgentState> {
 
     // 对已退出的 agent 触发自动重启检查（在独立线程中，不阻塞响应）
     for (id, exit_code) in exited {
-        try_schedule_auto_restart(
-            &id,
-            exit_code,
-            &configs,
-            &store,
-        );
+        try_schedule_auto_restart(&id, exit_code, &configs, &store);
     }
 
     // 重新加锁构建返回值
@@ -125,7 +125,9 @@ pub fn list_agents(store: State<AgentStore>) -> Vec<AgentState> {
             let state = agents.get(&config.id);
             let port_open = config.port.map(is_port_open).unwrap_or(false);
             let mut result = AgentState {
-                status: state.map(|s| s.status.clone()).unwrap_or(AgentStatus::Stopped),
+                status: state
+                    .map(|s| s.status.clone())
+                    .unwrap_or(AgentStatus::Stopped),
                 pid: state.and_then(|s| s.pid),
                 started_at: state.and_then(|s| s.started_at.clone()),
                 port_open,
@@ -174,8 +176,15 @@ fn try_schedule_auto_restart(
     drop(agents);
 
     if current_count >= restart_policy::MAX_RESTARTS {
-        push_log(&store.logs, id, LogLevel::Warn,
-            format!("Auto-restart skipped: reached max restarts ({})", restart_policy::MAX_RESTARTS));
+        push_log(
+            &store.logs,
+            id,
+            LogLevel::Warn,
+            format!(
+                "Auto-restart skipped: reached max restarts ({})",
+                restart_policy::MAX_RESTARTS
+            ),
+        );
         return;
     }
 
@@ -185,9 +194,17 @@ fn try_schedule_auto_restart(
         restarting.insert(id.to_string(), current_count + 1);
     }
 
-    push_log(&store.logs, id, LogLevel::Warn,
-        format!("Process exited (code={:?}), scheduling auto-restart #{} in {}ms...",
-                exit_code, current_count + 1, restart_policy::RESTART_BACKOFF_MS));
+    push_log(
+        &store.logs,
+        id,
+        LogLevel::Warn,
+        format!(
+            "Process exited (code={:?}), scheduling auto-restart #{} in {}ms...",
+            exit_code,
+            current_count + 1,
+            restart_policy::RESTART_BACKOFF_MS
+        ),
+    );
 
     // spawn 重启线程
     let id_owned = id.to_string();
@@ -213,8 +230,12 @@ fn try_schedule_auto_restart(
         // 执行重启
         match spawn_agent_with_arcs(&id_owned, &config, &agents_arc, &processes_arc, &logs_arc) {
             Ok(pid) => {
-                push_log(&logs_arc, &id_owned, LogLevel::Info,
-                    format!("Auto-restarted successfully (PID {})", pid));
+                push_log(
+                    &logs_arc,
+                    &id_owned,
+                    LogLevel::Info,
+                    format!("Auto-restarted successfully (PID {})", pid),
+                );
                 // 更新重启计数
                 {
                     let mut agents = lock_safe(&agents_arc);
@@ -229,8 +250,12 @@ fn try_schedule_auto_restart(
                 }
             }
             Err(e) => {
-                push_log(&logs_arc, &id_owned, LogLevel::Error,
-                    format!("Auto-restart failed: {}", e));
+                push_log(
+                    &logs_arc,
+                    &id_owned,
+                    LogLevel::Error,
+                    format!("Auto-restart failed: {}", e),
+                );
                 {
                     let mut agents = lock_safe(&agents_arc);
                     if let Some(state) = agents.get_mut(&id_owned) {
@@ -281,7 +306,12 @@ pub async fn start_agent(id: String, store: State<'_, AgentStore>) -> Result<(),
             },
         );
     }
-    push_log(&store.logs, &id, LogLevel::Info, format!("Starting agent '{}'...", config.name));
+    push_log(
+        &store.logs,
+        &id,
+        LogLevel::Info,
+        format!("Starting agent '{}'...", config.name),
+    );
 
     // 记录本次启动前的日志基准索引，用于后续只收集本次启动产生的错误
     let log_start_idx = {
@@ -290,13 +320,7 @@ pub async fn start_agent(id: String, store: State<'_, AgentStore>) -> Result<(),
     };
 
     // 执行实际的 spawn
-    let pid = spawn_agent_with_arcs(
-        &id,
-        &config,
-        &store.agents,
-        &store.processes,
-        &store.logs,
-    )?;
+    let pid = spawn_agent_with_arcs(&id, &config, &store.agents, &store.processes, &store.logs)?;
 
     // 存活检查：等待一段时间后确认进程仍存活
     tokio::time::sleep(Duration::from_millis(restart_policy::HEALTH_CHECK_MS)).await;
@@ -319,9 +343,15 @@ pub async fn start_agent(id: String, store: State<'_, AgentStore>) -> Result<(),
         // 只收集本次启动后（log_start_idx 之后）产生的错误，避免累加上次的错误信息
         let error_context = collect_errors_since(&store.logs, &id, log_start_idx);
         let err_msg = if error_context.is_empty() {
-            format!("Agent exited immediately (code={:?}). Check command/path/env.", exit_code)
+            format!(
+                "Agent exited immediately (code={:?}). Check command/path/env.",
+                exit_code
+            )
         } else {
-            format!("Agent exited immediately (code={:?}):\n{}", exit_code, error_context)
+            format!(
+                "Agent exited immediately (code={:?}):\n{}",
+                exit_code, error_context
+            )
         };
 
         // 更新状态为 Error
@@ -378,7 +408,8 @@ fn spawn_agent_with_arcs(
                 if output.status.success() {
                     let where_result = String::from_utf8_lossy(&output.stdout);
                     // 取第一个结果，但跳过 Windows Store stub
-                    let real_exe = where_result.lines()
+                    let real_exe = where_result
+                        .lines()
                         .map(str::trim)
                         .filter(|line| !line.is_empty())
                         .find(|line| {
@@ -389,8 +420,12 @@ fn spawn_agent_with_arcs(
                         .map(|s| s.to_string());
 
                     if let Some(exe_path) = real_exe {
-                        push_log(logs, id, LogLevel::Debug,
-                            format!("Resolved '{}' -> '{}'", config.command, exe_path));
+                        push_log(
+                            logs,
+                            id,
+                            LogLevel::Debug,
+                            format!("Resolved '{}' -> '{}'", config.command, exe_path),
+                        );
                         exe_path
                     } else {
                         push_log(logs, id, LogLevel::Warn,
@@ -421,7 +456,8 @@ fn spawn_agent_with_arcs(
     let (exe, leading): (&str, Vec<String>) = (resolved_command.as_str(), vec![]);
 
     let mut cmd = Command::new(exe);
-    cmd.args(&leading).args(&config.args)
+    cmd.args(&leading)
+        .args(&config.args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -472,7 +508,12 @@ fn spawn_agent_with_arcs(
     }
 
     // 记录启动日志
-    push_log(logs, id, LogLevel::Info, format!("Agent started (PID {})", pid));
+    push_log(
+        logs,
+        id,
+        LogLevel::Info,
+        format!("Agent started (PID {})", pid),
+    );
 
     // 后台线程读取 stdout
     let logs_arc = Arc::clone(logs);
@@ -502,12 +543,16 @@ fn spawn_agent_with_arcs(
 }
 
 /// 收集指定索引之后的错误日志（避免累加上次启动失败的错误信息）
-fn collect_errors_since(logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>, id: &str, since: usize) -> String {
+fn collect_errors_since(
+    logs: &Arc<Mutex<HashMap<String, Vec<LogEntry>>>>,
+    id: &str,
+    since: usize,
+) -> String {
     let logs = lock_safe(logs);
     if let Some(entries) = logs.get(id) {
         let errors: Vec<String> = entries
             .iter()
-            .skip(since)  // 只看本次启动后的日志
+            .skip(since) // 只看本次启动后的日志
             .filter(|e| matches!(e.level, LogLevel::Error))
             .map(|e| e.message.clone())
             .collect();
@@ -547,7 +592,12 @@ pub fn stop_agent(id: String, store: State<AgentStore>) -> Result<(), String> {
         restarting.remove(&id);
     }
 
-    push_log(&store.logs, &id, LogLevel::Info, "Agent stopped".to_string());
+    push_log(
+        &store.logs,
+        &id,
+        LogLevel::Info,
+        "Agent stopped".to_string(),
+    );
 
     Ok(())
 }
@@ -577,7 +627,11 @@ pub fn save_agent_config(config: Value) -> Result<String, String> {
         command: config["command"].as_str().unwrap_or("").to_string(),
         args: config["args"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default(),
         working_dir: config["working_dir"].as_str().unwrap_or("").to_string(),
         env: config["env"]
@@ -589,7 +643,10 @@ pub fn save_agent_config(config: Value) -> Result<String, String> {
             })
             .unwrap_or_default(),
         port: config["port"].as_u64().map(|p| p as u16),
-        ui_token: config["ui_token"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+        ui_token: config["ui_token"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         auto_restart: config["auto_restart"].as_bool().unwrap_or(false),
         created_at: configs
             .get(&id)
@@ -761,14 +818,26 @@ pub fn scan_project_dir(dir: String) -> Result<ProjectScanResult, String> {
 
 fn detect_python_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
     // 入口文件候选，按优先级排列，同时搜索根目录和 src/ 子目录
-    let root_candidates = ["main.py", "app.py", "server.py", "run.py", "agent.py",
-                           "start.py", "manage.py", "wsgi.py", "asgi.py", "__main__.py"];
-    let entry: Option<String> = root_candidates.iter()
+    let root_candidates = [
+        "main.py",
+        "app.py",
+        "server.py",
+        "run.py",
+        "agent.py",
+        "start.py",
+        "manage.py",
+        "wsgi.py",
+        "asgi.py",
+        "__main__.py",
+    ];
+    let entry: Option<String> = root_candidates
+        .iter()
         .find(|f| path.join(f).exists())
         .map(|f| f.to_string())
         .or_else(|| {
             // 搜索 src/ 子目录
-            root_candidates.iter()
+            root_candidates
+                .iter()
                 .find(|f| path.join("src").join(f).exists())
                 .map(|f| format!("src/{}", f))
         });
@@ -782,9 +851,15 @@ fn detect_python_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
             .unwrap_or(false)
     };
     let any_contains = |keyword: &str| -> bool {
-        ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile"]
-            .iter()
-            .any(|f| file_contains(f, keyword))
+        [
+            "requirements.txt",
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "Pipfile",
+        ]
+        .iter()
+        .any(|f| file_contains(f, keyword))
     };
 
     // 检测 uv / poetry / pipenv
@@ -792,7 +867,8 @@ fn detect_python_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
     let python_cmd = if use_uv { "uv" } else { "python" };
 
     // 从 pyproject.toml 读 scripts 入口（[project.scripts] 或 [tool.poetry.scripts]）
-    let script_entry = std::fs::read_to_string(path.join("pyproject.toml")).ok()
+    let script_entry = std::fs::read_to_string(path.join("pyproject.toml"))
+        .ok()
         .and_then(|content| {
             // 简单正则：找第一个 "xxx = \"module:func\"" 行
             for line in content.lines() {
@@ -824,11 +900,17 @@ fn detect_python_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
 
     // FastAPI / uvicorn
     if any_contains("fastapi") || any_contains("uvicorn") {
-        let module = entry.as_deref()
-            .map(|e| e.trim_end_matches(".py").replace('/', ".").replace('\\', "."))
+        let module = entry
+            .as_deref()
+            .map(|e| {
+                e.trim_end_matches(".py")
+                    .replace('/', ".")
+                    .replace('\\', ".")
+            })
             .unwrap_or_else(|| "main".to_string());
         // 尝试检测 app 变量名：app / application / create_app
-        let app_var = entry.as_deref()
+        let app_var = entry
+            .as_deref()
             .and_then(|e| std::fs::read_to_string(path.join(e)).ok())
             .and_then(|content| {
                 for var in &["application", "create_app", "app"] {
@@ -867,8 +949,11 @@ fn detect_python_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
         let django_port = port.unwrap_or(8000);
         return (
             "python".to_string(),
-            vec!["manage.py".to_string(), "runserver".to_string(),
-                 format!("0.0.0.0:{}", django_port)],
+            vec![
+                "manage.py".to_string(),
+                "runserver".to_string(),
+                format!("0.0.0.0:{}", django_port),
+            ],
             Some(django_port),
         );
     }
@@ -879,8 +964,12 @@ fn detect_python_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
         let st_port = port.unwrap_or(8501);
         return (
             "streamlit".to_string(),
-            vec!["run".to_string(), e,
-                 "--server.port".to_string(), st_port.to_string()],
+            vec![
+                "run".to_string(),
+                e,
+                "--server.port".to_string(),
+                st_port.to_string(),
+            ],
             Some(st_port),
         );
     }
@@ -899,14 +988,18 @@ fn detect_python_port(path: &Path) -> Option<u16> {
         if let Ok(content) = std::fs::read_to_string(path.join(env_file)) {
             for line in content.lines() {
                 let line = line.trim();
-                if line.starts_with('#') { continue; }
+                if line.starts_with('#') {
+                    continue;
+                }
                 // 匹配任意以 PORT= 结尾的键（PORT= / APP_PORT= / AGENT_PORT= / SERVER_PORT= 等）
                 if let Some(eq) = line.find('=') {
                     let key = line[..eq].trim().to_uppercase();
                     if key == "PORT" || key.ends_with("_PORT") {
                         let val = line[eq + 1..].trim().trim_matches('"').trim_matches('\'');
                         if let Ok(p) = val.parse::<u16>() {
-                            if p > 1000 { return Some(p); }
+                            if p > 1000 {
+                                return Some(p);
+                            }
                         }
                     }
                 }
@@ -915,13 +1008,22 @@ fn detect_python_port(path: &Path) -> Option<u16> {
     }
 
     // 2. 入口 py 文件中的端口声明
-    let py_candidates = ["main.py", "app.py", "server.py", "run.py", "agent.py", "start.py"];
+    let py_candidates = [
+        "main.py",
+        "app.py",
+        "server.py",
+        "run.py",
+        "agent.py",
+        "start.py",
+    ];
     for f in &py_candidates {
         if let Ok(content) = std::fs::read_to_string(path.join(f)) {
             for line in content.lines() {
                 let trimmed = line.trim();
                 // 跳过注释行
-                if trimmed.starts_with('#') { continue; }
+                if trimmed.starts_with('#') {
+                    continue;
+                }
 
                 // ── 模式 A：os.environ.get("AGENT_PORT", 5001) ──────────────
                 // 匹配 environ.get(..., XXXX) 或 environ.get(..., "XXXX") 中的默认值
@@ -946,7 +1048,9 @@ fn detect_python_port(path: &Path) -> Option<u16> {
                         let rest = search[idx + 5..].trim_start();
                         let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                         if let Ok(p) = num.parse::<u16>() {
-                            if p > 1000 { return Some(p); }
+                            if p > 1000 {
+                                return Some(p);
+                            }
                         }
                     }
                     search = &search[idx + 5..];
@@ -957,7 +1061,9 @@ fn detect_python_port(path: &Path) -> Option<u16> {
                     let rest = trimmed[idx + 7..].trim_start();
                     let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                     if let Ok(p) = num.parse::<u16>() {
-                        if p > 1000 { return Some(p); }
+                        if p > 1000 {
+                            return Some(p);
+                        }
                     }
                 }
 
@@ -965,9 +1071,15 @@ fn detect_python_port(path: &Path) -> Option<u16> {
                 let up = trimmed.to_uppercase();
                 for prefix in &["PORT = ", "PORT="] {
                     if let Some(rest) = up.strip_prefix(prefix) {
-                        let num: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+                        let num: String = rest
+                            .trim_start()
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect();
                         if let Ok(p) = num.parse::<u16>() {
-                            if p > 1000 { return Some(p); }
+                            if p > 1000 {
+                                return Some(p);
+                            }
                         }
                     }
                 }
@@ -995,7 +1107,10 @@ fn extract_environ_get_default(line: &str) -> Option<u16> {
                 '(' => depth += 1,
                 ')' => {
                     depth -= 1;
-                    if depth == 0 { end = i; break; }
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
                 }
                 _ => {}
             }
@@ -1009,13 +1124,19 @@ fn extract_environ_get_default(line: &str) -> Option<u16> {
         let parts: Vec<&str> = args_str.splitn(2, ',').collect();
         if parts.len() == 2 {
             // 第一个参数：键名（去掉引号和空白）
-            let key = parts[0].trim().trim_matches('"').trim_matches('\'').to_uppercase();
+            let key = parts[0]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_uppercase();
             // 键名必须以 PORT 结尾
             if key == "PORT" || key.ends_with("PORT") {
                 // 第二个参数：默认值
                 let default_str = parts[1].trim().trim_matches('"').trim_matches('\'');
                 if let Ok(p) = default_str.parse::<u16>() {
-                    if p > 1000 { return Some(p); }
+                    if p > 1000 {
+                        return Some(p);
+                    }
                 }
             }
         }
@@ -1030,9 +1151,13 @@ fn detect_node_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
 
-    let pm = if path.join("pnpm-lock.yaml").exists() { "pnpm" }
-        else if path.join("yarn.lock").exists() { "yarn" }
-        else { "npm" };
+    let pm = if path.join("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if path.join("yarn.lock").exists() {
+        "yarn"
+    } else {
+        "npm"
+    };
 
     if let Some(ref p) = pkg {
         let scripts = p.get("scripts");
@@ -1040,8 +1165,7 @@ fn detect_node_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
         let dev_deps = p.get("devDependencies");
 
         let has_dep = |name: &str| -> bool {
-            deps.and_then(|d| d.get(name)).is_some()
-                || dev_deps.and_then(|d| d.get(name)).is_some()
+            deps.and_then(|d| d.get(name)).is_some() || dev_deps.and_then(|d| d.get(name)).is_some()
         };
 
         let script_val = |key: &str| -> Option<&str> {
@@ -1050,25 +1174,44 @@ fn detect_node_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
 
         // 1. Vite 项目 (dev server) — 优先用 dev 脚本
         if has_dep("vite") || has_dep("@vitejs/plugin-react") {
-            let script = if script_val("dev").is_some() { "dev" } else { "start" };
+            let script = if script_val("dev").is_some() {
+                "dev"
+            } else {
+                "start"
+            };
             let port = script_val(script)
                 .and_then(|s| extract_port_from_script(s))
                 .unwrap_or(5173);
-            return (pm.to_string(), vec!["run".to_string(), script.to_string()], Some(port));
+            return (
+                pm.to_string(),
+                vec!["run".to_string(), script.to_string()],
+                Some(port),
+            );
         }
 
         // 2. Next.js
         if has_dep("next") {
-            let script = if script_val("dev").is_some() { "dev" } else { "start" };
+            let script = if script_val("dev").is_some() {
+                "dev"
+            } else {
+                "start"
+            };
             let port = script_val(script)
                 .and_then(|s| extract_port_from_script(s))
                 .unwrap_or(3000);
-            return (pm.to_string(), vec!["run".to_string(), script.to_string()], Some(port));
+            return (
+                pm.to_string(),
+                vec!["run".to_string(), script.to_string()],
+                Some(port),
+            );
         }
 
         // 3. Express / Fastify / Hono 等服务端框架 — 优先 start，次选 dev
-        let is_server = has_dep("express") || has_dep("fastify") || has_dep("hono")
-            || has_dep("koa") || has_dep("@hono/node-server");
+        let is_server = has_dep("express")
+            || has_dep("fastify")
+            || has_dep("hono")
+            || has_dep("koa")
+            || has_dep("@hono/node-server");
         if is_server {
             let (script, port) = if let Some(s) = script_val("start") {
                 ("start", extract_port_from_script(s).unwrap_or(3000))
@@ -1077,31 +1220,54 @@ fn detect_node_entry(path: &Path) -> (String, Vec<String>, Option<u16>) {
             } else {
                 ("start", 3000)
             };
-            return (pm.to_string(), vec!["run".to_string(), script.to_string()], Some(port));
+            return (
+                pm.to_string(),
+                vec!["run".to_string(), script.to_string()],
+                Some(port),
+            );
         }
 
         // 4. 有 dev 脚本就用 dev
         if let Some(dev_script) = script_val("dev") {
             let port = extract_port_from_script(dev_script);
-            return (pm.to_string(), vec!["run".to_string(), "dev".to_string()], port);
+            return (
+                pm.to_string(),
+                vec!["run".to_string(), "dev".to_string()],
+                port,
+            );
         }
 
         // 5. 有 start 脚本就用 start
         if let Some(start_script) = script_val("start") {
             let port = extract_port_from_script(start_script);
-            return (pm.to_string(), vec!["run".to_string(), "start".to_string()], port);
+            return (
+                pm.to_string(),
+                vec!["run".to_string(), "start".to_string()],
+                port,
+            );
         }
     }
 
     // 6. 没有可用脚本，找入口文件
-    let candidates = ["index.js", "server.js", "app.js", "main.js", "index.ts", "server.ts"];
+    let candidates = [
+        "index.js",
+        "server.js",
+        "app.js",
+        "main.js",
+        "index.ts",
+        "server.ts",
+    ];
     let entry = candidates.iter().find(|f| path.join(f).exists()).copied();
     let has_ts = path.join("tsconfig.json").exists();
     let port = detect_node_port(path, pkg.as_ref());
 
     if let Some(e) = entry {
         if has_ts && e.ends_with(".ts") {
-            return ("npx".to_string(), vec!["tsx".to_string(), e.to_string()], port);
+            return (
+                "npx".to_string(),
+                vec!["tsx".to_string(), e.to_string()],
+                port,
+            );
         }
         return ("node".to_string(), vec![e.to_string()], port);
     }
@@ -1146,7 +1312,11 @@ fn extract_port_from_script(script: &str) -> Option<u16> {
 }
 
 fn find_executable(path: &Path) -> Option<String> {
-    let exts = if cfg!(windows) { vec!["exe", "bat", "cmd"] } else { vec!["sh", ""] };
+    let exts = if cfg!(windows) {
+        vec!["exe", "bat", "cmd"]
+    } else {
+        vec!["sh", ""]
+    };
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -1262,7 +1432,9 @@ pub fn resolve_npm_global_to_node(cmd: &str) -> Option<(String, String)> {
 
 #[cfg(windows)]
 fn find_bin_entry(node_modules: &std::path::Path, cmd: &str) -> Option<String> {
-    let Ok(top_entries) = std::fs::read_dir(node_modules) else { return None };
+    let Ok(top_entries) = std::fs::read_dir(node_modules) else {
+        return None;
+    };
 
     let mut dirs_to_check: Vec<std::path::PathBuf> = Vec::new();
 
@@ -1283,9 +1455,15 @@ fn find_bin_entry(node_modules: &std::path::Path, cmd: &str) -> Option<String> {
 
     for pkg_dir in dirs_to_check {
         let pkg_json = pkg_dir.join("package.json");
-        if !pkg_json.exists() { continue; }
-        let Ok(text) = std::fs::read_to_string(&pkg_json) else { continue };
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        if !pkg_json.exists() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&pkg_json) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
 
         let bin = json.get("bin")?;
         let js_rel = if let Some(s) = bin.as_str() {
@@ -1296,7 +1474,9 @@ fn find_bin_entry(node_modules: &std::path::Path, cmd: &str) -> Option<String> {
             continue;
         };
 
-        let js_rel_clean = js_rel.trim_start_matches("./").replace('/', std::path::MAIN_SEPARATOR_STR);
+        let js_rel_clean = js_rel
+            .trim_start_matches("./")
+            .replace('/', std::path::MAIN_SEPARATOR_STR);
         let full = pkg_dir.join(&js_rel_clean);
         if full.exists() {
             return Some(full.to_string_lossy().to_string());
@@ -1313,7 +1493,9 @@ pub fn find_node_exe_path() -> String {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(first) = s.lines().next() {
                 let p = std::path::Path::new(first.trim());
-                if p.exists() { return first.trim().to_string(); }
+                if p.exists() {
+                    return first.trim().to_string();
+                }
             }
         }
     }
@@ -1322,12 +1504,16 @@ pub fn find_node_exe_path() -> String {
         r"C:\Program Files\nodejs\node.exe",
         r"C:\Program Files (x86)\nodejs\node.exe",
     ] {
-        if std::path::Path::new(p).exists() { return p.to_string(); }
+        if std::path::Path::new(p).exists() {
+            return p.to_string();
+        }
     }
     // 3. nvm4w: NVM_SYMLINK env var points to current node dir
     if let Ok(symlink) = std::env::var("NVM_SYMLINK") {
         let p = std::path::Path::new(&symlink).join("node.exe");
-        if p.exists() { return p.to_string_lossy().to_string(); }
+        if p.exists() {
+            return p.to_string_lossy().to_string();
+        }
     }
     "node".to_string()
 }

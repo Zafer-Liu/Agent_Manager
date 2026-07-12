@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next'
 import { UpdateChecker } from '../components/UpdateChecker'
+import { ExternalTriggers } from './ExternalTriggers'
 
 export function Settings() {
   const { t } = useTranslation()
@@ -13,6 +14,9 @@ export function Settings() {
         </h2>
         <p className="text-xs text-gray-500 mt-0.5">{t('settings.subtitle')}</p>
       </div>
+
+      {/* External triggers section */}
+      <ExternalTriggers />
 
       {/* Updates section */}
       <section className="space-y-3">

@@ -25,10 +25,7 @@ pub fn list_listening_ports() -> Vec<PortInfo> {
 #[cfg(windows)]
 fn list_ports_windows() -> Vec<PortInfo> {
     // netstat -ano 拿到端口+PID，再用 tasklist 查进程名
-    let netstat = Command::new("netstat")
-        .args(["-ano"])
-        .output()
-        .ok();
+    let netstat = Command::new("netstat").args(["-ano"]).output().ok();
 
     let mut ports: Vec<PortInfo> = vec![];
 
@@ -37,22 +34,29 @@ fn list_ports_windows() -> Vec<PortInfo> {
         for line in text.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             // Proto  Local  Foreign  State  PID
-            if parts.len() < 5 { continue; }
+            if parts.len() < 5 {
+                continue;
+            }
             let proto = parts[0];
-            if proto != "TCP" && proto != "UDP" { continue; }
+            if proto != "TCP" && proto != "UDP" {
+                continue;
+            }
 
             let state = if proto == "TCP" { parts[3] } else { "—" };
             let pid_str = parts[parts.len() - 1];
 
-            if state != "LISTENING" && state != "—" { continue; }
+            if state != "LISTENING" && state != "—" {
+                continue;
+            }
 
             let local = parts[1];
-            let port = local.rsplit(':').next()
-                .and_then(|p| p.parse::<u16>().ok());
+            let port = local.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
             let pid = pid_str.parse::<u32>().ok();
 
             if let (Some(port), Some(pid)) = (port, pid) {
-                if pid == 0 { continue; }
+                if pid == 0 {
+                    continue;
+                }
                 ports.push(PortInfo {
                     port,
                     pid,
@@ -76,7 +80,9 @@ fn list_ports_windows() -> Vec<PortInfo> {
         for line in text.lines() {
             // "chrome.exe","1234","Console","1","50,000 K"
             let parts: Vec<&str> = line.splitn(3, ',').collect();
-            if parts.len() < 2 { continue; }
+            if parts.len() < 2 {
+                continue;
+            }
             let name = parts[0].trim_matches('"').to_string();
             let pid = parts[1].trim_matches('"').parse::<u32>().ok();
             if let Some(p) = pid {
@@ -101,17 +107,16 @@ fn list_ports_windows() -> Vec<PortInfo> {
 
 #[cfg(unix)]
 fn list_ports_unix() -> Vec<PortInfo> {
-    let out = Command::new("ss")
-        .args(["-tlnp"])
-        .output()
-        .ok();
+    let out = Command::new("ss").args(["-tlnp"]).output().ok();
 
     let mut ports = vec![];
     if let Some(out) = out {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 5 { continue; }
+            if parts.len() < 5 {
+                continue;
+            }
             let local = parts[3];
             let port = local.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
             if let Some(port) = port {
@@ -136,7 +141,9 @@ fn list_ports_unix() -> Vec<PortInfo> {
 fn parse_ss_process(s: &str) -> (String, u32) {
     // users:(("node",pid=1234,fd=5))
     let name = s.split('"').nth(1).unwrap_or("").to_string();
-    let pid = s.split("pid=").nth(1)
+    let pid = s
+        .split("pid=")
+        .nth(1)
         .and_then(|p| p.split(',').next())
         .and_then(|p| p.parse::<u32>().ok())
         .unwrap_or(0);
@@ -156,10 +163,19 @@ pub fn kill_port(port: u16) -> Result<String, String> {
         let mut pid: Option<u32> = None;
         for line in text.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 5 { continue; }
-            if parts[0] != "TCP" { continue; }
-            if parts[3] != "LISTENING" { continue; }
-            let local_port = parts[1].rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
+            if parts.len() < 5 {
+                continue;
+            }
+            if parts[0] != "TCP" {
+                continue;
+            }
+            if parts[3] != "LISTENING" {
+                continue;
+            }
+            let local_port = parts[1]
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse::<u16>().ok());
             if local_port == Some(port) {
                 pid = parts[4].parse::<u32>().ok();
                 break;

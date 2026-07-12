@@ -112,7 +112,11 @@ fn find_caddy(cfg: &ProxyConfig) -> Option<String> {
         r"C:\tools\caddy\caddy.exe",
     ];
     #[cfg(not(windows))]
-    let known = ["/usr/bin/caddy", "/usr/local/bin/caddy", "/opt/homebrew/bin/caddy"];
+    let known = [
+        "/usr/bin/caddy",
+        "/usr/local/bin/caddy",
+        "/opt/homebrew/bin/caddy",
+    ];
 
     for p in &known {
         if std::path::Path::new(p).exists() {
@@ -140,9 +144,7 @@ fn build_caddyfile(cfg: &ProxyConfig) -> String {
 
     // 全局选项
     let admin_port = cfg.admin_port.unwrap_or(2019);
-    out.push_str(&format!(
-        "{{\n    admin localhost:{admin_port}\n}}\n\n"
-    ));
+    out.push_str(&format!("{{\n    admin localhost:{admin_port}\n}}\n\n"));
 
     for rule in &cfg.rules {
         // 确定参与认证的用户
@@ -276,7 +278,13 @@ pub fn proxy_apply(config: ProxyConfig) -> Result<String, String> {
 
     // 5. 启动 Caddy（后台运行）
     Command::new(&caddy)
-        .args(["run", "--config", cf_path.to_str().unwrap(), "--adapter", "caddyfile"])
+        .args([
+            "run",
+            "--config",
+            cf_path.to_str().unwrap(),
+            "--adapter",
+            "caddyfile",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -331,8 +339,8 @@ pub fn proxy_preview_caddyfile(config: ProxyConfig) -> String {
 // Cloudflare Tunnel — 临时公网分享
 // ═══════════════════════════════════════════════════════════
 
-use std::sync::{Arc, Mutex};
 use std::io::{BufRead, BufReader};
+use std::sync::{Arc, Mutex};
 
 /// 全局隧道进程表：agent_id → (child_process, tunnel_url)
 type TunnelMap = Arc<Mutex<HashMap<String, (std::process::Child, String)>>>;
@@ -431,10 +439,15 @@ pub fn tunnel_start(
 
     // 启动子进程，捕获 stderr（cloudflared 把日志输出到 stderr）
     let mut cmd = Command::new(&cloudflared);
-    cmd.args(["tunnel", "--url", &format!("http://localhost:{port}"), "--no-autoupdate"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    cmd.args([
+        "tunnel",
+        "--url",
+        &format!("http://localhost:{port}"),
+        "--no-autoupdate",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
 
     // 注意：故意【不】注入系统代理。
     // cloudflared 能直连 Cloudflare 边缘节点，注入 HTTP 代理反而会让所有
@@ -450,7 +463,8 @@ pub fn tunnel_start(
         .env_remove("ALL_PROXY")
         .env_remove("all_proxy");
 
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("无法启动 cloudflared: {e}"))?;
 
     // 从 stderr 读取行，等待出现 trycloudflare.com URL
@@ -502,9 +516,14 @@ pub fn tunnel_start(
                     "  2. 临时切换到手机热点（热点自带可用的 DNS）\n",
                     "  3. 重启路由器，恢复其 DNS 服务\n",
                 )
-            } else if log_text.contains("certificate") || log_text.contains("tls") || log_text.contains("x509") {
+            } else if log_text.contains("certificate")
+                || log_text.contains("tls")
+                || log_text.contains("x509")
+            {
                 "\n⚠️  TLS 证书验证失败，可能是代理软件 MITM 证书未受信任。\n"
-            } else if log_text.contains("connection refused") || log_text.contains("connect: connection refused") {
+            } else if log_text.contains("connection refused")
+                || log_text.contains("connect: connection refused")
+            {
                 "\n⚠️  连接被拒绝，请检查网络防火墙设置。\n"
             } else if log_text.is_empty() {
                 "\n⚠️  cloudflared 无任何输出即退出，可能版本过旧或可执行文件损坏。\n"
@@ -526,22 +545,24 @@ pub fn tunnel_start(
                 "  2. 临时切换到手机热点\n",
                 "  3. 重启路由器，恢复其 DNS 服务\n",
                 "  4. 确认本地 Agent 已启动且端口正确"
-            ).to_string());
+            )
+            .to_string());
         }
     };
 
     // 把进程句柄存起来，供后续 stop 使用
-    store.tunnels.lock().unwrap().insert(agent_id, (child, tunnel_url.clone()));
+    store
+        .tunnels
+        .lock()
+        .unwrap()
+        .insert(agent_id, (child, tunnel_url.clone()));
 
     Ok(tunnel_url)
 }
 
 /// 停止指定 agent 的隧道
 #[tauri::command]
-pub fn tunnel_stop(
-    agent_id: String,
-    store: tauri::State<'_, TunnelStore>,
-) -> Result<(), String> {
+pub fn tunnel_stop(agent_id: String, store: tauri::State<'_, TunnelStore>) -> Result<(), String> {
     let mut map = store.tunnels.lock().unwrap();
     if let Some((mut child, _)) = map.remove(&agent_id) {
         child.kill().map_err(|e| format!("无法停止隧道: {e}"))?;
@@ -599,7 +620,9 @@ fn extract_tunnel_url(line: &str) -> Option<String> {
 
         // 取出 URL（以空白、引号、竖线、逗号、右括号结束）
         let end = rest
-            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '|' || c == ',' || c == ')')
+            .find(|c: char| {
+                c.is_whitespace() || c == '"' || c == '\'' || c == '|' || c == ',' || c == ')'
+            })
             .unwrap_or(rest.len());
         let url = rest[..end].trim_end_matches('/');
 

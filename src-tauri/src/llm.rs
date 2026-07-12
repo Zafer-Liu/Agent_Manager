@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use aes_gcm::aead::{Aead, KeyInit, Key};
+use aes_gcm::aead::{Aead, Key, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use sha2::{Digest, Sha256};
 
@@ -80,11 +80,30 @@ pub struct LlmProvider {
 }
 
 // 内置 provider 默认值
-pub fn builtin_defaults() -> HashMap<&'static str, (&'static str, &'static str, &'static str, u32, u32)> {
+pub fn builtin_defaults(
+) -> HashMap<&'static str, (&'static str, &'static str, &'static str, u32, u32)> {
     // id -> (name, base_url, model, context_window, max_output_tokens)
     let mut m = HashMap::new();
-    m.insert("deepseek",  ("DeepSeek",  "https://api.deepseek.com",    "deepseek-chat",  64000,  8192));
-    m.insert("openai",    ("OpenAI",    "https://api.openai.com/v1",    "gpt-4o-mini",   128000, 16384));
+    m.insert(
+        "deepseek",
+        (
+            "DeepSeek",
+            "https://api.deepseek.com",
+            "deepseek-chat",
+            64000,
+            8192,
+        ),
+    );
+    m.insert(
+        "openai",
+        (
+            "OpenAI",
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+            128000,
+            16384,
+        ),
+    );
     m
 }
 
@@ -135,17 +154,20 @@ pub fn list_llm_providers() -> Vec<LlmProvider> {
     // 确保内置 provider 始终存在（api_key 可为空）
     for (id, (name, base_url, model, ctx, max_out)) in &defaults {
         if !providers.iter().any(|p| p.id == *id) {
-            providers.insert(0, LlmProvider {
-                id: id.to_string(),
-                name: name.to_string(),
-                base_url: base_url.to_string(),
-                model: model.to_string(),
-                api_key: String::new(),
-                is_custom: false,
-                enabled: false,
-                context_window: Some(*ctx),
-                max_output_tokens: Some(*max_out),
-            });
+            providers.insert(
+                0,
+                LlmProvider {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    base_url: base_url.to_string(),
+                    model: model.to_string(),
+                    api_key: String::new(),
+                    is_custom: false,
+                    enabled: false,
+                    context_window: Some(*ctx),
+                    max_output_tokens: Some(*max_out),
+                },
+            );
         }
     }
     providers
@@ -200,7 +222,10 @@ pub async fn test_llm_provider(provider: LlmProvider) -> Result<String, String> 
     }
 
     let client = reqwest::Client::new();
-    let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
 
     let body = serde_json::json!({
         "model": provider.model,
@@ -220,7 +245,10 @@ pub async fn test_llm_provider(provider: LlmProvider) -> Result<String, String> 
 
     let status = resp.status();
     if status.is_success() {
-        Ok(format!("✓ Connected — {} ({})", provider.name, provider.model))
+        Ok(format!(
+            "✓ Connected — {} ({})",
+            provider.name, provider.model
+        ))
     } else {
         let text = resp.text().await.unwrap_or_default();
         let msg = serde_json::from_str::<serde_json::Value>(&text)

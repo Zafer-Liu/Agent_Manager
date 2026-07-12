@@ -9,6 +9,15 @@ export interface AgentStep {
   tool_input?: unknown
 }
 
+/** 阶段二：对话流内嵌验收请求（来自 workflow-acceptance-requested 事件） */
+export interface ChatAcceptance {
+  runId: string
+  nodeId: string
+  label: string
+  allowRejectTo: string[]
+  executedNodeIds: string[]
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -17,6 +26,11 @@ export interface ChatMessage {
   isWorkflow?: boolean
   workflowName?: string
   workflowSteps?: WorkflowStepSummary[]
+  // 验收卡片（assistant 消息附带）
+  acceptance?: ChatAcceptance
+  // 验收结果反馈
+  acceptanceResult?: 'approved' | 'rejected'
+  acceptanceRejectTo?: string
 }
 
 export interface WorkflowStepSummary {
@@ -70,6 +84,7 @@ interface McpAgentStore {
   selectedProvider: string
   enabledServers: string[]
   selectedWorkflowId: string   // '' = no workflow (plain chat)
+  pendingAcceptance: ChatAcceptance | null  // 当前待验收请求
 
   setMessages: (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void
   clearMessages: () => void
@@ -77,6 +92,7 @@ interface McpAgentStore {
   setEnabledServers: (updater: string[] | ((prev: string[]) => string[])) => void
   toggleServer: (name: string) => void
   setSelectedWorkflowId: (id: string) => void
+  setPendingAcceptance: (req: ChatAcceptance | null) => void
 }
 
 export const useMcpAgentStore = create<McpAgentStore>((set) => ({
@@ -84,13 +100,14 @@ export const useMcpAgentStore = create<McpAgentStore>((set) => ({
   selectedProvider: loadSelectedProvider(),
   enabledServers: loadEnabledServers(),
   selectedWorkflowId: loadSelectedWorkflow(),
+  pendingAcceptance: null,
 
   setMessages: (updater) =>
     set((s) => ({
       messages: typeof updater === 'function' ? updater(s.messages) : updater,
     })),
 
-  clearMessages: () => set({ messages: [] }),
+  clearMessages: () => set({ messages: [], pendingAcceptance: null }),
 
   setSelectedProvider: (id) => {
     saveSelectedProvider(id)
@@ -117,4 +134,6 @@ export const useMcpAgentStore = create<McpAgentStore>((set) => ({
     saveSelectedWorkflow(id)
     set({ selectedWorkflowId: id })
   },
+
+  setPendingAcceptance: (req) => set({ pendingAcceptance: req }),
 }))

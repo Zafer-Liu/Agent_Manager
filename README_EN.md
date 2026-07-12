@@ -6,7 +6,7 @@
 
 <p align="right"><a href="./README.md">中文</a></p>
 
-![Version](https://img.shields.io/badge/Version-v0.2.3-blue.svg)
+![Version](https://img.shields.io/badge/Version-v0.3.0-blue.svg)
 ![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)
 [![Stars](https://img.shields.io/github/stars/Zafer-Liu/Agent_Manager?style=flat-square)](https://github.com/Zafer-Liu/Agent_Manager/stargazers)
 [![CI](https://img.shields.io/github/actions/workflow/status/Zafer-Liu/Agent_Manager/ci.yml?style=flat-square&label=CI)](https://github.com/Zafer-Liu/Agent_Manager/actions)
@@ -590,6 +590,83 @@ brew install caddy
 After installation, click the refresh button on the Agent Publishing page.
 
 </details>
+
+</details>
+
+---
+
+<details>
+<summary><b>⚙️ Installation and Runtime</b></summary>
+
+<br>
+
+<details>
+<summary><b>Windows shows an "Unknown Publisher" warning during installation.</b></summary>
+
+Click **More info**, then click **Run anyway**. This happens because the installer is not signed with a Microsoft code-signing certificate.
+
+</details>
+
+<details>
+<summary><b>macOS says the app cannot be opened because the developer cannot be verified.</b></summary>
+
+Run the following command in Terminal:
+
+```bash
+xattr -d com.apple.quarantine /Applications/智管-Agent\ Manager.app
+```
+
+Alternatively, right-click the app, choose **Open**, and then click **Open** again.
+
+</details>
+
+<details>
+<summary><b>`npm run dev` reports that the development port is already in use.</b></summary>
+
+This project uses development port **1420** to avoid conflicts with Mindmap and other Vite projects that commonly use 5173. If port 1420 is occupied:
+
+```powershell
+# Find the process occupying the port
+netstat -ano | findstr :1420
+
+# Kill the process. Replace <PID> with the actual PID
+taskkill /PID <PID> /F
+```
+
+</details>
+
+</details>
+
+---
+
+<a id="contributing"></a>
+
+# 🤝 Contributing
+
+PRs and Issues are welcome! Here's how to get involved:
+
+1. **Fork** this repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a **Pull Request**
+
+For bug reports or feature requests, please use [Issues](https://github.com/Zafer-Liu/Agent_Manager/issues). See [Build from Source](#install) for dev environment setup.
+
+---
+
+<a id="license"></a>
+
+# 📄 License
+
+[Apache 2.0](LICENSE)
+
+---
+
+# ⭐ Project Goal
+
+Let Agent Manager handle every Agent, so you can spend your time on what truly matters.
+ls>
 
 </details>
 

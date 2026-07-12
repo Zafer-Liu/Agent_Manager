@@ -118,7 +118,12 @@ fn resolve_for_pty(command: &str, _args: &[String]) -> (String, Vec<String>, Opt
         // auto-type the command. This is the only way to give Node a real TTY:
         // PowerShell must be the interactive host process.
         let has_ps1: bool = std::env::var_os("APPDATA")
-            .map(|d| std::path::Path::new(&d).join("npm").join(format!("{}.ps1", bare)).exists())
+            .map(|d| {
+                std::path::Path::new(&d)
+                    .join("npm")
+                    .join(format!("{}.ps1", bare))
+                    .exists()
+            })
             .unwrap_or(false);
 
         if has_ps1 {
@@ -135,11 +140,11 @@ fn resolve_for_pty(command: &str, _args: &[String]) -> (String, Vec<String>, Opt
         if let Some((node_exe, js_entry)) = crate::commands::resolve_npm_global_to_node(bare) {
             let patch_path = write_tty_patch();
             if let Some(patch) = patch_path {
-                return (node_exe, vec![
-                    "--require".to_string(),
-                    patch,
-                    js_entry,
-                ], None);
+                return (
+                    node_exe,
+                    vec!["--require".to_string(), patch, js_entry],
+                    None,
+                );
             }
             return (node_exe, vec![js_entry], None);
         }
@@ -163,7 +168,6 @@ fn resolve_for_pty(command: &str, _args: &[String]) -> (String, Vec<String>, Opt
     (command.to_string(), vec![], None)
 }
 
-
 #[tauri::command]
 pub fn pty_start(
     id: String,
@@ -185,7 +189,12 @@ pub fn pty_start(
 
     let pty_system = native_pty_system();
     let pair = pty_system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| format!("Failed to open PTY: {e}"))?;
 
     // Resolve the real executable for PTY:
@@ -229,11 +238,14 @@ pub fn pty_start(
         cmd.env_remove("GITHUB_ACTIONS");
     }
 
-    let child = pair.slave
+    let child = pair
+        .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn: {e}"))?;
 
-    let raw_writer = pair.master.take_writer()
+    let raw_writer = pair
+        .master
+        .take_writer()
         .map_err(|e| format!("Failed to take writer: {e}"))?;
     let writer = Arc::new(Mutex::new(raw_writer));
 
@@ -250,7 +262,9 @@ pub fn pty_start(
         });
     }
 
-    let mut reader = pair.master.try_clone_reader()
+    let mut reader = pair
+        .master
+        .try_clone_reader()
         .map_err(|e| format!("Failed to clone reader: {e}"))?;
 
     // Background thread: read PTY output → emit Tauri event.
@@ -278,10 +292,8 @@ pub fn pty_start(
                     if !reader_cancelled.load(Ordering::Acquire) {
                         // Preserve byte boundaries. xterm's streaming UTF-8 decoder
                         // handles multibyte characters split across PTY reads.
-                        let _ = app_clone.emit(
-                            &format!("pty-data-{}", id_clone),
-                            buf[..n].to_vec(),
-                        );
+                        let _ =
+                            app_clone.emit(&format!("pty-data-{}", id_clone), buf[..n].to_vec());
                     }
                 }
             }
@@ -305,7 +317,11 @@ pub fn pty_resolve_debug(command: String) -> String {
 }
 
 #[tauri::command]
-pub fn pty_write(id: String, data: String, store: tauri::State<'_, PtyStore>) -> Result<(), String> {
+pub fn pty_write(
+    id: String,
+    data: String,
+    store: tauri::State<'_, PtyStore>,
+) -> Result<(), String> {
     let sessions = store.sessions.lock().unwrap();
     let session = sessions.get(&id).ok_or("PTY session not found")?;
     let mut w = session.writer.lock().map_err(|e| e.to_string())?;
@@ -313,10 +329,22 @@ pub fn pty_write(id: String, data: String, store: tauri::State<'_, PtyStore>) ->
 }
 
 #[tauri::command]
-pub fn pty_resize(id: String, cols: u16, rows: u16, store: tauri::State<'_, PtyStore>) -> Result<(), String> {
+pub fn pty_resize(
+    id: String,
+    cols: u16,
+    rows: u16,
+    store: tauri::State<'_, PtyStore>,
+) -> Result<(), String> {
     let sessions = store.sessions.lock().unwrap();
     let session = sessions.get(&id).ok_or("PTY session not found")?;
-    session.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+    session
+        .master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| e.to_string())
 }
 

@@ -5,6 +5,55 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
+
+// ── stderr ring buffer ──────────────────────────────────────────────────────
+
+/// 轻量诊断缓存：保留最近 2KB 或 80 行 stderr（取更小者）。
+/// 只在失败时供 FailureTrace.stderr_excerpt 使用，成功路径不落盘。
+const STDERR_MAX_BYTES: usize = 2048;
+const STDERR_MAX_LINES: usize = 80;
+
+pub(crate) struct StderrRing {
+    lines: Vec<String>,
+    total_bytes: usize,
+}
+
+impl StderrRing {
+    fn new() -> Self {
+        StderrRing {
+            lines: Vec::with_capacity(STDERR_MAX_LINES),
+            total_bytes: 0,
+        }
+    }
+
+    fn push_line(&mut self, line: &str) {
+        if line.is_empty() {
+            return;
+        }
+        let line_bytes = line.len() + 1; // +1 for newline
+        self.total_bytes += line_bytes;
+        self.lines.push(line.to_string());
+        // 按 80 行截断
+        if self.lines.len() > STDERR_MAX_LINES {
+            let removed = self.lines.remove(0);
+            self.total_bytes -= removed.len() + 1;
+        }
+        // 按 2KB 截断
+        while self.total_bytes > STDERR_MAX_BYTES && !self.lines.is_empty() {
+            let removed = self.lines.remove(0);
+            self.total_bytes -= removed.len() + 1;
+        }
+    }
+
+    /// 返回截断后的 stderr 摘要（拼接为单个字符串）。
+    fn excerpt(&self) -> Option<String> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        Some(self.lines.join("\n"))
+    }
+}
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -47,6 +96,7 @@ pub struct RunAgentResult {
 pub(crate) struct McpClient {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
+    stderr_ring: Arc<Mutex<StderrRing>>,
     _child: Child,
     req_id: u64,
 }
@@ -75,7 +125,10 @@ fn resolve_mcp_command(command: &str) -> (String, Vec<String>) {
 
     // Explicit .cmd / .bat → route through cmd.exe.
     if lower.ends_with(".cmd") || lower.ends_with(".bat") {
-        return ("cmd.exe".to_string(), vec!["/c".to_string(), command.to_string()]);
+        return (
+            "cmd.exe".to_string(),
+            vec!["/c".to_string(), command.to_string()],
+        );
     }
 
     (command.to_string(), vec![])
@@ -94,21 +147,51 @@ impl McpClient {
             .args(&server.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         for (k, v) in &server.env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to start MCP '{}': {}", server.name, e))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to start MCP '{}': {}", server.name, e))?;
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        let mut client = McpClient { stdin, reader: BufReader::new(stdout), _child: child, req_id: 0 };
+        let stderr = child.stderr.take().unwrap();
+
+        // 启动 stderr 读取线程，写入 ring buffer（不阻塞 stdout JSON-RPC 主循环）
+        let stderr_ring = Arc::new(Mutex::new(StderrRing::new()));
+        let ring_clone = Arc::clone(&stderr_ring);
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        if let Ok(mut ring) = ring_clone.lock() {
+                            ring.push_line(&l);
+                        }
+                    }
+                    Err(_) => break, // stderr 关闭或读取失败，退出线程
+                }
+            }
+        });
+
+        let mut client = McpClient {
+            stdin,
+            reader: BufReader::new(stdout),
+            stderr_ring,
+            _child: child,
+            req_id: 0,
+        };
 
         // Initialize handshake
-        client.call("initialize", json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "agent-manager", "version": "0.1.0" }
-        }))?;
+        client.call(
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "agent-manager", "version": "0.1.0" }
+            }),
+        )?;
         client.notify("notifications/initialized", json!({}))?;
         Ok(client)
     }
@@ -124,7 +207,9 @@ impl McpClient {
         // MCP official SDK uses newline-delimited JSON (NOT Content-Length framing)
         let mut msg = serde_json::to_string(&req).unwrap();
         msg.push('\n');
-        self.stdin.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
+        self.stdin
+            .write_all(msg.as_bytes())
+            .map_err(|e| e.to_string())?;
         self.stdin.flush().map_err(|e| e.to_string())?;
         self.read_response()
     }
@@ -133,7 +218,9 @@ impl McpClient {
         let req = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         let mut msg = serde_json::to_string(&req).unwrap();
         msg.push('\n');
-        self.stdin.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
+        self.stdin
+            .write_all(msg.as_bytes())
+            .map_err(|e| e.to_string())?;
         self.stdin.flush().map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -143,15 +230,29 @@ impl McpClient {
         // Skip notification lines (no "id") and loop until we get a response.
         loop {
             let mut line = String::new();
-            self.reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            self.reader
+                .read_line(&mut line)
+                .map_err(|e| e.to_string())?;
             let line = line.trim();
-            if line.is_empty() { continue; }
-            let resp: Value = serde_json::from_str(line)
-                .map_err(|e| format!("JSON parse error: {} — raw: {}", e, &line[..line.len().min(200)]))?;
+            if line.is_empty() {
+                continue;
+            }
+            let resp: Value = serde_json::from_str(line).map_err(|e| {
+                format!(
+                    "JSON parse error: {} — raw: {}",
+                    e,
+                    &line[..line.len().min(200)]
+                )
+            })?;
             // Skip notifications (no "id") and requests from server
-            if resp.get("id").is_none() { continue; }
+            if resp.get("id").is_none() {
+                continue;
+            }
             if let Some(err) = resp.get("error") {
-                return Err(err["message"].as_str().unwrap_or(&err.to_string()).to_string());
+                return Err(err["message"]
+                    .as_str()
+                    .unwrap_or(&err.to_string())
+                    .to_string());
             }
             return Ok(resp["result"].clone());
         }
@@ -163,11 +264,21 @@ impl McpClient {
     }
 
     pub(crate) fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<Value, String> {
-        let result = self.call("tools/call", json!({
-            "name": name,
-            "arguments": arguments
-        }))?;
+        let result = self.call(
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": arguments
+            }),
+        )?;
         Ok(result)
+    }
+
+    /// 取出 stderr ring buffer 的截断摘要，供 FailureTrace 使用。
+    /// 只在失败路径调用，成功路径不落盘。
+    pub(crate) fn take_stderr_excerpt(&self) -> Option<String> {
+        let ring = self.stderr_ring.lock().ok()?;
+        ring.excerpt()
     }
 }
 
@@ -190,8 +301,7 @@ impl McpSseClient {
         url: &str,
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<Self, String> {
-        let mut builder = HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(30));
+        let mut builder = HttpClient::builder().timeout(std::time::Duration::from_secs(30));
         let mut header_map = reqwest::header::HeaderMap::new();
         for (k, v) in headers {
             if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
@@ -257,8 +367,8 @@ impl McpSseClient {
             return Ok(Value::Null);
         }
 
-        let json: Value = serde_json::from_str(&text)
-            .map_err(|e| format!("Parse SSE response failed: {}", e))?;
+        let json: Value =
+            serde_json::from_str(&text).map_err(|e| format!("Parse SSE response failed: {}", e))?;
 
         if let Some(err) = json.get("error") {
             return Err(format!("RPC error: {}", err));
@@ -318,17 +428,181 @@ impl Drop for McpSseClient {
     }
 }
 
+// ── Streamable HTTP transport (MCP 2025-03) ─────────────────────────────────
+
+/// MCP Streamable HTTP transport：直接 POST JSON-RPC 到单一端点。
+/// 与 SSE 不同，不需要长连接——每次请求独立 POST，响应为 JSON。
+/// 适用于云/远程 Agent 接入（如部署在云端的 MCP Server）。
+pub(crate) struct McpHttpClient {
+    endpoint: String,
+    http: Option<HttpClient>,
+    headers: std::collections::HashMap<String, String>,
+    session_id: Option<String>,
+    request_id: std::cell::Cell<u64>,
+}
+
+impl McpHttpClient {
+    pub(crate) fn new(
+        url: &str,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<Self, String> {
+        let mut builder = HttpClient::builder().timeout(std::time::Duration::from_secs(60));
+        let mut header_map = reqwest::header::HeaderMap::new();
+        for (k, v) in headers {
+            if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
+                if let Ok(val) = reqwest::header::HeaderValue::from_str(v) {
+                    header_map.insert(name, val);
+                }
+            }
+        }
+        if !header_map.is_empty() {
+            builder = builder.default_headers(header_map.clone());
+        }
+        let http = builder
+            .build()
+            .map_err(|e| format!("HTTP client error: {}", e))?;
+
+        let mut hdr = std::collections::HashMap::new();
+        for (k, v) in headers {
+            hdr.insert(k.clone(), v.clone());
+        }
+
+        Ok(Self {
+            endpoint: url.trim_end_matches('/').to_string(),
+            http: Some(http),
+            headers: hdr,
+            session_id: None,
+            request_id: std::cell::Cell::new(1),
+        })
+    }
+
+    fn next_id(&self) -> u64 {
+        let id = self.request_id.get();
+        self.request_id.set(id + 1);
+        id
+    }
+
+    fn send_request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+        });
+        if !params.is_null() {
+            body["params"] = params;
+        }
+
+        let http = self.http.as_ref().ok_or("HTTP client already shut down")?;
+        let mut req = http.post(&self.endpoint).json(&body);
+
+        // 附带自定义 headers
+        for (k, v) in &self.headers {
+            if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
+                if let Ok(val) = reqwest::header::HeaderValue::from_str(v) {
+                    req = req.header(name, val);
+                }
+            }
+        }
+
+        // session 管理（Mcp-Session-Id header）
+        if let Some(ref sid) = self.session_id {
+            req = req.header("Mcp-Session-Id", sid);
+        }
+
+        let resp = req
+            .send()
+            .map_err(|e| format!("HTTP transport request failed: {}", e))?;
+
+        // 捕获 session id
+        if let Some(sid) = resp.headers().get("Mcp-Session-Id") {
+            if let Ok(s) = sid.to_str() {
+                self.session_id = Some(s.to_string());
+            }
+        }
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .map_err(|e| format!("Read response failed: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("HTTP transport returned {}: {}", status, text));
+        }
+
+        // 通知类请求可能返回空 body 或 202
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+
+        let json: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("Parse HTTP transport response failed: {}", e))?;
+
+        if let Some(err) = json.get("error") {
+            return Err(format!("RPC error: {}", err));
+        }
+
+        Ok(json.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    pub(crate) fn initialize(&mut self) -> Result<(), String> {
+        self.send_request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "agent-manager",
+                    "version": "0.2.3"
+                }
+            }),
+        )?;
+        let _ = self.send_request("notifications/initialized", Value::Null);
+        Ok(())
+    }
+
+    pub(crate) fn list_tools(&mut self) -> Result<Vec<Value>, String> {
+        let result = self.send_request("tools/list", json!({}))?;
+        Ok(result
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub(crate) fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<Value, String> {
+        self.send_request(
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": arguments
+            }),
+        )
+    }
+}
+
+impl Drop for McpHttpClient {
+    fn drop(&mut self) {
+        if let Some(http) = self.http.take() {
+            let _ = std::thread::Builder::new()
+                .name("mcp-http-cleanup".to_string())
+                .spawn(move || drop(http));
+        }
+    }
+}
+
 // ── Unified MCP transport ───────────────────────────────────────────────────
 
-/// Unified MCP client that abstracts over stdio and SSE transports.
+/// Unified MCP client that abstracts over stdio, SSE, and Streamable HTTP transports.
 pub(crate) enum McpTransport {
     Stdio(McpClient),
     Sse(McpSseClient),
+    Http(McpHttpClient),
 }
 
 impl McpTransport {
-    /// Create a transport from an [`McpServer`] config, supporting both
-    /// `stdio` (default) and `sse` transports.
+    /// Create a transport from an [`McpServer`] config, supporting
+    /// `stdio` (default), `sse`, and `http` (Streamable HTTP) transports.
     pub(crate) fn from_server_config(server: &McpServer) -> Result<Self, String> {
         match server.transport.as_str() {
             "sse" => {
@@ -338,6 +612,14 @@ impl McpTransport {
                 let mut client = McpSseClient::new(&server.url, &server.headers)?;
                 client.initialize()?;
                 Ok(McpTransport::Sse(client))
+            }
+            "http" => {
+                if server.url.is_empty() {
+                    return Err(format!("HTTP server '{}' missing url", server.name));
+                }
+                let mut client = McpHttpClient::new(&server.url, &server.headers)?;
+                client.initialize()?;
+                Ok(McpTransport::Http(client))
             }
             _ => {
                 let client = McpClient::start(server)?;
@@ -350,6 +632,7 @@ impl McpTransport {
         match self {
             McpTransport::Stdio(c) => c.list_tools(),
             McpTransport::Sse(c) => c.list_tools(),
+            McpTransport::Http(c) => c.list_tools(),
         }
     }
 
@@ -357,6 +640,17 @@ impl McpTransport {
         match self {
             McpTransport::Stdio(c) => c.call_tool(name, arguments),
             McpTransport::Sse(c) => c.call_tool(name, arguments),
+            McpTransport::Http(c) => c.call_tool(name, arguments),
+        }
+    }
+
+    /// 取出 stderr 摘要（仅 Stdio transport 有 stderr，SSE/Http 返回 None）。
+    #[allow(dead_code)]
+    pub(crate) fn take_stderr_excerpt(&self) -> Option<String> {
+        match self {
+            McpTransport::Stdio(c) => c.take_stderr_excerpt(),
+            McpTransport::Sse(_) => None,
+            McpTransport::Http(_) => None,
         }
     }
 }
@@ -369,7 +663,10 @@ pub(crate) async fn chat(
     tools: &[Value],
 ) -> Result<Value, String> {
     let client = reqwest::Client::new();
-    let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
 
     let mut body = json!({
         "model": provider.model,
@@ -411,7 +708,12 @@ pub async fn run_mcp_agent(request: RunAgentRequest) -> RunAgentResult {
     match run_agent_inner(request).await {
         Ok(result) => result,
         Err(e) => RunAgentResult {
-            steps: vec![AgentStep { kind: StepKind::Error, content: e.clone(), tool: None, tool_input: None }],
+            steps: vec![AgentStep {
+                kind: StepKind::Error,
+                content: e.clone(),
+                tool: None,
+                tool_input: None,
+            }],
             final_answer: String::new(),
             success: false,
             error: Some(e),
@@ -470,7 +772,8 @@ async fn run_agent_inner(request: RunAgentRequest) -> Result<RunAgentResult, Str
     let tool_list_desc = if all_tools.is_empty() {
         "No tools available.".to_string()
     } else {
-        all_tools.iter()
+        all_tools
+            .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect::<Vec<_>>()
             .join(", ")
@@ -537,12 +840,18 @@ async fn run_agent_inner(request: RunAgentRequest) -> Result<RunAgentResult, Str
                                 // 完整提取所有 content 项的 text，而非仅取第一个
                                 result["content"]
                                     .as_array()
-                                    .map(|arr| arr.iter()
-                                        .filter_map(|c| c["text"].as_str().map(|s| s.to_string()))
-                                        .collect::<Vec<_>>()
-                                        .join("\n"))
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|c| {
+                                                c["text"].as_str().map(|s| s.to_string())
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    })
                                     .filter(|s| !s.is_empty())
-                                    .unwrap_or_else(|| serde_json::to_string(&result).unwrap_or_default())
+                                    .unwrap_or_else(|| {
+                                        serde_json::to_string(&result).unwrap_or_default()
+                                    })
                             }
                             Err(e) => format!("Tool error: {}", e),
                         }
@@ -609,13 +918,13 @@ async fn run_agent_inner(request: RunAgentRequest) -> Result<RunAgentResult, Str
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
-    pub role: String,   // "user" | "assistant"
+    pub role: String, // "user" | "assistant"
     pub content: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatRequest {
-    pub history: Vec<ChatMessage>,  // full conversation so far
+    pub history: Vec<ChatMessage>, // full conversation so far
     pub provider: LlmProvider,
     pub mcp_servers: Vec<McpServer>,
     pub max_iterations: Option<u32>,
@@ -623,8 +932,8 @@ pub struct ChatRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatTurn {
-    pub steps: Vec<AgentStep>,   // tool calls + results inline
-    pub reply: String,           // final assistant text
+    pub steps: Vec<AgentStep>, // tool calls + results inline
+    pub reply: String,         // final assistant text
     pub success: bool,
     pub error: Option<String>,
 }
@@ -634,7 +943,12 @@ pub async fn chat_with_mcp(request: ChatRequest) -> ChatTurn {
     match chat_turn_inner(request).await {
         Ok(t) => t,
         Err(e) => ChatTurn {
-            steps: vec![AgentStep { kind: StepKind::Error, content: e.clone(), tool: None, tool_input: None }],
+            steps: vec![AgentStep {
+                kind: StepKind::Error,
+                content: e.clone(),
+                tool: None,
+                tool_input: None,
+            }],
             reply: String::new(),
             success: false,
             error: Some(e),
@@ -669,7 +983,8 @@ async fn chat_turn_inner(request: ChatRequest) -> Result<ChatTurn, String> {
     }
 
     // Build messages: system + full history
-    let tool_names: Vec<&str> = all_tools.iter()
+    let tool_names: Vec<&str> = all_tools
+        .iter()
         .filter_map(|t| t["function"]["name"].as_str())
         .collect();
 
@@ -722,12 +1037,18 @@ async fn chat_turn_inner(request: ChatRequest) -> Result<ChatTurn, String> {
                                 // 完整提取所有 content 项的 text，而非仅取第一个
                                 result["content"]
                                     .as_array()
-                                    .map(|arr| arr.iter()
-                                        .filter_map(|c| c["text"].as_str().map(|s| s.to_string()))
-                                        .collect::<Vec<_>>()
-                                        .join("\n"))
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|c| {
+                                                c["text"].as_str().map(|s| s.to_string())
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    })
                                     .filter(|s| !s.is_empty())
-                                    .unwrap_or_else(|| serde_json::to_string(&result).unwrap_or_default())
+                                    .unwrap_or_else(|| {
+                                        serde_json::to_string(&result).unwrap_or_default()
+                                    })
                             }
                             Err(e) => format!("Tool error: {}", e),
                         }
@@ -762,7 +1083,12 @@ async fn chat_turn_inner(request: ChatRequest) -> Result<ChatTurn, String> {
         }
     }
 
-    Ok(ChatTurn { steps, reply, success: true, error: None })
+    Ok(ChatTurn {
+        steps,
+        reply,
+        success: true,
+        error: None,
+    })
 }
 
 // ── Manager Agent chat (with virtual agent-status tool) ──────────────────────
@@ -793,7 +1119,12 @@ pub async fn manager_chat(request: ManagerChatRequest) -> ChatTurn {
     match manager_chat_inner(request).await {
         Ok(t) => t,
         Err(e) => ChatTurn {
-            steps: vec![AgentStep { kind: StepKind::Error, content: e.clone(), tool: None, tool_input: None }],
+            steps: vec![AgentStep {
+                kind: StepKind::Error,
+                content: e.clone(),
+                tool: None,
+                tool_input: None,
+            }],
             reply: String::new(),
             success: false,
             error: Some(e),
@@ -916,12 +1247,22 @@ async fn manager_chat_inner(request: ManagerChatRequest) -> Result<ChatTurn, Str
     ]);
 
     // Build agent snapshot for system prompt
-    let agent_summary: Vec<String> = request.agents.iter().map(|a| {
-        let port_str = a.port.map(|p| format!(", port: {}", p)).unwrap_or_default();
-        let desc_str = if a.description.is_empty() { String::new() } else { format!(", description: {}", a.description) };
-        format!("  - name: \"{}\", id: \"{}\", status: \"{}\"{}{}",
-            a.name, a.id, a.status, port_str, desc_str)
-    }).collect();
+    let agent_summary: Vec<String> = request
+        .agents
+        .iter()
+        .map(|a| {
+            let port_str = a.port.map(|p| format!(", port: {}", p)).unwrap_or_default();
+            let desc_str = if a.description.is_empty() {
+                String::new()
+            } else {
+                format!(", description: {}", a.description)
+            };
+            format!(
+                "  - name: \"{}\", id: \"{}\", status: \"{}\"{}{}",
+                a.name, a.id, a.status, port_str, desc_str
+            )
+        })
+        .collect();
 
     let system = format!(
         "You are the Manager Agent, an intelligent coordinator for a local AI agent management platform.\n\n\
@@ -975,9 +1316,13 @@ async fn manager_chat_inner(request: ManagerChatRequest) -> Result<ChatTurn, Str
                 let tool_result = match fn_name.as_str() {
                     "get_agent_details" => {
                         let filter = agent_name_arg.clone();
-                        let filtered: Vec<&AgentInfo> = request.agents.iter().filter(|a| {
-                            filter.is_empty() || a.name.to_lowercase().contains(&filter)
-                        }).collect();
+                        let filtered: Vec<&AgentInfo> = request
+                            .agents
+                            .iter()
+                            .filter(|a| {
+                                filter.is_empty() || a.name.to_lowercase().contains(&filter)
+                            })
+                            .collect();
                         if filtered.is_empty() {
                             format!("No agents found matching '{}'.", filter)
                         } else {
@@ -1016,55 +1361,68 @@ async fn manager_chat_inner(request: ManagerChatRequest) -> Result<ChatTurn, Str
                             }).collect();
                             sections.join("\n\n")
                         }
-                    },
+                    }
                     "get_agent_status" => {
                         let filter = agent_name_arg.clone();
-                        let filtered: Vec<&AgentInfo> = request.agents.iter().filter(|a| {
-                            filter.is_empty() || a.name.to_lowercase().contains(&filter)
-                        }).collect();
+                        let filtered: Vec<&AgentInfo> = request
+                            .agents
+                            .iter()
+                            .filter(|a| {
+                                filter.is_empty() || a.name.to_lowercase().contains(&filter)
+                            })
+                            .collect();
                         if filtered.is_empty() {
                             "No agents found.".to_string()
                         } else {
-                            let rows: Vec<String> = filtered.iter().map(|a| {
-                                let port_info = match a.port {
-                                    Some(p) => format!("{} ({})", p, if a.port_open { "open" } else { "closed" }),
-                                    None => "none".to_string(),
-                                };
-                                format!("name={}, id={}, status={}, port={}, desc={}",
-                                    a.name, a.id, a.status, port_info, a.description)
-                            }).collect();
+                            let rows: Vec<String> = filtered
+                                .iter()
+                                .map(|a| {
+                                    let port_info = match a.port {
+                                        Some(p) => format!(
+                                            "{} ({})",
+                                            p,
+                                            if a.port_open { "open" } else { "closed" }
+                                        ),
+                                        None => "none".to_string(),
+                                    };
+                                    format!(
+                                        "name={}, id={}, status={}, port={}, desc={}",
+                                        a.name, a.id, a.status, port_info, a.description
+                                    )
+                                })
+                                .collect();
                             format!("Agents:\n{}", rows.join("\n"))
                         }
+                    }
+                    "start_agent" => match matched_agent {
+                        Some(a) => format!("__action__:start_agent:{}:{}", a.id, a.name),
+                        None => format!(
+                            "Agent '{}' not found. Available: {}",
+                            agent_name_arg,
+                            request
+                                .agents
+                                .iter()
+                                .map(|a| a.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
                     },
-                    "start_agent" => {
-                        match matched_agent {
-                            Some(a) => format!("__action__:start_agent:{}:{}", a.id, a.name),
-                            None => format!("Agent '{}' not found. Available: {}", agent_name_arg,
-                                request.agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")),
-                        }
+                    "stop_agent" => match matched_agent {
+                        Some(a) => format!("__action__:stop_agent:{}:{}", a.id, a.name),
+                        None => format!("Agent '{}' not found.", agent_name_arg),
                     },
-                    "stop_agent" => {
-                        match matched_agent {
-                            Some(a) => format!("__action__:stop_agent:{}:{}", a.id, a.name),
-                            None => format!("Agent '{}' not found.", agent_name_arg),
-                        }
+                    "open_agent_ui" => match matched_agent {
+                        Some(a) => format!("__action__:open_ui:{}:{}", a.id, a.name),
+                        None => format!("Agent '{}' not found.", agent_name_arg),
                     },
-                    "open_agent_ui" => {
-                        match matched_agent {
-                            Some(a) => format!("__action__:open_ui:{}:{}", a.id, a.name),
-                            None => format!("Agent '{}' not found.", agent_name_arg),
-                        }
-                    },
-                    "open_agent_terminal" => {
-                        match matched_agent {
-                            Some(a) => format!("__action__:open_terminal:{}:{}", a.id, a.name),
-                            None => format!("Agent '{}' not found.", agent_name_arg),
-                        }
+                    "open_agent_terminal" => match matched_agent {
+                        Some(a) => format!("__action__:open_terminal:{}:{}", a.id, a.name),
+                        None => format!("Agent '{}' not found.", agent_name_arg),
                     },
                     "navigate_to" => {
                         let page = fn_args["page"].as_str().unwrap_or("agents");
                         format!("__action__:navigate::{}", page)
-                    },
+                    }
                     _ => format!("Unknown tool: {}", fn_name),
                 };
 
@@ -1099,5 +1457,56 @@ async fn manager_chat_inner(request: ManagerChatRequest) -> Result<ChatTurn, Str
         }
     }
 
-    Ok(ChatTurn { steps, reply, success: true, error: None })
+    Ok(ChatTurn {
+        steps,
+        reply,
+        success: true,
+        error: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stderr_ring_caps_lines() {
+        let mut ring = StderrRing::new();
+        for i in 0..100 {
+            ring.push_line(&format!("line {}", i));
+        }
+        let excerpt = ring.excerpt().unwrap();
+        let lines: Vec<&str> = excerpt.split('\n').collect();
+        assert_eq!(lines.len(), 80, "should cap at 80 lines");
+        assert_eq!(lines[0], "line 20");
+        assert_eq!(lines[79], "line 99");
+    }
+
+    #[test]
+    fn stderr_ring_caps_bytes() {
+        let mut ring = StderrRing::new();
+        let big_line = "x".repeat(300);
+        for _ in 0..10 {
+            ring.push_line(&big_line);
+        }
+        let excerpt = ring.excerpt().unwrap();
+        let lines: Vec<&str> = excerpt.split('\n').collect();
+        assert!(lines.len() <= 7, "should respect 2KB byte limit");
+    }
+
+    #[test]
+    fn stderr_ring_empty_returns_none() {
+        let ring = StderrRing::new();
+        assert_eq!(ring.excerpt(), None);
+    }
+
+    #[test]
+    fn stderr_ring_skips_empty_lines() {
+        let mut ring = StderrRing::new();
+        ring.push_line("");
+        ring.push_line("real error");
+        ring.push_line("");
+        let excerpt = ring.excerpt().unwrap();
+        assert_eq!(excerpt, "real error");
+    }
 }

@@ -23,7 +23,10 @@ fn base64_decode(input: &str) -> Vec<u8> {
         }
         t
     };
-    let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'\n' && b != b'\r' && b != b' ').collect();
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|&b| b != b'\n' && b != b'\r' && b != b' ')
+        .collect();
     let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
     let mut i = 0;
     while i + 3 < bytes.len() {
@@ -159,7 +162,9 @@ pub fn github_save_token(token: String) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let cfg = GithubConfig { token: token.trim().to_string() };
+    let cfg = GithubConfig {
+        token: token.trim().to_string(),
+    };
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
@@ -178,9 +183,11 @@ pub fn github_token_status() -> (bool, bool) {
         return (true, false);
     }
     // 环境变量
-    let from_env = ["GITHUB_TOKEN", "GH_TOKEN"]
-        .iter()
-        .any(|k| std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false));
+    let from_env = ["GITHUB_TOKEN", "GH_TOKEN"].iter().any(|k| {
+        std::env::var(k)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    });
     (from_env, from_env)
 }
 
@@ -189,8 +196,14 @@ fn build_github_client() -> Result<reqwest::Client, String> {
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
 
     let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
-    headers.insert("X-GitHub-Api-Version", HeaderValue::from_static("2022-11-28"));
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        "X-GitHub-Api-Version",
+        HeaderValue::from_static("2022-11-28"),
+    );
 
     if let Some(token) = github_token() {
         if let Ok(mut val) = HeaderValue::from_str(&format!("Bearer {token}")) {
@@ -261,7 +274,11 @@ async fn github_error_message(resp: reqwest::Response, owner: &str, repo: &str) 
                 format!(
                     "GitHub 拒绝访问（403）。\n可能是代理出口 IP 被限流，或仓库需要授权。\n\
                      GitHub 返回：{}",
-                    if api_msg.is_empty() { "（无）" } else { &api_msg }
+                    if api_msg.is_empty() {
+                        "（无）"
+                    } else {
+                        &api_msg
+                    }
                 )
             }
         }
@@ -272,15 +289,19 @@ async fn github_error_message(resp: reqwest::Response, owner: &str, repo: &str) 
         _ => format!(
             "GitHub API 返回 {}{}。",
             status,
-            if api_msg.is_empty() { String::new() } else { format!("：{api_msg}") }
+            if api_msg.is_empty() {
+                String::new()
+            } else {
+                format!("：{api_msg}")
+            }
         ),
     }
 }
 
 #[tauri::command]
 pub async fn github_fetch_repo_info(url: String) -> Result<GithubRepoInfo, String> {
-    let (owner, repo) = parse_github_url(&url)
-        .ok_or_else(|| format!("无法解析 GitHub URL: {}", url))?;
+    let (owner, repo) =
+        parse_github_url(&url).ok_or_else(|| format!("无法解析 GitHub URL: {}", url))?;
 
     let api_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
 
@@ -303,7 +324,10 @@ pub async fn github_fetch_repo_info(url: String) -> Result<GithubRepoInfo, Strin
     let description = json["description"].as_str().unwrap_or("").to_string();
     let stars = json["stargazers_count"].as_u64().unwrap_or(0) as u32;
     let language = json["language"].as_str().unwrap_or("Unknown").to_string();
-    let default_branch = json["default_branch"].as_str().unwrap_or("main").to_string();
+    let default_branch = json["default_branch"]
+        .as_str()
+        .unwrap_or("main")
+        .to_string();
     let clone_url = json["clone_url"].as_str().unwrap_or("").to_string();
 
     // Fetch README
@@ -351,8 +375,7 @@ pub async fn github_clone_repo(
 ) -> Result<String, String> {
     // Determine destination directory
     let dest = if target_dir.trim().is_empty() {
-        let home = dirs_next::home_dir()
-            .ok_or_else(|| "无法获取用户主目录".to_string())?;
+        let home = dirs_next::home_dir().ok_or_else(|| "无法获取用户主目录".to_string())?;
         home.join("agent-repos").join(&repo_name)
     } else {
         std::path::PathBuf::from(target_dir.trim()).join(&repo_name)
