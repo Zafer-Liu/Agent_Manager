@@ -60,3 +60,6 @@ desktop.ini
 Banner.psd
 DEVELOPMENT.md
 docs/
+.impeccable/live/config.json
+.tmp-mindmemos-upstream/
+PRODUCT.md

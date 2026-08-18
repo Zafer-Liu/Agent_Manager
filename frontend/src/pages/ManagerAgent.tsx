@@ -11,6 +11,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import type { AgentState } from '../types/agent'
+import { stripThinkingBlocks } from '../lib/thinking'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -240,7 +241,7 @@ export function ManagerAgent({
         request: { history, provider: activeProvider, agents: agentInfos, max_iterations: 8 },
       })
 
-      const rawReply = result.reply || (result.error ?? t('manager.noResponse'))
+      const rawReply = stripThinkingBlocks(result.reply || (result.error ?? t('manager.noResponse')))
 
       // Extract actions from tool results (embedded as __action__:type:id:name)
       const toolActions = extractActionsFromSteps(result.steps)
@@ -627,7 +628,7 @@ function AgentPill({ agent }: { agent: AgentState }) {
 // ── MdContent ─────────────────────────────────────────────────────────────────
 
 function MdContent({ content }: { content: string }) {
-  const clean = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+  const clean = stripThinkingBlocks(content)
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}

@@ -143,13 +143,12 @@ use std::sync::OnceLock;
 static HTTP_STORE: OnceLock<Arc<AgentHttpStore>> = OnceLock::new();
 
 /// 当前运行的 HTTP server 句柄（用于 restart 时关闭旧 server）
-static SERVER_HANDLE: OnceLock<Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>> = OnceLock::new();
+static SERVER_HANDLE: OnceLock<Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>> =
+    OnceLock::new();
 
 /// 获取 server handle（restart 用）
 pub fn get_server_handle() -> Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> {
-    Arc::clone(
-        SERVER_HANDLE.get_or_init(|| Arc::new(Mutex::new(None))),
-    )
+    Arc::clone(SERVER_HANDLE.get_or_init(|| Arc::new(Mutex::new(None))))
 }
 
 /// 关闭当前运行的 HTTP server（restart 时调用）
@@ -206,14 +205,22 @@ impl AgentHttpStore {
     }
 
     /// 注册一个工作流等待中的任务（agent_task 节点 dispatch 后调用）
-    pub fn register_pending(&self, task_id: &str, run_id: &str, step_id: &str) -> tokio::sync::oneshot::Receiver<AgentResult> {
+    pub fn register_pending(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        step_id: &str,
+    ) -> tokio::sync::oneshot::Receiver<AgentResult> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut pending = self.pending.lock().unwrap();
-        pending.insert(task_id.to_string(), PendingTask {
-            run_id: run_id.to_string(),
-            step_id: step_id.to_string(),
-            tx,
-        });
+        pending.insert(
+            task_id.to_string(),
+            PendingTask {
+                run_id: run_id.to_string(),
+                step_id: step_id.to_string(),
+                tx,
+            },
+        );
         rx
     }
 
@@ -238,15 +245,29 @@ impl Default for AgentHttpStore {
 // ── HTTP Server（极简手写，不引入框架）──────────────────────────────────────
 
 /// 启动 HTTP server。在 Tauri setup 里 tokio::spawn 调用。
-pub async fn start_agent_http_server(port: u16, auth_token: Option<String>, store: Arc<AgentHttpStore>) {
+pub async fn start_agent_http_server(
+    port: u16,
+    auth_token: Option<String>,
+    store: Arc<AgentHttpStore>,
+) {
     let addr = format!("127.0.0.1:{}", port);
-    eprintln!("[agent-http] listening on http://{} (auth={})", addr, auth_token.is_some());
-
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("[agent-http] failed to bind {}: {}", addr, e);
-            return;
+    // A development restart or a previous app instance can briefly keep the
+    // port occupied.  Hooks must recover once that process exits instead of
+    // silently remaining offline for the lifetime of this desktop instance.
+    let listener = loop {
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                eprintln!(
+                    "[agent-http] listening on http://{} (auth={})",
+                    addr,
+                    auth_token.is_some()
+                );
+                break listener;
+            }
+            Err(error) => {
+                eprintln!("[agent-http] failed to bind {addr}: {error}; retrying in 5 seconds");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
         }
     };
 
@@ -264,16 +285,34 @@ pub async fn start_agent_http_server(port: u16, auth_token: Option<String>, stor
     }
 }
 
-async fn handle_connection(mut stream: tokio::net::TcpStream, store: Arc<AgentHttpStore>, auth_token: Option<String>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+async fn handle_connection(
+    mut stream: tokio::net::TcpStream,
+    store: Arc<AgentHttpStore>,
+    auth_token: Option<String>,
+) {
+    use tokio::io::AsyncWriteExt;
 
-    // 读请求（极简：一次读 8KB，假设请求头+body 不超过这个）
-    let mut buf = vec![0u8; 8192];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) => n,
-        Err(_) => return,
+    // Read the complete HTTP body.  Hook payloads often include tool output and
+    // exceed a single TCP frame; the old 8 KiB one-shot read silently truncated
+    // such events and turned them into ignored JSON.
+    const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+    let raw = match read_http_request(&mut stream, MAX_REQUEST_BYTES).await {
+        Ok(raw) => raw,
+        Err(message) => {
+            let status = if message.contains("too large") {
+                "413 Payload Too Large"
+            } else {
+                "400 Bad Request"
+            };
+            let response = json!({"error": message}).to_string();
+            let http = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response.len(), response
+            );
+            let _ = stream.write_all(http.as_bytes()).await;
+            return;
+        }
     };
-    let raw = String::from_utf8_lossy(&buf[..n]).to_string();
 
     // 解析 HTTP 请求行
     let first_line = raw.lines().next().unwrap_or("");
@@ -329,6 +368,67 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, store: Arc<AgentHt
     let _ = stream.flush().await;
 }
 
+/// Read one HTTP/1.1 request without assuming that headers and body arrive in
+/// one `read`.  The hook endpoint only needs JSON bodies, so a bounded
+/// Content-Length parser is sufficient and keeps this lightweight server safe.
+async fn read_http_request(
+    stream: &mut tokio::net::TcpStream,
+    max_request_bytes: usize,
+) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    let header_end;
+    loop {
+        let count = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        if count == 0 {
+            return Err("connection closed before HTTP headers".into());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.len() > max_request_bytes {
+            return Err("request too large".into());
+        }
+        if let Some(pos) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            header_end = pos + 4;
+            break;
+        }
+    }
+
+    let headers =
+        std::str::from_utf8(&bytes[..header_end]).map_err(|_| "HTTP headers are not UTF-8")?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        })
+        .map(|(_, value)| {
+            value
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "invalid Content-Length".to_string())
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if header_end.saturating_add(content_length) > max_request_bytes {
+        return Err("request too large".into());
+    }
+
+    let required = header_end + content_length;
+    while bytes.len() < required {
+        let count = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        if count == 0 {
+            return Err("connection closed before HTTP body".into());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.len() > max_request_bytes {
+            return Err("request too large".into());
+        }
+    }
+    String::from_utf8(bytes[..required].to_vec()).map_err(|_| "HTTP request is not UTF-8".into())
+}
+
 /// 从原始 HTTP 请求文本中提取指定 header 的值（大小写不敏感）
 fn extract_header(raw: &str, name: &str) -> Option<String> {
     let name_lower = name.to_lowercase();
@@ -362,9 +462,10 @@ async fn route(
     }
 
     match (method, path) {
-        ("GET", "/health") => {
-            ("200 OK", json!({"status": "ok", "service": "agent-manager-http"}).to_string())
-        }
+        ("GET", "/health") => (
+            "200 OK",
+            json!({"status": "ok", "service": "agent-manager-http"}).to_string(),
+        ),
 
         ("GET", "/agent/tasks") => {
             let tasks = store.tasks.lock().unwrap();
@@ -460,6 +561,78 @@ async fn route(
         }
 
         // ── 阶段四：外部 Hook 触发工作流 ──────────────────────────────────────
+        ("POST", p) if p == "/memory/hook" || p.starts_with("/memory/hook") => {
+            // Agent hook 回调：自动沉淀记忆与 skill（异步处理，不阻塞）
+            let source = p
+                .split_once('?')
+                .and_then(|(_, query)| {
+                    query
+                        .split('&')
+                        .find_map(|part| part.strip_prefix("source="))
+                })
+                .filter(|source| matches!(*source, "claude" | "qoder" | "codex" | "workbuddy"))
+                .unwrap_or("unknown");
+            if let Some(ingest) = crate::memory_ingest::ingest_store() {
+                if let Some(backend) = crate::memory_backend::shared_backend() {
+                    return match ingest.handle_hook(backend, body, source) {
+                        Ok(resp) => ("200 OK", resp.to_string()),
+                        Err(error) => ("400 Bad Request", json!({"error": error}).to_string()),
+                    };
+                }
+            }
+            (
+                "200 OK",
+                json!({"status": "ok", "note": "ingest not ready"}).to_string(),
+            )
+        }
+
+        // Normalized telemetry endpoint for adapters that do not implement the
+        // Claude/Qoder Hook payload.  Any supported Agent adapter can submit
+        // a final `session_usage` record here without being coerced into a
+        // conversation-memory event.  Native transcript import remains an
+        // optional enrichment for the four locally integrated Agents.
+        ("POST", p) if p.starts_with("/telemetry/events/") => {
+            let source = p
+                .trim_start_matches("/telemetry/events/")
+                .split('?')
+                .next()
+                .unwrap_or("");
+            if !matches!(
+                source,
+                "codex"
+                    | "workbuddy"
+                    | "claude"
+                    | "qoder"
+                    | "gemini"
+                    | "opencode"
+                    | "openclaw"
+                    | "pi"
+                    | "grokbuild"
+            ) {
+                return (
+                    "400 Bad Request",
+                    json!({"error": "unsupported telemetry source"}).to_string(),
+                );
+            }
+            let payload: Value = match serde_json::from_str(body) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return (
+                        "400 Bad Request",
+                        json!({"error": format!("invalid JSON: {error}")}).to_string(),
+                    )
+                }
+            };
+            match crate::telemetry_store::shared_store() {
+                Some(store) => match store.record_hook(source, &payload).and_then(|_| store.record_final_session_usage(source, &payload)) {
+                    Ok(true) => ("202 Accepted", json!({"status": "confirmed_session_usage", "source": source}).to_string()),
+                    Ok(false) => ("202 Accepted", json!({"status": "recorded_unverified", "source": source, "note": "event retained but not included in token totals; send event=session_usage for a final session total"}).to_string()),
+                    Err(error) => ("500 Internal Server Error", json!({"error": error}).to_string()),
+                },
+                None => ("503 Service Unavailable", json!({"error": "telemetry store not ready"}).to_string()),
+            }
+        }
+
         ("POST", p) if p == "/hook" || p.starts_with("/hook") => {
             let payload: Value = match serde_json::from_str(body) {
                 Ok(v) => v,
@@ -481,9 +654,9 @@ async fn route(
 
             // 按 template_key 查找工作流模板
             let workflows = crate::workflow::read_workflows();
-            let wf = workflows.into_iter().find(|w| {
-                w.template_key.as_deref() == Some(template_key)
-            });
+            let wf = workflows
+                .into_iter()
+                .find(|w| w.template_key.as_deref() == Some(template_key));
 
             let Some(wf) = wf else {
                 return (
@@ -515,14 +688,8 @@ async fn route(
                 rework: None,
                 callback_url,
                 trigger: Some(crate::workflow_store::RunTrigger::Hook {
-                    source: payload["source"]
-                        .as_str()
-                        .unwrap_or("external")
-                        .to_string(),
-                    external_id: payload["external_id"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
+                    source: payload["source"].as_str().unwrap_or("external").to_string(),
+                    external_id: payload["external_id"].as_str().unwrap_or("").to_string(),
                 }),
             };
 
@@ -554,12 +721,18 @@ async fn route(
             let run_store = crate::workflow_store::WorkflowRunStore::new();
             match run_store.get_run(run_id) {
                 Some(run) => ("200 OK", serde_json::to_string(&run).unwrap_or_default()),
-                None => ("404 Not Found", json!({"error": "run not found"}).to_string()),
+                None => (
+                    "404 Not Found",
+                    json!({"error": "run not found"}).to_string(),
+                ),
             }
         }
 
         ("POST", p) if p.contains("/approve") && p.starts_with("/runs/") => {
-            let run_id = p.trim_start_matches("/runs/").trim_end_matches("/approve").to_string();
+            let run_id = p
+                .trim_start_matches("/runs/")
+                .trim_end_matches("/approve")
+                .to_string();
             let run_store = crate::workflow_store::WorkflowRunStore::new();
             match crate::workflow_store::approve_run_inner(&run_store, &run_id) {
                 Ok(run) => ("200 OK", serde_json::to_string(&run).unwrap_or_default()),
@@ -568,21 +741,29 @@ async fn route(
         }
 
         ("POST", p) if p.contains("/reject") && p.starts_with("/runs/") => {
-            let run_id = p.trim_start_matches("/runs/").trim_end_matches("/reject").to_string();
+            let run_id = p
+                .trim_start_matches("/runs/")
+                .trim_end_matches("/reject")
+                .to_string();
             let payload: Value = serde_json::from_str(body).unwrap_or(json!({}));
             let reject_to = payload["reject_to_node"].as_str().unwrap_or("").to_string();
             let reason = payload["reason"].as_str().unwrap_or("").to_string();
 
             let run_store = crate::workflow_store::WorkflowRunStore::new();
-            match crate::workflow_store::reject_run_inner(&run_store, &run_id, &reject_to, &reason) {
-                Ok(new_run_id) => ("200 OK", json!({"status": "rejected", "new_run_id": new_run_id}).to_string()),
+            match crate::workflow_store::reject_run_inner(&run_store, &run_id, &reject_to, &reason)
+            {
+                Ok(new_run_id) => (
+                    "200 OK",
+                    json!({"status": "rejected", "new_run_id": new_run_id}).to_string(),
+                ),
                 Err(e) => ("400 Bad Request", json!({"error": e}).to_string()),
             }
         }
 
-        _ => {
-            ("404 Not Found", json!({"error": "not found", "path": path}).to_string())
-        }
+        _ => (
+            "404 Not Found",
+            json!({"error": "not found", "path": path}).to_string(),
+        ),
     }
 }
 
@@ -693,10 +874,7 @@ pub async fn dispatch_agent_task(
         .await
     {
         Ok(resp) => {
-            eprintln!(
-                "[agent-http] agent accepted task (HTTP {})",
-                resp.status()
-            );
+            eprintln!("[agent-http] agent accepted task (HTTP {})", resp.status());
             Ok(task_id)
         }
         Err(e) => {

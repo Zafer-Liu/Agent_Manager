@@ -404,11 +404,7 @@ impl WorkflowRunStore {
         let mut run = self
             .get_run(run_id)
             .ok_or_else(|| format!("Run not found: {}", run_id))?;
-        if let Some(existing) = run
-            .steps
-            .iter_mut()
-            .find(|s| s.step_id == step.step_id)
-        {
+        if let Some(existing) = run.steps.iter_mut().find(|s| s.step_id == step.step_id) {
             *existing = step.clone();
         } else {
             run.steps.push(step.clone());
@@ -504,12 +500,14 @@ impl Default for WorkflowRunStore {
 // ── Tauri 命令 ───────────────────────────────────────────────────────────────
 
 /// 列出所有 Run 摘要（按 created_at 降序）。
+#[allow(dead_code)] // Run history is no longer exposed through the app command surface.
 #[tauri::command]
 pub fn list_workflow_runs(store: State<'_, WorkflowRunStore>) -> Vec<RunSummary> {
     store.list_runs()
 }
 
 /// 阶段四 P1：列出 Hook 触发的 Run（前端外部触发页用）
+#[allow(dead_code)]
 #[tauri::command]
 pub fn list_hook_triggered_runs(store: State<'_, WorkflowRunStore>) -> Vec<RunSummary> {
     store
@@ -520,6 +518,7 @@ pub fn list_hook_triggered_runs(store: State<'_, WorkflowRunStore>) -> Vec<RunSu
 }
 
 /// 按 run_id 读取完整 Run（含 steps）。
+#[allow(dead_code)]
 #[tauri::command]
 pub fn get_workflow_run(
     store: State<'_, WorkflowRunStore>,
@@ -531,6 +530,7 @@ pub fn get_workflow_run(
 }
 
 /// 阶段二：通过验收。将 WaitingAcceptance 的 Run 置为 Closed。
+#[allow(dead_code)]
 #[tauri::command]
 pub fn approve_run(
     store: State<'_, WorkflowRunStore>,
@@ -563,6 +563,7 @@ pub fn approve_run_inner(store: &WorkflowRunStore, run_id: &str) -> Result<RunRe
 /// 创建一个新的 Run，以 RunTrigger::Rework 启动，从 `reject_to_node` 开始执行。
 /// 原 Run 状态置为 Failed（验收驳回）。新 Run 携带 ReworkContext。
 /// 返回新 Run 的 run_id。
+#[allow(dead_code)]
 #[tauri::command]
 pub fn reject_run(
     store: State<'_, WorkflowRunStore>,
@@ -848,10 +849,8 @@ mod tests {
 
     #[test]
     fn workflow_run_store_add_running_step_and_update() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agent-manager-running-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("agent-manager-running-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
         let store = WorkflowRunStore {
             index: Mutex::new(HashMap::new()),
@@ -895,10 +894,8 @@ mod tests {
 
     #[test]
     fn workflow_run_store_mark_step_failed() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agent-manager-failed-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("agent-manager-failed-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
         let store = WorkflowRunStore {
             index: Mutex::new(HashMap::new()),
@@ -932,7 +929,10 @@ mod tests {
         let got = store.get_run("r-fail").unwrap();
         assert_eq!(got.steps[0].status, crate::workflow::NodeStatus::Failed);
         assert!(got.steps[0].failure_trace.is_some());
-        assert_eq!(got.steps[0].failure_trace.as_ref().unwrap().failure_kind, FailureKind::Timeout);
+        assert_eq!(
+            got.steps[0].failure_trace.as_ref().unwrap().failure_kind,
+            FailureKind::Timeout
+        );
         assert!(got.steps[0].finished_at.is_some());
 
         let _ = std::fs::remove_dir_all(&tmp);

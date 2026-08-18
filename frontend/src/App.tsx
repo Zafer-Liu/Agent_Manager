@@ -13,9 +13,10 @@ import { Dashboard } from './pages/Dashboard'
 import { ManagerAgent, type ManagerSessionState } from './pages/ManagerAgent'
 import { ProxyManager } from './pages/ProxyManager'
 import { Settings } from './pages/Settings'
+import { MemoryCenter } from './pages/MemoryCenter'
+import { SkillLibrary } from './pages/SkillLibrary'
+import { UsageAnalytics } from './pages/UsageAnalytics'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { RunsHistory } from './pages/RunsHistory'
-import { useWorkflowEvents } from './hooks/useWorkflowEvents'
 import { useTheme } from './theme'
 import type { AgentState } from './types/agent'
 import { useResizable } from './hooks/useResizable'
@@ -23,12 +24,11 @@ import { NativeWebviewPanel, type OpenTab } from './components/NativeWebviewPane
 import {
   Plus, RefreshCw, Bot, X, Globe, Network, Cpu,
   Maximize2, Minimize2, TerminalSquare, Sun, Moon,
-  Crown, LayoutDashboard, Shield, Eraser, Settings2,
-  History,
+  Crown, LayoutDashboard, Shield, Eraser, Settings2, Brain, BookOpenText,
 } from 'lucide-react'
 import logoUrl from '/logo.png'
 
-type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy' | 'settings' | 'runs'
+type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy' | 'settings' | 'memory' | 'skills' | 'usage'
 
 export default function App() {
   const {
@@ -39,9 +39,6 @@ export default function App() {
 
   const { theme, toggle: toggleTheme } = useTheme()
   const { t } = useTranslation()
-
-  // 全局工作流事件监听（阶段 1e）：同步 Run 数据到 workflowStore
-  useWorkflowEvents()
 
   const [page, setPage] = useState<NavPage>('agents')
   const [showForm, setShowForm] = useState(false)
@@ -192,7 +189,7 @@ export default function App() {
             <div className="flex flex-col leading-tight">
               <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('app.title')}</span>
               <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-400 dark:text-gray-500">v0.3.0</span>
+                <span className="text-[10px] text-gray-400 dark:text-gray-500">v1.0.0 beta</span>
                 {hasUpdate && (
                   <button
                     onClick={() => setPage('settings')}
@@ -223,8 +220,9 @@ export default function App() {
             { id: 'dashboard', icon: <LayoutDashboard className="h-4 w-4" />, label: t('nav.dashboard') },
             { id: 'manager',   icon: <Crown className="h-4 w-4" />,           label: t('nav.manager') },
             { id: 'agents',    icon: <Bot className="h-4 w-4" />,             label: t('nav.agents') },
+            { id: 'memory',    icon: <Brain className="h-4 w-4" />,           label: t('nav.memory') },
+            { id: 'skills',    icon: <BookOpenText className="h-4 w-4" />,    label: t('nav.skills') },
             { id: 'mcp-agent', icon: <Cpu className="h-4 w-4" />,             label: t('nav.mcpAgent') },
-            { id: 'runs',      icon: <History className="h-4 w-4" />,        label: t('nav.runs') },
             { id: 'ports',     icon: <Network className="h-4 w-4" />,         label: t('nav.ports') },
             { id: 'proxy',     icon: <Shield className="h-4 w-4" />,          label: t('nav.proxy') },
             { id: 'settings',  icon: <Settings2 className="h-4 w-4" />,       label: t('nav.settings') },
@@ -314,7 +312,9 @@ export default function App() {
         </div>
 
         {page === 'mcp-agent' && <McpAgent />}
-        {page === 'runs' && <RunsHistory />}
+        {page === 'memory' && <MemoryCenter onOpenUsage={() => setPage('usage')} />}
+        {page === 'usage' && <UsageAnalytics onBack={() => setPage('memory')} />}
+        {page === 'skills' && <SkillLibrary />}
         {page === 'ports' && <PortManager agents={agents} />}
         {page === 'proxy' && <ProxyManager agents={agents} />}
         {page === 'settings' && (

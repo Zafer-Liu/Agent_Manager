@@ -9,10 +9,10 @@
 //! 停止方式：通过 AtomicBool cancellation token。
 
 use crate::workflow_store::{FailureKind, FailureTrace, WorkflowRunStore};
+use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
-use serde_json::json;
 
 /// 默认巡检间隔
 const SWEEP_INTERVAL_SECS: u64 = 30;

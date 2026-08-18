@@ -24,14 +24,32 @@ fn get_data_dir() -> std::path::PathBuf {
 }
 
 fn load_configs() -> HashMap<String, AgentConfig> {
+    const SETTING_KEY: &str = "agent_configs";
+    if let Some(store) = crate::telemetry_store::shared_store() {
+        if let Some(configs) = store.app_setting_get(SETTING_KEY) {
+            return configs;
+        }
+    }
     let path = get_data_dir().join("agents.json");
-    std::fs::read_to_string(&path)
+    let configs = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // One-time lazy migration: startup remains compatible with existing
+    // installs, while all later reads use the primary SQLite store.
+    if let Some(store) = crate::telemetry_store::shared_store() {
+        let _ = store.app_setting_set(SETTING_KEY, &configs);
+    }
+    configs
 }
 
 fn save_configs(configs: &HashMap<String, AgentConfig>) {
+    const SETTING_KEY: &str = "agent_configs";
+    if let Some(store) = crate::telemetry_store::shared_store() {
+        let _ = store.app_setting_set(SETTING_KEY, configs);
+    }
+    // Keep a compatibility mirror for a downgrade to an older Agent Manager
+    // version.  Current versions read SQLite first.
     let dir = get_data_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("agents.json");

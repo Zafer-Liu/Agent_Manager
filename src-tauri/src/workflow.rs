@@ -1,15 +1,16 @@
 use crate::llm::LlmProvider;
 use crate::mcp::McpServer;
 use crate::mcp_agent::{chat, McpClient, McpTransport};
+use crate::thinking::strip_thinking_blocks;
 use crate::workflow_store::{
     FailureKind, FailureTrace, RunRecord, RunStatus, RunTrigger, StepInstance, WorkflowRunStore,
 };
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
-use futures_util::future::join_all;
 
 // ── Data model ───────────────────────────────────────────────────────────────
 
@@ -539,6 +540,8 @@ impl Workflow {
 
 // ── Config file helpers ──────────────────────────────────────────────────────
 
+const WORKFLOWS_SETTING_KEY: &str = "workflow_definitions";
+
 fn workflows_path() -> std::path::PathBuf {
     dirs_next::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -547,17 +550,28 @@ fn workflows_path() -> std::path::PathBuf {
 }
 
 pub fn read_workflows() -> Vec<Workflow> {
-    let path = workflows_path();
-    eprintln!("[workflow] reading from: {:?}", path);
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
-    eprintln!("[workflow] raw length: {} bytes", raw.len());
-    let mut list: Vec<Workflow> = serde_json::from_str::<Vec<Workflow>>(&raw).unwrap_or_else(|e| {
-        eprintln!("[workflow] parse error: {}", e);
-        vec![]
-    });
-    eprintln!("[workflow] loaded {} workflows", list.len());
+    let primary = crate::telemetry_store::shared_store()
+        .and_then(|store| store.app_setting_get::<Vec<Workflow>>(WORKFLOWS_SETTING_KEY));
+    let mut list: Vec<Workflow> = match primary {
+        Some(list) => list,
+        None => {
+            let path = workflows_path();
+            let raw = std::fs::read_to_string(&path).unwrap_or_default();
+            let legacy: Vec<Workflow> = serde_json::from_str(&raw).unwrap_or_else(|e| {
+                eprintln!("[workflow] legacy config parse error: {}", e);
+                vec![]
+            });
+            if let Some(store) = crate::telemetry_store::shared_store() {
+                let _ = store.app_setting_set(WORKFLOWS_SETTING_KEY, &legacy);
+            }
+            legacy
+        }
+    };
     for wf in &list {
-        eprintln!("[workflow]   id={} name={} template_key={:?}", wf.id, wf.name, wf.template_key);
+        eprintln!(
+            "[workflow]   id={} name={} template_key={:?}",
+            wf.id, wf.name, wf.template_key
+        );
     }
     // 自动迁移旧模板：无 edges 字段时派生线性 Edge 链
     for wf in &mut list {
@@ -567,11 +581,16 @@ pub fn read_workflows() -> Vec<Workflow> {
 }
 
 fn write_workflows(list: &[Workflow]) -> Result<(), String> {
+    if let Some(store) = crate::telemetry_store::shared_store() {
+        store.app_setting_set(WORKFLOWS_SETTING_KEY, &list)?;
+    }
     let path = workflows_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    // Keep legacy JSON as a downgrade-compatible mirror.  The main database
+    // remains the source read by current versions.
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
@@ -805,29 +824,6 @@ fn substitute_input(value: &Value, input: &str) -> Value {
         ),
         other => other.clone(),
     }
-}
-
-/// Remove `<think>...</think>` blocks (including nested content) that
-/// reasoning models like DeepSeek-R1 prepend to their responses.
-/// Also trims leading/trailing whitespace from the result.
-fn strip_thinking(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut rest = s;
-    loop {
-        if let Some(start) = rest.find("<think>") {
-            result.push_str(&rest[..start]);
-            if let Some(end) = rest[start..].find("</think>") {
-                rest = &rest[start + end + "</think>".len()..];
-            } else {
-                // Unclosed tag — drop the rest entirely
-                break;
-            }
-        } else {
-            result.push_str(rest);
-            break;
-        }
-    }
-    result.trim().to_string()
 }
 
 fn tool_result_text(result: &Value) -> String {
@@ -1093,7 +1089,8 @@ pub async fn run_workflow_core(
         crate::workflow_events::emit_step_started(&run_id, &step_id, &node.id, &node.kind);
 
         // ── 执行节点 ──────────────────────────────────────────────────────────
-        let (mut outcome, fan_out_children) = execute_node(&node, &mut current_input, &provider, &mcp_servers, &wf).await;
+        let (mut outcome, fan_out_children) =
+            execute_node(&node, &mut current_input, &provider, &mcp_servers, &wf).await;
 
         let finished_at = chrono::Utc::now().timestamp_millis();
 
@@ -1208,7 +1205,8 @@ pub async fn run_workflow_core(
                 failure_kind: child.error.as_ref().map(|_| FailureKind::Unknown),
                 stderr_excerpt: None,
             };
-            let child_step = build_step_result(&child_node_id, &child_label, &child_kind, &child_outcome);
+            let child_step =
+                build_step_result(&child_node_id, &child_label, &child_kind, &child_outcome);
             let mut child_inst = StepInstance::new(&run_id, &child_node_id).with_kind(&child_kind);
             child_inst.started_at = Some(child.started_at);
             child_inst.finished_at = Some(child.finished_at);
@@ -1382,11 +1380,7 @@ pub async fn run_workflow_core(
                 // 最后一次不再等待
                 if attempt < max_retries - 1 {
                     let backoff = std::time::Duration::from_secs(2u64.pow(attempt + 1));
-                    eprintln!(
-                        "[callback] {} 等待 {}s 后重试",
-                        url,
-                        backoff.as_secs()
-                    );
+                    eprintln!("[callback] {} 等待 {}s 后重试", url, backoff.as_secs());
                     tokio::time::sleep(backoff).await;
                 }
             }
@@ -1432,7 +1426,7 @@ pub async fn run_workflow_core(
                         .as_str()
                         .unwrap_or("")
                         .to_string();
-                    let cleaned = strip_thinking(&raw);
+                    let cleaned = strip_thinking_blocks(&raw);
                     if cleaned.is_empty() {
                         current_input
                     } else {
@@ -1515,9 +1509,18 @@ async fn execute_node(
     wf: &Workflow,
 ) -> (NodeOutcome, Vec<FanOutChildResult>) {
     match node.kind.as_str() {
-        "tool" => (execute_tool_node(node, current_input, mcp_servers).await, vec![]),
-        "llm" => (execute_llm_node(node, current_input, provider).await, vec![]),
-        "mcp_agent" => (execute_mcp_agent_node(node, current_input, provider, mcp_servers).await, vec![]),
+        "tool" => (
+            execute_tool_node(node, current_input, mcp_servers).await,
+            vec![],
+        ),
+        "llm" => (
+            execute_llm_node(node, current_input, provider).await,
+            vec![],
+        ),
+        "mcp_agent" => (
+            execute_mcp_agent_node(node, current_input, provider, mcp_servers).await,
+            vec![],
+        ),
         "acceptance" => (execute_acceptance_node(node).await, vec![]),
         "agent_task" => (execute_agent_task_node(node, current_input).await, vec![]),
         "fan_out" => execute_fan_out_node(node, current_input, wf, provider, mcp_servers).await,
@@ -1610,7 +1613,10 @@ async fn execute_fan_out_node(
                     return (
                         NodeOutcome {
                             output: String::new(),
-                            error: Some(format!("fan_out split ByField: field '{}' not found or not array", field)),
+                            error: Some(format!(
+                                "fan_out split ByField: field '{}' not found or not array",
+                                field
+                            )),
                             hard_fail: true,
                             explicit_verdict: Some(Verdict::Fail {
                                 reason: format!("split field '{}' not array", field),
@@ -1640,7 +1646,10 @@ async fn execute_fan_out_node(
         return (
             NodeOutcome {
                 output: String::new(),
-                error: Some(format!("fan_out child count {} exceeds max 10", child_inputs.len())),
+                error: Some(format!(
+                    "fan_out child count {} exceeds max 10",
+                    child_inputs.len()
+                )),
                 hard_fail: true,
                 explicit_verdict: Some(Verdict::Fail {
                     reason: format!("child count {} > 10", child_inputs.len()),
@@ -1687,7 +1696,8 @@ async fn execute_fan_out_node(
             async move {
                 let started = chrono::Utc::now().timestamp_millis();
                 let mut input = inp;
-                let (outcome, _) = execute_node(&child, &mut input, &prov, &servers, &wf_clone).await;
+                let (outcome, _) =
+                    execute_node(&child, &mut input, &prov, &servers, &wf_clone).await;
                 let finished = chrono::Utc::now().timestamp_millis();
                 (idx, input, outcome, started, finished)
             }
@@ -1699,21 +1709,25 @@ async fn execute_fan_out_node(
     // ── 构建子任务明细（供主循环记录为独立 StepInstance）────────────────────
     let child_results: Vec<FanOutChildResult> = results
         .iter()
-        .map(|(idx, input, outcome, started, finished)| FanOutChildResult {
-            index: *idx,
-            input: input.clone(),
-            output: outcome.output.clone(),
-            error: outcome.error.clone(),
-            started_at: *started,
-            finished_at: *finished,
-        })
+        .map(
+            |(idx, input, outcome, started, finished)| FanOutChildResult {
+                index: *idx,
+                input: input.clone(),
+                output: outcome.output.clone(),
+                error: outcome.error.clone(),
+                started_at: *started,
+                finished_at: *finished,
+            },
+        )
         .collect();
 
     // ── 收敛 ──────────────────────────────────────────────────────────────
     let total = results.len();
     let failures: Vec<_> = results
         .iter()
-        .filter(|(_, _, o, _, _)| o.error.is_some() || o.explicit_verdict.as_ref().map_or(false, |v| v.is_fail()))
+        .filter(|(_, _, o, _, _)| {
+            o.error.is_some() || o.explicit_verdict.as_ref().map_or(false, |v| v.is_fail())
+        })
         .collect();
     let success_count = total - failures.len();
 
@@ -1864,7 +1878,11 @@ async fn execute_agent_task_node(node: &WorkflowNode, current_input: &mut String
 
         match dispatch_result {
             Ok(resp) if resp.status().is_success() => {
-                eprintln!("[agent-task] agent {} accepted (HTTP {})", agent_id, resp.status());
+                eprintln!(
+                    "[agent-task] agent {} accepted (HTTP {})",
+                    agent_id,
+                    resp.status()
+                );
             }
             Ok(resp) => {
                 let status = resp.status();
@@ -1909,8 +1927,7 @@ async fn execute_agent_task_node(node: &WorkflowNode, current_input: &mut String
                     "[agent-task] received result task={} verdict={}",
                     task_id, result.verdict
                 );
-                let output_text =
-                    serde_json::to_string_pretty(&result.result).unwrap_or_default();
+                let output_text = serde_json::to_string_pretty(&result.result).unwrap_or_default();
                 *current_input = output_text.clone();
 
                 let verdict = match result.verdict.as_str() {
@@ -1923,7 +1940,10 @@ async fn execute_agent_task_node(node: &WorkflowNode, current_input: &mut String
                         root_cause: None,
                     },
                     "blocked" => crate::workflow::Verdict::Blocked {
-                        reason: result.note.clone().unwrap_or_else(|| "agent blocked".into()),
+                        reason: result
+                            .note
+                            .clone()
+                            .unwrap_or_else(|| "agent blocked".into()),
                         notify: None,
                     },
                     _ => crate::workflow::Verdict::Pass,
@@ -1979,7 +1999,11 @@ async fn execute_agent_task_node(node: &WorkflowNode, current_input: &mut String
     // 所有候选都失败
     NodeOutcome {
         output: String::new(),
-        error: Some(format!("all {} candidates failed; last: {}", candidates.len(), last_error)),
+        error: Some(format!(
+            "all {} candidates failed; last: {}",
+            candidates.len(),
+            last_error
+        )),
         hard_fail: true,
         explicit_verdict: None,
         failure_kind: Some(FailureKind::Network),
@@ -1996,7 +2020,11 @@ fn resolve_candidates(node: &WorkflowNode) -> (Vec<AgentCandidate>, DispatchStra
     let default_timeout = 10u64;
 
     match &node.dispatch {
-        None | Some(DispatchConfig { strategy: DispatchStrategy::Fixed, .. }) => {
+        None
+        | Some(DispatchConfig {
+            strategy: DispatchStrategy::Fixed,
+            ..
+        }) => {
             // 向后兼容：无 dispatch 配置或 Fixed 策略，用 server 字段
             if node.server.is_empty() {
                 return (vec![], DispatchStrategy::Fixed, default_timeout);
@@ -2076,7 +2104,9 @@ fn simple_shuffle<T>(slice: &mut [T], mut seed: u64) {
     let n = slice.len();
     for i in (1..n).rev() {
         // 线性同余生成器
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let j = (seed >> 33) as usize % (i + 1);
         slice.swap(i, j);
     }
@@ -2136,12 +2166,10 @@ async fn execute_tool_node(
 
     let res = tokio::task::spawn_blocking(move || -> Result<String, (String, Option<String>)> {
         let mut client = McpClient::start(&server).map_err(|e| (e, None))?;
-        let result = client
-            .call_tool(&tool_name, &args)
-            .map_err(|e| {
-                let stderr = client.take_stderr_excerpt();
-                (e, stderr)
-            })?;
+        let result = client.call_tool(&tool_name, &args).map_err(|e| {
+            let stderr = client.take_stderr_excerpt();
+            (e, stderr)
+        })?;
         Ok(tool_result_text(&result))
     })
     .await
@@ -2216,7 +2244,7 @@ async fn execute_llm_node(
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            let out = strip_thinking(&raw);
+            let out = strip_thinking_blocks(&raw);
             *current_input = out.clone();
             NodeOutcome {
                 output: out,
@@ -2280,7 +2308,7 @@ async fn execute_mcp_agent_node(
 
     match run_mcp_agent_node(&server, p, &task, &extra_prompt, 10).await {
         Ok(raw) => {
-            let out = strip_thinking(&raw);
+            let out = strip_thinking_blocks(&raw);
             *current_input = out.clone();
             NodeOutcome {
                 output: out,
@@ -2505,10 +2533,7 @@ async fn run_mcp_agent_node(
             Ok(v) => v,
             Err(e) => {
                 // LLM 错误不是 MCP stderr，但可以从 client_arc 尝试提取
-                let stderr = client_arc
-                    .lock()
-                    .ok()
-                    .and_then(|c| c.take_stderr_excerpt());
+                let stderr = client_arc.lock().ok().and_then(|c| c.take_stderr_excerpt());
                 return Err((e, stderr));
             }
         };
@@ -2520,7 +2545,7 @@ async fn run_mcp_agent_node(
 
         if let Some(tool_calls) = message["tool_calls"].as_array() {
             if tool_calls.is_empty() {
-                final_answer = strip_thinking(message["content"].as_str().unwrap_or(""));
+                final_answer = strip_thinking_blocks(message["content"].as_str().unwrap_or(""));
                 break;
             }
 
@@ -2565,14 +2590,14 @@ async fn run_mcp_agent_node(
             }
         } else {
             // No tool_calls key — plain text answer
-            final_answer = strip_thinking(message["content"].as_str().unwrap_or(""));
+            final_answer = strip_thinking_blocks(message["content"].as_str().unwrap_or(""));
             break;
         }
 
         if finish_reason == "stop" {
             // LLM finished tool calls; ask for a plain-text summary
             if let Ok(resp) = chat(provider, &messages, &[]).await {
-                final_answer = strip_thinking(
+                final_answer = strip_thinking_blocks(
                     resp["choices"][0]["message"]["content"]
                         .as_str()
                         .unwrap_or(""),
@@ -2589,7 +2614,7 @@ async fn run_mcp_agent_node(
             .rev()
             .find_map(|m| {
                 if m["role"] == "assistant" {
-                    let c = strip_thinking(m["content"].as_str().unwrap_or(""));
+                    let c = strip_thinking_blocks(m["content"].as_str().unwrap_or(""));
                     if !c.is_empty() {
                         Some(c)
                     } else {
@@ -2616,7 +2641,7 @@ async fn run_mcp_agent_node(
             "content": "Please provide your final answer as plain text."
         }));
         if let Ok(resp) = chat(provider, &messages, &[]).await {
-            final_answer = strip_thinking(
+            final_answer = strip_thinking_blocks(
                 resp["choices"][0]["message"]["content"]
                     .as_str()
                     .unwrap_or(""),
@@ -3488,7 +3513,11 @@ mod tests {
         }
     }
 
-    fn make_dispatch_node(strategy: DispatchStrategy, candidates: Vec<AgentCandidate>, required: Vec<String>) -> WorkflowNode {
+    fn make_dispatch_node(
+        strategy: DispatchStrategy,
+        candidates: Vec<AgentCandidate>,
+        required: Vec<String>,
+    ) -> WorkflowNode {
         WorkflowNode {
             id: "d1".into(),
             kind: "agent_task".into(),
@@ -3573,9 +3602,7 @@ mod tests {
     fn resolve_candidates_capability_match_no_match_returns_empty() {
         let node = make_dispatch_node(
             DispatchStrategy::CapabilityMatch,
-            vec![
-                make_candidate("a", "http://a", &["python"], 100),
-            ],
+            vec![make_candidate("a", "http://a", &["python"], 100)],
             vec!["rust".into()],
         );
         let (cands, _, _) = resolve_candidates(&node);

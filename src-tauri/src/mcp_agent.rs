@@ -1,5 +1,6 @@
 use crate::llm::LlmProvider;
 use crate::mcp::McpServer;
+use crate::thinking::strip_thinking_blocks;
 use reqwest::blocking::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -797,7 +798,10 @@ async fn run_agent_inner(request: RunAgentRequest) -> Result<RunAgentResult, Str
     for _iter in 0..max_iter {
         let response = chat(&request.provider, &messages, &all_tools).await?;
         let choice = &response["choices"][0];
-        let message = &choice["message"];
+        let mut message = choice["message"].clone();
+        if let Some(content) = message["content"].as_str() {
+            message["content"] = Value::String(strip_thinking_blocks(content));
+        }
         let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
 
         // Add assistant message to history
@@ -1000,7 +1004,12 @@ async fn chat_turn_inner(request: ChatRequest) -> Result<ChatTurn, String> {
 
     let mut messages: Vec<Value> = vec![json!({"role": "system", "content": system})];
     for msg in &request.history {
-        messages.push(json!({"role": msg.role, "content": msg.content}));
+        let content = if msg.role == "assistant" {
+            strip_thinking_blocks(&msg.content)
+        } else {
+            msg.content.clone()
+        };
+        messages.push(json!({"role": msg.role, "content": content}));
     }
 
     let mut reply = String::new();
@@ -1009,7 +1018,10 @@ async fn chat_turn_inner(request: ChatRequest) -> Result<ChatTurn, String> {
     for _ in 0..max_iter {
         let response = chat(&request.provider, &messages, &all_tools).await?;
         let choice = &response["choices"][0];
-        let message = &choice["message"];
+        let mut message = choice["message"].clone();
+        if let Some(content) = message["content"].as_str() {
+            message["content"] = Value::String(strip_thinking_blocks(content));
+        }
         let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
 
         messages.push(message.clone());
@@ -1274,7 +1286,12 @@ async fn manager_chat_inner(request: ManagerChatRequest) -> Result<ChatTurn, Str
 
     let mut messages: Vec<Value> = vec![json!({"role": "system", "content": system})];
     for msg in &request.history {
-        messages.push(json!({"role": msg.role, "content": msg.content}));
+        let content = if msg.role == "assistant" {
+            strip_thinking_blocks(&msg.content)
+        } else {
+            msg.content.clone()
+        };
+        messages.push(json!({"role": msg.role, "content": content}));
     }
 
     let mut reply = String::new();
@@ -1282,7 +1299,10 @@ async fn manager_chat_inner(request: ManagerChatRequest) -> Result<ChatTurn, Str
     for _ in 0..max_iter {
         let response = chat(&request.provider, &messages, tools.as_array().unwrap()).await?;
         let choice = &response["choices"][0];
-        let message = &choice["message"];
+        let mut message = choice["message"].clone();
+        if let Some(content) = message["content"].as_str() {
+            message["content"] = Value::String(strip_thinking_blocks(content));
+        }
         let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
 
         messages.push(message.clone());

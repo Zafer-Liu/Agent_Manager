@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import {
   Send, Loader2, Bot, Wrench, ChevronDown, ChevronRight,
-  AlertCircle, Settings, Plug, MessageSquare, Trash2,
+  AlertCircle, Plug, MessageSquare, Trash2,
   CheckCircle, XCircle, Eye, EyeOff, Plus, Minus, FolderOpen, Sparkles,
 } from 'lucide-react'
 import { WorkflowBuilder } from './WorkflowBuilder'
@@ -13,6 +13,7 @@ import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { useMcpAgentStore, type AgentStep, type ChatMessage, type WorkflowStepSummary, type ChatAcceptance } from '../store/mcpAgentStore'
 import { useWorkflowStore } from '../store/workflowStore'
+import { stripThinkingBlocks } from '../lib/thinking'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ interface Workflow {
   nodes: WorkflowNode[]; created_at: string; updated_at: string
 }
 
-type Tab = 'chat' | 'workflow' | 'mcp' | 'llm'
+type Tab = 'chat' | 'workflow' | 'mcp'
 
 // ── Main component ───────────────────────────────────────────────────────────
 
@@ -78,7 +79,6 @@ export function McpAgent() {
     { id: 'chat' as Tab, label: t('mcpAgent.tabChat'), icon: <MessageSquare className="h-3.5 w-3.5" /> },
     { id: 'workflow' as Tab, label: t('mcpAgent.tabWorkflow'), icon: <Sparkles className="h-3.5 w-3.5" /> },
     { id: 'mcp'  as Tab, label: t('mcpAgent.tabMcpServers'), icon: <Plug className="h-3.5 w-3.5" /> },
-    { id: 'llm'  as Tab, label: t('mcpAgent.tabLlmSettings'), icon: <Settings className="h-3.5 w-3.5" /> },
   ]
 
   return (
@@ -138,7 +138,6 @@ export function McpAgent() {
           />
         )}
         {tab === 'mcp' && <McpTab servers={mcpServers} onReload={reload} activeProvider={activeProvider} />}
-        {tab === 'llm' && <LlmTab providers={providers} onReload={reload} />}
       </div>
     </div>
   )
@@ -273,7 +272,7 @@ function ChatPanel({ provider, mcpServers, allProviders, selectedProvider, onSel
               ...msg,
               content: isAcceptanceWaiting
                 ? t('mcpAgent.acceptanceWaiting', { label: acceptanceReq!.label })
-                : (res.final_output || (res.error ?? t('mcpAgent.workflowFailed'))),
+                : stripThinkingBlocks(res.final_output || (res.error ?? t('mcpAgent.workflowFailed'))),
               workflowSteps: res.steps.map(s => ({
                 label: s.label,
                 kind: s.kind,
@@ -295,7 +294,7 @@ function ChatPanel({ provider, mcpServers, allProviders, selectedProvider, onSel
         })
         setMessages(m => [...m, {
           role: 'assistant',
-          content: result.reply || (result.error ?? ''),
+          content: stripThinkingBlocks(result.reply || (result.error ?? '')),
           steps: result.steps.length ? result.steps : undefined,
         }])
       }
@@ -1105,7 +1104,7 @@ function EnvEditor({ env, onChange, keyPlaceholder = 'KEY', valPlaceholder = 'va
 
 // ── LLM Settings tab ─────────────────────────────────────────────────────────
 
-function LlmTab({ providers, onReload }: { providers: LlmProvider[]; onReload: () => void }) {
+export function LlmTab({ providers, onReload }: { providers: LlmProvider[]; onReload: () => void }) {
   const { t } = useTranslation()
   const [showCustom, setShowCustom] = useState(false)
   const [customForm, setCustomForm] = useState<LlmProvider>({ id: '', name: '', base_url: '', model: '', api_key: '', is_custom: true, enabled: true })
@@ -1288,8 +1287,7 @@ function Toggle({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean
 // ── Markdown renderer ────────────────────────────────────────────────────────
 
 function MdContent({ content }: { content: string }) {
-  // Strip <think>...</think> blocks (chain-of-thought from some models)
-  const clean = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+  const clean = stripThinkingBlocks(content)
 
   return (
     <ReactMarkdown

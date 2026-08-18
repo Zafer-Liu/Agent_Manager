@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
-import { Plus, Trash2, CheckCircle, XCircle, Loader2, Eye, EyeOff, AlertCircle } from 'lucide-react'
+import { Plus, Trash2, CheckCircle, XCircle, Loader2, Eye, EyeOff, AlertCircle, Brain } from 'lucide-react'
 
 interface LlmProvider {
   id: string
@@ -15,12 +15,17 @@ interface LlmProvider {
   max_output_tokens?: number
 }
 
+interface MemoryExtractionConfig {
+  provider_id: string | null
+}
+
 const EMPTY_CUSTOM: LlmProvider = {
   id: '', name: '', base_url: '', model: '',
   api_key: '', is_custom: true, enabled: true,
+  context_window: 128000, max_output_tokens: 16384,
 }
 
-export function LlmSettings() {
+export function LlmSettings({ embedded = false }: { embedded?: boolean }) {
   const { t } = useTranslation()
   const [providers, setProviders] = useState<LlmProvider[]>([])
   const [showCustomForm, setShowCustomForm] = useState(false)
@@ -31,10 +36,16 @@ export function LlmSettings() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({})
+  const [memoryConfig, setMemoryConfig] = useState<MemoryExtractionConfig>({ provider_id: null })
+  const [savingMemoryConfig, setSavingMemoryConfig] = useState(false)
 
   async function load() {
-    const list = await invoke<LlmProvider[]>('list_llm_providers')
+    const [list, config] = await Promise.all([
+      invoke<LlmProvider[]>('list_llm_providers'),
+      invoke<MemoryExtractionConfig>('memory_extraction_config_get'),
+    ])
     setProviders(list)
+    setMemoryConfig(config)
   }
 
   useEffect(() => { load() }, [])
@@ -83,15 +94,48 @@ export function LlmSettings() {
     await load()
   }
 
+  async function saveMemoryConfig(providerId: string) {
+    setSavingMemoryConfig(true)
+    setError('')
+    try {
+      const config = { provider_id: providerId || null }
+      await invoke('memory_extraction_config_set', { config })
+      setMemoryConfig(config)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSavingMemoryConfig(false)
+    }
+  }
+
   const builtins = providers.filter(p => !p.is_custom)
   const customs = providers.filter(p => p.is_custom)
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto bg-gray-50 dark:bg-gray-950 p-6 space-y-6">
-      <div>
+    <div className={embedded ? 'space-y-5' : 'flex h-full flex-col overflow-y-auto bg-gray-50 p-6 space-y-6 dark:bg-gray-950'}>
+      {!embedded && <div>
         <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">{t('llm.title')}</h2>
         <p className="text-xs text-gray-500 mt-0.5">{t('llm.subtitle')}</p>
-      </div>
+      </div>}
+
+      <section className="space-y-2">
+        <div className="flex items-center gap-2"><Brain size={15} className="text-violet-600 dark:text-violet-400" /><h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{t('llm.memoryModelTitle')}</h3></div>
+        <p className="text-xs leading-5 text-gray-600 dark:text-gray-300">{t('llm.memoryModelHint')}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <select value={memoryConfig.provider_id ?? ''} onChange={(event) => { void saveMemoryConfig(event.target.value) }} disabled={savingMemoryConfig} className="min-w-60 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm text-gray-800 outline-none focus:border-violet-500 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100">
+            <option value="">{t('llm.memoryModelNone')}</option>
+            {providers.filter((provider) => provider.enabled && provider.api_key.trim()).map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>)}
+          </select>
+          {savingMemoryConfig && <Loader2 size={14} className="animate-spin text-violet-600" />}
+          {memoryConfig.provider_id && <span className="text-xs text-green-700 dark:text-green-400">{t('llm.memoryModelReady')}</span>}
+        </div>
+      </section>
+
+      {error && (
+        <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-900/20 dark:text-red-400">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />{error}
+        </div>
+      )}
 
       {/* Built-in providers */}
       <div className="space-y-3">
@@ -183,11 +227,19 @@ export function LlmSettings() {
             <input type="password" value={form.api_key} onChange={e => setForm(f => ({ ...f, api_key: e.target.value }))}
               placeholder="sk-..." className="field-input font-mono" />
           </Field>
-          {error && (
-            <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-900/20 dark:text-red-400">
-              <AlertCircle className="h-3.5 w-3.5 shrink-0" />{error}
-            </div>
-          )}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={t('llm.contextWindow')}>
+              <input type="number" min={1024} step={1024} value={form.context_window ?? ''}
+                onChange={e => setForm(f => ({ ...f, context_window: e.target.value ? Number(e.target.value) : undefined }))}
+                placeholder="128000" className="field-input font-mono" />
+            </Field>
+            <Field label={t('llm.maxOutputTokens')}>
+              <input type="number" min={256} step={256} value={form.max_output_tokens ?? ''}
+                onChange={e => setForm(f => ({ ...f, max_output_tokens: e.target.value ? Number(e.target.value) : undefined }))}
+                placeholder="8192" className="field-input font-mono" />
+              <p className="mt-1 text-[11px] leading-4 text-gray-500 dark:text-gray-400">{t('llm.maxOutputTokensHint')}</p>
+            </Field>
+          </div>
           <div className="flex gap-2">
             <button onClick={saveCustom} disabled={saving}
               className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-60">

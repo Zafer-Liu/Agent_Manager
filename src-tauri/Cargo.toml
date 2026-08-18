@@ -1,6 +1,6 @@
 [package]
 name = "agent-manager"
-version = "0.3.0"
+version = "1.0.0-beta"
 description = "A local agent management tool"
 authors = ["you"]
 edition = "2021"
@@ -32,6 +32,8 @@ futures-util = "0.3"
 portable-pty = "0.9"
 aes-gcm = "0.10"
 sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tiktoken-rs = "0.12"
 
 [profile.release]
 panic = "abort"

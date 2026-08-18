@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import { UpdateChecker } from '../components/UpdateChecker'
 import { ExternalTriggers } from './ExternalTriggers'
+import { LlmSettings } from './LlmSettings'
 
 export function Settings() {
   const { t } = useTranslation()
@@ -14,6 +15,14 @@ export function Settings() {
         </h2>
         <p className="text-xs text-gray-500 mt-0.5">{t('settings.subtitle')}</p>
       </div>
+
+      <section className="space-y-3">
+        <div>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{t('settings.sectionLlm')}</h3>
+          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{t('settings.sectionLlmHint')}</p>
+        </div>
+        <LlmSettings embedded />
+      </section>
 
       {/* External triggers section */}
       <ExternalTriggers />

@@ -17,6 +17,10 @@ type CheckState = 'idle' | 'checking' | 'done' | 'error'
 const LAST_CHECK_KEY = 'updater_last_check'
 const CHECK_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 
+function formatVersionForDisplay(version: string) {
+  return version.replace(/-beta(?:\.\d+)?$/i, ' beta')
+}
+
 interface UpdateCheckerProps {
   /** When true, runs a silent background check on mount (skipped if checked within 7 days). */
   autoCheck?: boolean
@@ -97,7 +101,7 @@ export function UpdateChecker({ autoCheck = false, compact = false }: UpdateChec
           </p>
           {currentVersion && (
             <p className="text-xs text-gray-400 dark:text-gray-500 font-mono">
-              {t('updater.currentVersion', { version: currentVersion })}
+              {t('updater.currentVersion', { version: formatVersionForDisplay(currentVersion) })}
             </p>
           )}
         </div>

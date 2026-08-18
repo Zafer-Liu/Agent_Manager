@@ -16,6 +16,8 @@
 //! 文件位置：`<data_dir>/agent-manager/workflow_events.jsonl`
 //! 格式：每行一个 JSON 对象，含 `ts`（Unix ms）、`type`、`run_id`、及事件特有字段。
 
+#![allow(dead_code)] // Legacy compatibility helpers; UI/API history access is disabled in lib.rs.
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -27,10 +29,12 @@ use std::sync::Mutex;
 static EVENT_WRITER: Mutex<Option<EventWriter>> = Mutex::new(None);
 
 /// 事件写入器：持有文件路径，append-only 写入。
+#[allow(dead_code)]
 struct EventWriter {
     path: std::path::PathBuf,
 }
 
+#[allow(dead_code)]
 impl EventWriter {
     fn new() -> Self {
         let dir = dirs_next::data_dir()
@@ -55,6 +59,7 @@ impl EventWriter {
 }
 
 /// 初始化事件写入器（在 lib.rs setup 中调用）。
+#[allow(dead_code)]
 pub fn init_event_writer() {
     let mut guard = EVENT_WRITER.lock().unwrap();
     if guard.is_none() {
@@ -249,16 +254,29 @@ pub fn get_workflow_metrics() -> WorkflowMetrics {
             "step_finished" => {
                 let status = event["payload"]["status"].as_str().unwrap_or("");
                 if status == "failed" {
-                    let node_id = event["payload"]["node_id"].as_str().unwrap_or("").to_string();
-                    let entry = fail_counts.entry(node_id.clone()).or_insert((0, "unknown".to_string()));
+                    let node_id = event["payload"]["node_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    let entry = fail_counts
+                        .entry(node_id.clone())
+                        .or_insert((0, "unknown".to_string()));
                     entry.0 += 1;
                 }
             }
             "sweeper_recovered" => {
                 // sweeper_recovered 也计入失败节点
-                let step_id = event["payload"]["step_id"].as_str().unwrap_or("").to_string();
-                let failure_kind = event["payload"]["failure_kind"].as_str().unwrap_or("unknown").to_string();
-                let entry = fail_counts.entry(step_id).or_insert((0, failure_kind.clone()));
+                let step_id = event["payload"]["step_id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let failure_kind = event["payload"]["failure_kind"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
+                let entry = fail_counts
+                    .entry(step_id)
+                    .or_insert((0, failure_kind.clone()));
                 entry.0 += 1;
                 entry.1 = failure_kind;
             }
@@ -320,10 +338,8 @@ mod tests {
     #[test]
     fn emit_and_read_events() {
         // 初始化到临时目录
-        let tmp = std::env::temp_dir().join(format!(
-            "agent-manager-events-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("agent-manager-events-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         // 手动覆盖 EVENT_WRITER 的路径

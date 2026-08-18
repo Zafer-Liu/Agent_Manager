@@ -280,6 +280,29 @@ brew install cloudflared
 
 <a id="install"></a>
 
+# 🧠 跨 Agent 记忆、用量与 Skill（实验性）
+
+Memory Center 以本地 SQLite 作为事件账本：Hook 事件会先落盘，再异步抽取为记忆，因此记忆服务离线不会丢失采集记录。
+
+- **Codex、Claude Code、Qoder**：可在 Memory Center 分别安装/卸载本机 Hook；端口和鉴权跟随「外部触发」配置。
+- **WorkBuddy**：不写入其 Claude Code 配置，避免重复采集；可通过标准遥测端点提交已聚合的会话/用量数据。
+- **Token**：Codex、Claude、WorkBuddy 从本机转录读取真实用量；Qoder 当前转录未提供供应商 usage，因此显示明确标记的本地估算。所有 Agent 的零散 Hook 事件只保留审计记录，不会重复累计；适配器可用 `session_usage` 以真实最终值覆盖估算。
+- **Skill**：扫描各 Agent 的 `SKILL.md`，复制到共享库后按内容哈希预览新增/更新/冲突，再由用户确认同步。
+
+标准遥测端点：`POST http://127.0.0.1:<hook-port>/telemetry/events/{codex|workbuddy|claude|qoder}`。
+
+```json
+{
+  "session_id": "stable-session-id",
+  "event": "session_usage",
+  "cwd": "D:/Github-repo/example",
+  "usage": { "input_tokens": 120, "output_tokens": 48, "cached_tokens": 60 },
+  "usage_scope": "session"
+}
+```
+
+`input_tokens` 必须是该会话完整输入总量，`cached_tokens` 仅作缓存命中明细展示（不要再加到 `input_tokens` 或 Token 总量）。同一 `source + session_id` 后续重报会覆盖先前值，而非叠加。
+
 # ⚙️ 安装方式
 
 ### 下载预构建安装包（推荐）
