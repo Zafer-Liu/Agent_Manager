@@ -1,6 +1,5 @@
 import { useTranslation } from 'react-i18next'
 import { UpdateChecker } from '../components/UpdateChecker'
-import { ExternalTriggers } from './ExternalTriggers'
 import { LlmSettings } from './LlmSettings'
 
 export function Settings() {
@@ -23,9 +22,6 @@ export function Settings() {
         </div>
         <LlmSettings embedded />
       </section>
-
-      {/* External triggers section */}
-      <ExternalTriggers />
 
       {/* Updates section */}
       <section className="space-y-3">

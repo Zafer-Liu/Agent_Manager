@@ -25,7 +25,7 @@ function compactAmount(value: number) {
 }
 
 function sourceLabel(source: string) {
-  return ({ codex: 'Codex', claude: 'Claude Code', qoder: 'Qoder', workbuddy: 'WorkBuddy', gemini: 'Gemini CLI', opencode: 'OpenCode', openclaw: 'OpenClaw', pi: 'Pi', grokbuild: 'Grok Build' } as Record<string, string>)[source] ?? source
+  return ({ codex: 'Codex', claude: 'Claude Code', qoder: 'Qoder', workbuddy: 'WorkBuddy', minimax: 'MiniMax Code', kimi: 'Kimi', gemini: 'Gemini CLI', opencode: 'OpenCode', openclaw: 'OpenClaw', pi: 'Pi', grokbuild: 'Grok Build' } as Record<string, string>)[source] ?? source
 }
 
 function parseTime(value: string) {

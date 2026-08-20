@@ -46,6 +46,7 @@
   - [MCP Agent 工具对话](#mcp)
   - [代理发布与临时分享](#share)
   - [Port Manager 端口管理](#ports)
+  - [记忆中心 跨 Agent 分层记忆](#memory)
 - [安装方式](#install)
 - [快速上手](#quickstart)
 - [LLM 配置说明](#llm-config)
@@ -278,6 +279,52 @@ brew install cloudflared
 
 ---
 
+<a id="memory"></a>
+
+## 7️⃣ 记忆中心 — 跨 Agent 分层记忆
+
+让所有 Agent 记住你的偏好、决策与当前进展。记忆中心从本机编码 Agent 的对话中自动提取记忆，分层管理、按需注入——**所有 Agent 共享同一个大脑**。
+
+### 🧬 三层记忆模型（L1–L3）
+
+| 层级 | 名称 | 来源 | 作用 |
+|------|------|------|------|
+| L1 | 可检索记忆 | 会话完成后模型自动提取事实 / 决策 / 约束 / 偏好 | 语义检索，按需召回 |
+| L2 | 近 30 天工作记忆 | 一键压缩近 30 天 L1 证据 | 注入当前工作上下文 |
+| L3 | 长期 Profile | 基于已发布 L2 起草，人工确认后才注入 | 稳定的长期偏好与约束 |
+
+### 📥 自动沉淀（Agent → 记忆）
+
+- 支持 Codex、Claude Code、Qoder、WorkBuddy、MiniMax Code、Kimi，Hook 采集或本地转录扫描两种方式
+- 会话先落盘本地 SQLite 账本再异步提取——离线、模型未配置都不丢采集记录，可稍后手动重跑
+- 「待提取 / 已整理对话」面板可随时回看完整对话、查看提取进度与失败原因
+
+### ✍️ 自定义记忆
+
+- 在「近 30 天工作记忆」或「长期 Profile」卡片下手写补充记忆，**两层相互独立**，各自展示、编辑、删除
+- 随整理与注入自动下发给 Agent；只有用户能删改，自动清洗不会碰它们
+
+### 🧹 记忆清洗与去重
+
+- 本地语义候选分块生成并实时显示进度，后台裁决预算自适应，大量记忆也能完整跑完
+- 清洗前保留回滚检查点，重复条目删除安全可控
+
+### 💉 记忆注入（记忆 → Agent，双通道）
+
+| 通道 | 机制 | 适用场景 |
+|------|------|----------|
+| 会话启动注入 | SessionStart 自动拉取 L3 + L2 记忆，无需工具调用 | 支持 Hook 的 Agent 开局即带上下文 |
+| 共享记忆 MCP | Agent 按需调用 `recall_memory` 语义检索 | 只取任务相关记忆，控制上下文体积 |
+
+### 📊 Token 用量与 Skill 共享
+
+- 聚合各 Agent 本机转录的真实输入 / 输出 / 缓存用量，口径与供应商计费对齐
+- 扫描各 Agent 的 `SKILL.md` 汇入共享 Skill 库，按内容哈希预览新增 / 更新 / 冲突后确认同步
+
+> 各 Agent 接入方式与遥测端点格式见下文「跨 Agent 记忆、用量与 Skill（实验性）」一节。
+
+---
+
 <a id="install"></a>
 
 # 🧠 跨 Agent 记忆、用量与 Skill（实验性）
@@ -287,6 +334,8 @@ Memory Center 以本地 SQLite 作为事件账本：Hook 事件会先落盘，�
 - **Codex、Claude Code、Qoder**：可在 Memory Center 分别安装/卸载本机 Hook；端口和鉴权跟随「外部触发」配置。
 - **WorkBuddy**：不写入其 Claude Code 配置，避免重复采集；可通过标准遥测端点提交已聚合的会话/用量数据。
 - **Token**：Codex、Claude、WorkBuddy 从本机转录读取真实用量；Qoder 当前转录未提供供应商 usage，因此显示明确标记的本地估算。所有 Agent 的零散 Hook 事件只保留审计记录，不会重复累计；适配器可用 `session_usage` 以真实最终值覆盖估算。
+- **自定义记忆**：在「近 30 天工作记忆」或「长期 Profile」卡片下手写补充记忆（两层相互独立），随整理与注入自动下发给 Agent；只有用户能编辑或删除，自动清洗不会碰它们。
+- **记忆清洗与去重**：本地语义候选分块生成并实时显示进度，后台裁决预算自适应，大量记忆也能完整跑完。
 - **Skill**：扫描各 Agent 的 `SKILL.md`，复制到共享库后按内容哈希预览新增/更新/冲突，再由用户确认同步。
 
 标准遥测端点：`POST http://127.0.0.1:<hook-port>/telemetry/events/{codex|workbuddy|claude|qoder}`。
@@ -393,6 +442,14 @@ Manager Agent 和 MCP Agent 都需要 LLM 驱动。在 **MCP Agent → LLM 设�
 | DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
 | 任意兼容 API | 自定义 | 自定义 |
+
+**本地模型（Ollama）：**
+
+LLM 设置页内置 **Ollama 本地模型** 模块：
+
+1. 确认本机 Ollama 已启动（默认 `http://localhost:11434`，可修改）
+2. 点击 **测试连接**，自动列出已拉取的本地模型（参数规模 / 量化 / 体积）
+3. 对目标模型点 **接入**，自动添加到自定义提供商列表，可直接测试或设为记忆提取模型
 
 ---
 

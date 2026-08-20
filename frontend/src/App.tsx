@@ -16,6 +16,9 @@ import { Settings } from './pages/Settings'
 import { MemoryCenter } from './pages/MemoryCenter'
 import { SkillLibrary } from './pages/SkillLibrary'
 import { UsageAnalytics } from './pages/UsageAnalytics'
+import { PendingMemories } from './pages/PendingMemories'
+import { OrganizedConversations } from './pages/OrganizedConversations'
+import { MemoryInjection } from './pages/MemoryInjection'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { useTheme } from './theme'
 import type { AgentState } from './types/agent'
@@ -28,7 +31,7 @@ import {
 } from 'lucide-react'
 import logoUrl from '/logo.png'
 
-type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy' | 'settings' | 'memory' | 'skills' | 'usage'
+type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy' | 'settings' | 'memory' | 'skills' | 'usage' | 'pending-memories' | 'organized-conversations' | 'memory-injection'
 
 export default function App() {
   const {
@@ -312,8 +315,11 @@ export default function App() {
         </div>
 
         {page === 'mcp-agent' && <McpAgent />}
-        {page === 'memory' && <MemoryCenter onOpenUsage={() => setPage('usage')} />}
+        {page === 'memory' && <MemoryCenter onOpenUsage={() => setPage('usage')} onOpenPending={() => setPage('pending-memories')} onOpenOrganized={() => setPage('organized-conversations')} onOpenInjection={() => setPage('memory-injection')} />}
         {page === 'usage' && <UsageAnalytics onBack={() => setPage('memory')} />}
+        {page === 'pending-memories' && <PendingMemories onBack={() => setPage('memory')} />}
+        {page === 'organized-conversations' && <OrganizedConversations onBack={() => setPage('memory')} />}
+        {page === 'memory-injection' && <MemoryInjection onBack={() => setPage('memory')} />}
         {page === 'skills' && <SkillLibrary />}
         {page === 'ports' && <PortManager agents={agents} />}
         {page === 'proxy' && <ProxyManager agents={agents} />}

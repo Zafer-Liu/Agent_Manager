@@ -170,7 +170,7 @@ export function RunsHistory() {
                     {r.runId.slice(0, 8)}
                   </td>
                   <td className="px-4 py-2 text-gray-700 dark:text-gray-300 truncate max-w-[200px]">
-                    {r.templateKey ?? r.templateId}
+                    {r.templateId}
                   </td>
                   <td className="px-4 py-2">
                     <span className={`text-xs px-2 py-0.5 rounded ${runStatusColor(r.status)}`}>

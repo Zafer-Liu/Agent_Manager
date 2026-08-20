@@ -434,7 +434,7 @@ export function WorkflowRunView({ runId, onClose }: { runId: string; onClose?: (
             {t(`workflow.run.status.${run.status}`, run.status)}
           </span>
           <span className="text-sm text-gray-500 dark:text-gray-400 truncate">
-            {run.templateKey ?? run.templateId}
+            {run.templateId}
           </span>
           {triggerBadge(run.trigger, t)}
           <span className="text-xs text-gray-400 font-mono">{run.runId.slice(0, 8)}</span>

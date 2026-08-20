@@ -49,7 +49,7 @@ pub struct MemoryMcpStatus {
 fn supported_agent(agent_type: &str) -> bool {
     matches!(
         agent_type,
-        "codex_cli" | "claude_cli" | "codex_desktop" | "claude_desktop" | "qoder" | "workbuddy"
+        "codex_cli" | "claude_cli" | "codex_desktop" | "claude_desktop" | "qoder" | "workbuddy" | "minimax" | "kimi"
     )
 }
 
@@ -59,9 +59,9 @@ fn agent_label(agent_type: &str) -> &'static str {
         "claude_cli" => "Claude Code CLI",
         "codex_desktop" => "Codex Desktop",
         "claude_desktop" => "Claude Desktop",
-        "qoder" => "Qoder",
-        "workbuddy" => "WorkBuddy",
-        _ => "Agent",
+        "minimax" => "MiniMax Code",
+        "kimi" => "Kimi",
+        other => crate::agent_sources::agent_label(other),
     }
 }
 
@@ -184,16 +184,42 @@ fn cli_detail(output: &std::process::Output) -> String {
 }
 
 fn desktop_config_path(agent_type: &str) -> Option<PathBuf> {
-    let home = dirs_next::home_dir()?;
     let app_data = std::env::var("APPDATA").ok().map(PathBuf::from);
     match agent_type {
         "claude_desktop" => {
             app_data.map(|root| root.join("Claude").join("claude_desktop_config.json"))
         }
-        "qoder" => Some(home.join(".qoder").join("mcp.json")),
-        "workbuddy" => Some(home.join(".workbuddy").join(".mcp.json")),
-        _ => None,
+        // Qoder / WorkBuddy / MiniMax Code / Kimi 的 MCP 配置文件位置统一由
+        // Agent 数据源注册表解析，支持按设备覆盖目录。
+        other => crate::agent_sources::mcp_config_path(other),
     }
+}
+
+/// 文件型 MCP 配置的入口。MiniMax Code 的 mcp.json 使用带 type/enabled 的
+/// 服务器定义；Kimi、Qoder、WorkBuddy 使用标准 command/args 形态。
+fn file_server_entry(agent_type: &str, executable: &str) -> Value {
+    if agent_type == "minimax" {
+        json!({
+            "type": "stdio",
+            "command": executable,
+            "args": ["--mcp-memory"],
+            "enabled": true,
+            "description": "Agent Manager shared memory and published Skills"
+        })
+    } else {
+        json!({
+            "command": executable,
+            "args": ["--mcp-memory"],
+            "description": "Agent Manager shared memory and published Skills"
+        })
+    }
+}
+
+fn is_file_config_agent(agent_type: &str) -> bool {
+    matches!(
+        agent_type,
+        "claude_desktop" | "qoder" | "workbuddy" | "minimax" | "kimi"
+    )
 }
 
 fn file_config_status(agent_type: &str, executable: &str) -> Result<MemoryMcpStatus, String> {
@@ -232,14 +258,7 @@ fn write_file_config(agent_type: &str, executable: &str) -> Result<MemoryMcpStat
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or("mcpServers 必须是对象")?;
-    servers.insert(
-        SERVER_NAME.into(),
-        json!({
-            "command": executable,
-            "args": ["--mcp-memory"],
-            "description": "Agent Manager shared memory and published Skills"
-        }),
-    );
+    servers.insert(SERVER_NAME.into(), file_server_entry(agent_type, executable));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -281,10 +300,7 @@ pub fn memory_mcp_status(agent_type: String) -> Result<MemoryMcpStatus, String> 
         return Err(format!("暂不支持 {agent_type} 的 MCP 配置"));
     }
     let executable = server_executable()?;
-    if matches!(
-        agent_type.as_str(),
-        "claude_desktop" | "qoder" | "workbuddy"
-    ) {
+    if is_file_config_agent(&agent_type) {
         return file_config_status(&agent_type, &executable);
     }
     let cli = if agent_type.starts_with("codex") {
@@ -317,10 +333,7 @@ pub fn memory_mcp_install(agent_type: String) -> Result<MemoryMcpStatus, String>
         return Err(format!("暂不支持 {agent_type} 的 MCP 配置"));
     }
     let executable = server_executable()?;
-    if matches!(
-        agent_type.as_str(),
-        "claude_desktop" | "qoder" | "workbuddy"
-    ) {
+    if is_file_config_agent(&agent_type) {
         return write_file_config(&agent_type, &executable);
     }
     let existing = memory_mcp_status(agent_type.clone())?;
@@ -389,10 +402,7 @@ pub fn memory_mcp_uninstall(agent_type: String) -> Result<(), String> {
     if !supported_agent(&agent_type) {
         return Err(format!("暂不支持 {agent_type} 的 MCP 配置"));
     }
-    if matches!(
-        agent_type.as_str(),
-        "claude_desktop" | "qoder" | "workbuddy"
-    ) {
+    if is_file_config_agent(&agent_type) {
         return remove_file_config(&agent_type);
     }
     let mut args = vec!["mcp".into(), "remove".into()];
@@ -426,7 +436,6 @@ fn tools() -> Vec<Value> {
             }, "required": ["query"], "additionalProperties": false
         })),
         tool("get_user_profile", "Get the stable user preferences and constraints distilled by Agent Manager.", json!({ "type": "object", "properties": {}, "additionalProperties": false })),
-        tool("get_memory_overview", "Get the complete project memory overview distilled by Agent Manager.", json!({ "type": "object", "properties": {}, "additionalProperties": false })),
         tool("list_shared_skills", "List published Skills in Agent Manager's shared Skill library.", json!({ "type": "object", "properties": {}, "additionalProperties": false })),
         tool("read_shared_skill", "Read a named Skill from Agent Manager's shared Skill library.", json!({
             "type": "object", "properties": {
@@ -437,10 +446,36 @@ fn tools() -> Vec<Value> {
     ]
 }
 
+/// L2/L3 注入预算统一为 10000 cl100k token（与整理侧生成上限同源）。
+pub(crate) const MEMORY_LAYER_INJECTION_TOKENS: usize = 10_000;
+
+/// L3 中 MCP 调用提示的去重标记：整理侧生成草案与注入侧兜底补写都用它
+/// 判断提示是否已存在，避免重复追加。
+pub(crate) const L3_MCP_HINT_MARKER: &str = "agent-manager-memory-mcp";
+
+/// 永久写入长期记忆的 MCP 调用提示：告知任何接入的 Agent 可以主动调用
+/// agent-manager-memory MCP 工具按需检索更多记忆。文案刻意避开
+/// `is_l3_volatile_bullet` 的易变标记（token/模型/端点等），保证能通过
+/// L3 持久化校验。
+pub(crate) const L3_MCP_HINT_SECTION: &str = "## Memory query\n- Agents can call the agent-manager-memory-mcp tools at any time to retrieve more shared memory: recall_memory for semantic search over past decisions and preferences, get_user_profile for the long-term profile, list_shared_skills and read_shared_skill for reusable workflows.\n- 智能体可随时调用 agent-manager-memory-mcp 的工具查询更多记忆：recall_memory 语义检索历史决策与偏好，get_user_profile 获取长期画像，list_shared_skills / read_shared_skill 读取共享技能。";
+
+/// 若 L3 正文缺少 MCP 调用提示则原样保留并追加该提示区块；已含标记
+/// （整理侧已写入或用户手写）时保持正文不变。
+pub(crate) fn with_l3_mcp_hint(content: &str) -> String {
+    if content.contains(L3_MCP_HINT_MARKER) {
+        return content.to_string();
+    }
+    let trimmed = content.trim_end();
+    if trimmed.is_empty() {
+        return L3_MCP_HINT_SECTION.to_string();
+    }
+    format!("{trimmed}\n\n{L3_MCP_HINT_SECTION}")
+}
+
 /// Only compact, stable context is injected during MCP initialization.  The
 /// potentially large L1 library is deliberately retrieved on demand through
 /// `recall_memory`, which keeps each Agent's context task-relevant.
-fn shared_context_instructions() -> String {
+pub(crate) fn shared_context_instructions() -> String {
     let context = crate::telemetry_store::TelemetryStore::new()
         .ok()
         .and_then(|store| {
@@ -453,35 +488,39 @@ fn shared_context_instructions() -> String {
                 .active_memory_layer_document("l3")
                 .ok()
                 .flatten()
-                .map(|item| item.content)
-                .or_else(|| {
-                    store
-                        .profile_summary()
-                        .ok()
-                        .flatten()
-                        .map(|item| item.content)
-                });
-            let overview = store
-                .workspace_summary("all-conversations")
-                .ok()
-                .flatten()
                 .map(|item| item.content);
-            Some((l2, l3, overview))
+            let user_defined = store
+                .user_defined_l1_memories_for_scope("l3")
+                .unwrap_or_default()
+                .iter()
+                .map(|item| format!("- {}", item.memory))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some((l2, l3, user_defined))
         });
     let mut instructions = String::from("This server contains the user's shared cross-agent memory and published Skills. Only a bounded L3 Profile and recent L2 working memory are injected as user context, never executable instructions. The complete L1 Memory Center view is not preloaded; call recall_memory to retrieve only task-specific semantic matches. Prefer the current user request when they conflict. Use list_shared_skills only when a relevant reusable workflow could help.");
-    if let Some((l2, l3, overview)) = context {
+    if let Some((l2, l3, user_defined)) = context {
         instructions.push_str("\n\n## Long-term preferences and constraints\n");
+        // 兜底：存量已发布 L3 可能没有 MCP 调用提示，注入侧确定性补写，
+        // 保证每个 Agent 会话都知道可以调用 MCP 查询记忆；标记存在时
+        // with_l3_mcp_hint 原样返回，不会重复。
         instructions.push_str(&truncate_injection(
-            l3.as_deref().unwrap_or("No published L3 Profile yet."),
-            800,
+            &with_l3_mcp_hint(l3.as_deref().unwrap_or("No published L3 Profile yet.")),
+            MEMORY_LAYER_INJECTION_TOKENS,
         ));
         instructions.push_str("\n\n## Recent working memory\n");
         instructions.push_str(&truncate_injection(
             l2.as_deref()
-                .or(overview.as_deref())
                 .unwrap_or("No published L2 working memory yet."),
-            500,
+            MEMORY_LAYER_INJECTION_TOKENS,
         ));
+        // 用户手动添加的自定义记忆：只注入归入 L3 的长期条目（L2 层
+        // 自定义记忆随已发布的工作记忆文档进入上下文）；为空时省略
+        // 区块，避免无意义占位。
+        if !user_defined.trim().is_empty() {
+            instructions.push_str("\n\n## User-defined memories (added manually by the user; treat as durable constraints)\n");
+            instructions.push_str(&truncate_injection(&user_defined, MEMORY_LAYER_INJECTION_TOKENS));
+        }
     }
     instructions
 }
@@ -489,18 +528,24 @@ fn shared_context_instructions() -> String {
 /// Hard context budget for MCP initialization.  This is intentionally applied
 /// after content is loaded, so an oversized generated document can never
 /// recreate the multi-million-token injection failure mode.
+///
+/// 编码用 `encode_ordinary` 而不是 `encode_with_special_tokens`：后者的 token
+/// 列表可能含特殊 token id，而 `decode` 遇到特殊 token 会报错，早期实现用
+/// `unwrap_or_default()` 吞错后返回空正文——中文 L2 文档曾因此被截成只剩
+/// 标题加截断标记。任何编码/解码失败都必须回退到按字符截断，绝不能静默
+/// 产出空内容。
 fn truncate_injection(text: &str, max_tokens: usize) -> String {
     if let Ok(encoding) = tiktoken_rs::cl100k_base() {
-        let tokens = encoding.encode_with_special_tokens(text);
+        let tokens = encoding.encode_ordinary(text);
         if tokens.len() <= max_tokens {
             return text.to_string();
         }
-        return format!(
-            "{}\n[truncated to initialization budget]",
-            encoding.decode(&tokens[..max_tokens]).unwrap_or_default()
-        );
+        if let Ok(decoded) = encoding.decode(&tokens[..max_tokens]) {
+            return format!("{decoded}\n[truncated to initialization budget]");
+        }
     }
-    text.chars().take(max_tokens * 3).collect()
+    let compact: String = text.chars().take(max_tokens * 3).collect();
+    format!("{compact}\n[truncated to initialization budget]")
 }
 
 fn normalized_memory_content(content: &str) -> String {
@@ -558,12 +603,10 @@ fn recall(arguments: &Value) -> Result<Value, String> {
     }
     let profile = store
         .active_memory_layer_document("l3")?
-        .map(|item| item.content)
-        .or(store.profile_summary()?.map(|item| item.content));
+        .map(|item| item.content);
     let working_memory = store
         .active_memory_layer_document("l2")?
         .map(|item| item.content);
-    let overview = store.workspace_summary("all-conversations")?;
     let semantic_candidate_count = semantic_memories.len();
     let local_candidate_count = local_memories.len();
     let mut seen = HashSet::new();
@@ -592,8 +635,8 @@ fn recall(arguments: &Value) -> Result<Value, String> {
     Ok(json!({
         "query": query,
         "profile": profile,
-        "working_memory": working_memory.map(|content| truncate_injection(&content, 500)),
-        "overview": overview.map(|summary| summary.content),
+        "working_memory": working_memory
+            .map(|content| truncate_injection(&content, MEMORY_LAYER_INJECTION_TOKENS)),
         "retrieval": {
             "mode": semantic_status,
             "semantic_candidates": semantic_candidate_count,
@@ -611,14 +654,8 @@ fn call_tool(name: &str, arguments: &Value) -> Result<Value, String> {
             let store = crate::telemetry_store::TelemetryStore::new()?;
             let profile = store
                 .active_memory_layer_document("l3")?
-                .map(|item| item.content)
-                .or(store.profile_summary()?.map(|item| item.content));
+                .map(|item| item.content);
             Ok(json!({ "profile": profile }))
-        }
-        "get_memory_overview" => {
-            let overview = crate::telemetry_store::TelemetryStore::new()?
-                .workspace_summary("all-conversations")?;
-            Ok(json!({ "overview": overview.map(|item| item.content) }))
         }
         "list_shared_skills" => Ok(json!({
             "skills": crate::skill_registry::skill_list()?.into_iter()
@@ -663,7 +700,6 @@ fn mcp_call_summary(tool_name: &str, value: Option<&Value>, success: bool) -> St
                 .map_or(0, Vec::len)
         ),
         "get_user_profile" => "读取长期偏好与约束摘要".into(),
-        "get_memory_overview" => "读取项目记忆概览".into(),
         "list_shared_skills" => format!(
             "查看已发布 Skill，返回 {} 项",
             value
@@ -676,7 +712,7 @@ fn mcp_call_summary(tool_name: &str, value: Option<&Value>, success: bool) -> St
     }
 }
 
-fn record_mcp_tool_call(tool_name: &str, value: Option<&Value>, success: bool) {
+fn record_mcp_tool_call(tool_name: &str, detail: Option<String>, value: Option<&Value>, success: bool) {
     let store = match crate::telemetry_store::TelemetryStore::new() {
         Ok(store) => store,
         Err(error) => {
@@ -688,6 +724,7 @@ fn record_mcp_tool_call(tool_name: &str, value: Option<&Value>, success: bool) {
         &mcp_client_name(),
         tool_name,
         &mcp_call_summary(tool_name, value, success),
+        detail.as_deref(),
         success,
     ) {
         eprintln!("[memory-mcp] audit write skipped: {error}");
@@ -708,7 +745,8 @@ fn handle_request(request: Value) -> Option<Value> {
     let result: Result<Value, String> = match method {
         "initialize" => {
             set_mcp_client_name(&request);
-            record_mcp_tool_call("initialize", None, true);
+            let instructions = shared_context_instructions();
+            record_mcp_tool_call("initialize", Some(instructions.clone()), None, true);
             Ok(json!({
             // MCP clients announce the version they speak.  The tools used by
             // this server are stable across these protocol revisions, so echo
@@ -717,22 +755,25 @@ fn handle_request(request: Value) -> Option<Value> {
             "protocolVersion": request.get("params").and_then(|params| params.get("protocolVersion")).and_then(Value::as_str).unwrap_or(MCP_PROTOCOL_VERSION),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-            "instructions": shared_context_instructions()
+            "instructions": instructions
             }))
         }
         "tools/list" => Ok(json!({ "tools": tools() })),
         "tools/call" => {
             let params = request.get("params").unwrap_or(&Value::Null);
+            let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
             let name = params
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "缺少工具名称".to_string());
             match name.and_then(|tool_name| {
-                call_tool(tool_name, params.get("arguments").unwrap_or(&Value::Null))
+                call_tool(tool_name, &arguments)
                     .map(|value| (tool_name, value))
             }) {
                 Ok((tool_name, value)) => {
-                    record_mcp_tool_call(tool_name, Some(&value), true);
+                    // 审计保留完整交换内容：查询参数 + 返回的记忆/Skill 正文。
+                    let detail = json!({ "arguments": arguments, "result": &value }).to_string();
+                    record_mcp_tool_call(tool_name, Some(detail), Some(&value), true);
                     Ok(tool_result(value, false))
                 }
                 Err(error) => {
@@ -740,7 +781,8 @@ fn handle_request(request: Value) -> Option<Value> {
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    record_mcp_tool_call(tool_name, None, false);
+                    let detail = json!({ "arguments": arguments, "error": &error }).to_string();
+                    record_mcp_tool_call(tool_name, Some(detail), None, false);
                     Ok(tool_result(json!({ "error": error }), true))
                 }
             }
@@ -781,7 +823,7 @@ pub fn run_stdio() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_request, truncate_injection};
+    use super::{handle_request, truncate_injection, with_l3_mcp_hint, L3_MCP_HINT_MARKER};
     use serde_json::json;
 
     #[test]
@@ -836,6 +878,45 @@ mod tests {
         // The suffix is intentionally small and signals the cut to the Agent.
         assert!(encoding.encode_with_special_tokens(&compact).len() < 110);
         assert!(compact.contains("initialization budget"));
+    }
+
+    #[test]
+    fn truncation_preserves_readable_prefix_for_cjk_content() {
+        // 中文 L2 文档曾被 decode 失败吞成空正文：截断结果必须保留可读前缀，
+        // 而不是只剩标题加截断标记。
+        let text = format!("{}{}", "当前焦点：验证记忆注入链路。", "决策条目内容。".repeat(400));
+        let compact = truncate_injection(&text, 50);
+        assert!(compact.starts_with("当前焦点"));
+        assert!(compact.contains("initialization budget"));
+    }
+
+    #[test]
+    fn injection_budget_fits_a_full_ten_thousand_token_document() {
+        // 预算为 10000 cl100k token：token 数以内的中文文档应完整注入、
+        // 不被截断；超出预算时则保留可读前缀并附截断标记。
+        let within_budget = "工作记忆条目。".repeat(600); // 4200 字符，远低于 10000 token 预算
+        assert!(truncate_injection(&within_budget, super::MEMORY_LAYER_INJECTION_TOKENS)
+            .chars()
+            .count()
+                >= within_budget.chars().count());
+        let over_budget = "工作记忆条目。".repeat(20_000);
+        let compact = truncate_injection(&over_budget, super::MEMORY_LAYER_INJECTION_TOKENS);
+        assert!(compact.starts_with("工作记忆条目"));
+        assert!(compact.contains("initialization budget"));
+    }
+
+    #[test]
+    fn l3_mcp_hint_is_appended_once_and_never_duplicated() {
+        // 存量 L3 缺提示时追加；已含标记时原样返回，重复调用不叠加。
+        let legacy = "## Preferences\n- User prefers Chinese replies.";
+        let once = with_l3_mcp_hint(legacy);
+        assert!(once.contains(L3_MCP_HINT_MARKER));
+        assert!(once.contains("recall_memory"));
+        assert!(once.starts_with("## Preferences"));
+        let twice = with_l3_mcp_hint(&once);
+        assert_eq!(twice, once);
+        // 空正文（未发布占位）也应带上提示。
+        assert!(with_l3_mcp_hint("No published L3 Profile yet.").contains(L3_MCP_HINT_MARKER));
     }
 
     #[cfg(windows)]

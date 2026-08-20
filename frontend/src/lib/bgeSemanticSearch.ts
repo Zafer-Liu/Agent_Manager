@@ -47,12 +47,27 @@ function cosine(left: Float32Array, right: Float32Array) {
   return leftNorm && rightNorm ? dot / Math.sqrt(leftNorm * rightNorm) : 0
 }
 
+// Local BGE inference runs on the WebView main thread. Yield between chunks
+// so a large memory library never freezes the interface while embedding.
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, 0) })
+}
+
+// Embeddings are computed in small batches; each batch keeps the UI
+// responsive at the cost of a few more extractor calls.
+const EMBED_CHUNK_SIZE = 16
+
 /**
  * Select likely duplicate groups with BGE-small entirely in the local WebView.
  * The output intentionally contains only small batches; only these candidates
  * are later sent to the configured consolidation LLM for a safety decision.
+ * Embedding is chunked and yields to the UI thread, and `onProgress` reports
+ * how many memories have been embedded so the caller can show live progress.
  */
-export async function createBgeConsolidationCandidateBatches(memories: MemoryItem[]): Promise<ConsolidationCandidate[][]> {
+export async function createBgeConsolidationCandidateBatches(
+  memories: MemoryItem[],
+  onProgress?: (processed: number, total: number) => void,
+): Promise<ConsolidationCandidate[][]> {
   const local = memories.filter((memory) => memory.id.startsWith('local-l1:') && memory.memory.trim())
   if (local.length < 2) return []
 
@@ -62,12 +77,26 @@ export async function createBgeConsolidationCandidateBatches(memories: MemoryIte
     byLanguage.set(key, [...(byLanguage.get(key) ?? []), memory])
   }
 
+  const total = local.length
+  let processed = 0
   const pairs: Array<{ left: MemoryItem, right: MemoryItem, score: number }> = []
   for (const [isChinese, group] of byLanguage) {
-    if (group.length < 2) continue
+    if (group.length < 2) {
+      processed += group.length
+      continue
+    }
     const extractor = await extractorFor(isChinese ? '中文' : 'english')
-    const embedded = toVectors(await extractor(group.map((memory) => memory.memory), { pooling: 'mean', normalize: true }))
+    // Embed in small chunks, yielding between them so the UI stays alive.
+    const embedded: Float32Array[] = []
+    for (let start = 0; start < group.length; start += EMBED_CHUNK_SIZE) {
+      const slice = group.slice(start, start + EMBED_CHUNK_SIZE)
+      embedded.push(...toVectors(await extractor(slice.map((memory) => memory.memory), { pooling: 'mean', normalize: true })))
+      processed += slice.length
+      onProgress?.(Math.min(processed, total), total)
+      if (start + EMBED_CHUNK_SIZE < group.length) await yieldToUi()
+    }
     const neighbours = group.map(() => [] as Array<{ index: number, score: number }>)
+    let pairChecks = 0
     for (let left = 0; left < group.length; left += 1) {
       for (let right = left + 1; right < group.length; right += 1) {
         const score = cosine(embedded[left], embedded[right])
@@ -77,6 +106,10 @@ export async function createBgeConsolidationCandidateBatches(memories: MemoryIte
           neighbours[left].push({ index: right, score })
           neighbours[right].push({ index: left, score })
         }
+        // The O(n^2) sweep is cheap per step but can add up on large groups;
+        // yield occasionally so it never monopolises the main thread.
+        pairChecks += 1
+        if (pairChecks % 4096 === 0) await yieldToUi()
       }
     }
     const chosen = new Set<string>()

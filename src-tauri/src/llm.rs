@@ -40,6 +40,7 @@ const ENCRYPTED_KEY_PREFIX: &str = "v2:";
 const GCM_NONCE_BYTES: usize = 12;
 const LLM_PROVIDERS_SETTING_KEY: &str = "llm_providers";
 const MEMORY_EXTRACTION_SETTING_KEY: &str = "memory_extraction_config";
+const OLLAMA_CONFIG_SETTING_KEY: &str = "ollama_config";
 
 /// Encrypt a key with a fresh GCM nonce.  The nonce is stored alongside the
 /// ciphertext so each saved provider is independently decryptable.
@@ -111,6 +112,39 @@ pub struct MemoryExtractionConfig {
     pub provider_id: Option<String>,
 }
 
+/// Local Ollama service connection settings.  Ollama exposes an
+/// OpenAI-compatible endpoint under `/v1`, so a connected local model can be
+/// registered as a custom provider without a real API key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct OllamaConfig {
+    pub base_url: String,
+}
+
+impl Default for OllamaConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "http://localhost:11434".to_string(),
+        }
+    }
+}
+
+/// One locally installed Ollama model, as reported by `GET /api/tags`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OllamaModelInfo {
+    pub name: String,
+    pub size: u64,
+    pub parameter_size: Option<String>,
+    pub quantization_level: Option<String>,
+}
+
+/// Result of probing an Ollama service: its version plus installed models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OllamaTestResult {
+    pub version: Option<String>,
+    pub models: Vec<OllamaModelInfo>,
+}
+
 // 内置 provider 默认值
 pub fn builtin_defaults(
 ) -> HashMap<&'static str, (&'static str, &'static str, &'static str, u32, u32)> {
@@ -151,6 +185,55 @@ fn memory_extraction_config_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("agent-manager")
         .join("memory_extraction.json")
+}
+
+fn ollama_config_path() -> std::path::PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("agent-manager")
+        .join("ollama_config.json")
+}
+
+pub fn ollama_config() -> OllamaConfig {
+    if let Some(store) = crate::telemetry_store::shared_store() {
+        if let Some(config) = store.app_setting_get(OLLAMA_CONFIG_SETTING_KEY) {
+            return config;
+        }
+    }
+    let config = std::fs::read_to_string(ollama_config_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if let Some(store) = crate::telemetry_store::shared_store() {
+        let _ = store.app_setting_set(OLLAMA_CONFIG_SETTING_KEY, &config);
+    }
+    config
+}
+
+fn save_ollama_config(config: &OllamaConfig) -> Result<(), String> {
+    if let Some(store) = crate::telemetry_store::shared_store() {
+        store.app_setting_set(OLLAMA_CONFIG_SETTING_KEY, config)?;
+    }
+    // Compatibility mirror; SQLite is authoritative once initialized.
+    let path = ollama_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    std::fs::write(path, text).map_err(|error| error.to_string())
+}
+
+/// Validate a user-supplied Ollama base URL and strip trailing slashes so
+/// endpoint paths can be appended directly.
+fn normalize_ollama_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("Ollama 服务地址不能为空".to_string());
+    }
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("Ollama 服务地址必须以 http:// 或 https:// 开头".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 pub fn memory_extraction_config() -> MemoryExtractionConfig {
@@ -259,6 +342,86 @@ pub fn list_llm_providers() -> Vec<LlmProvider> {
 #[tauri::command]
 pub fn memory_extraction_config_get() -> MemoryExtractionConfig {
     memory_extraction_config()
+}
+
+#[tauri::command]
+pub fn ollama_config_get() -> OllamaConfig {
+    ollama_config()
+}
+
+#[tauri::command]
+pub fn ollama_config_set(config: OllamaConfig) -> Result<(), String> {
+    let normalized = OllamaConfig {
+        base_url: normalize_ollama_base_url(&config.base_url)?,
+    };
+    save_ollama_config(&normalized)
+}
+
+/// Probe an Ollama service: fetch its version and the locally installed
+/// model list.  No API key is involved; Ollama binds to loopback by default.
+#[tauri::command]
+pub async fn test_ollama_connection(base_url: String) -> Result<OllamaTestResult, String> {
+    let base = normalize_ollama_base_url(&base_url)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|error| format!("无法创建 Ollama 连接: {error}"))?;
+
+    // The version probe is best-effort: model listing below is the real
+    // health check, and very old Ollama builds lack /api/version.
+    let version = match client
+        .get(format!("{base}/api/version"))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|value| value["version"].as_str().map(str::to_string)),
+        _ => None,
+    };
+
+    let tags_resp = client
+        .get(format!("{base}/api/tags"))
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_connect() || error.is_timeout() {
+                format!("无法连接到 Ollama（{base}）。请确认 Ollama 已启动且地址正确")
+            } else {
+                format!("Ollama 请求失败: {error}")
+            }
+        })?;
+    if !tags_resp.status().is_success() {
+        return Err(format!("Ollama 返回 HTTP {}", tags_resp.status()));
+    }
+    let tags = tags_resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("无法解析 Ollama 模型列表: {error}"))?;
+    let models = tags["models"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    Some(OllamaModelInfo {
+                        name: item["name"].as_str()?.to_string(),
+                        size: item["size"].as_u64().unwrap_or(0),
+                        parameter_size: item["details"]["parameter_size"]
+                            .as_str()
+                            .map(str::to_string),
+                        quantization_level: item["details"]["quantization_level"]
+                            .as_str()
+                            .map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(OllamaTestResult { version, models })
 }
 
 #[tauri::command]

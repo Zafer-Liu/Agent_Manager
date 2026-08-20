@@ -1,9 +1,8 @@
-//! Agent HTTP 双向通信 + 工作流引擎对接（阶段四）
+//! Agent HTTP 双向通信 + 工作流引擎对接
 //!
 //! HTTP server 在 9420 端口暴露：
 //! - POST /agent/dispatch   → 给子 Agent 发任务（支持两种模式：直接转发 / 触发工作流）
 //! - POST /agent/submit     → 接收子 Agent 提交的结果（更新 StepInstance，推进工作流）
-//! - POST /hook             → 外部 Hook 触发工作流（按 template_key 找模板）
 //! - GET  /agent/tasks      → 查看待处理任务
 //! - GET  /agent/results    → 查看已接收结果
 //! - GET  /runs             → 列出工作流 Run 摘要
@@ -17,70 +16,10 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-// ── Hook Server 配置（持久化到 hook_server.json）──────────────────────────────
+// ── HTTP server 固定配置 ─────────────────────────────────────────────────────
 
-/// Hook Server 配置（端口 + 鉴权 + 开关）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HookServerConfig {
-    /// 监听端口（默认 9420）
-    #[serde(default = "default_port")]
-    pub port: u16,
-    /// 鉴权 token（None 或空 = 不鉴权）；请求需带 `Authorization: Bearer <token>`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_token: Option<String>,
-    /// 是否启用 Hook Server
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    /// 最大并发 Run 数（预留）
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent_runs: u32,
-}
-
-fn default_port() -> u16 {
-    9420
-}
-fn default_enabled() -> bool {
-    true
-}
-fn default_max_concurrent() -> u32 {
-    5
-}
-
-impl Default for HookServerConfig {
-    fn default() -> Self {
-        HookServerConfig {
-            port: 9420,
-            auth_token: None,
-            enabled: true,
-            max_concurrent_runs: 5,
-        }
-    }
-}
-
-fn hook_server_config_path() -> std::path::PathBuf {
-    dirs_next::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("agent-manager")
-        .join("hook_server.json")
-}
-
-/// 从磁盘读取 Hook Server 配置（文件不存在时返回默认值）
-pub fn read_hook_server_config() -> HookServerConfig {
-    let path = hook_server_config_path();
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
-    serde_json::from_str(&raw).unwrap_or_default()
-}
-
-/// 将 Hook Server 配置持久化到磁盘
-pub fn write_hook_server_config(config: &HookServerConfig) -> Result<(), String> {
-    let path = hook_server_config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())?;
-    Ok(())
-}
+/// Agent HTTP server 固定监听端口（记忆沉淀、遥测、agent 回调等共用）
+pub const AGENT_HTTP_PORT: u16 = 9420;
 
 // ── 数据模型 ─────────────────────────────────────────────────────────────────
 
@@ -141,28 +80,6 @@ fn default_verdict() -> String {
 use std::sync::OnceLock;
 
 static HTTP_STORE: OnceLock<Arc<AgentHttpStore>> = OnceLock::new();
-
-/// 当前运行的 HTTP server 句柄（用于 restart 时关闭旧 server）
-static SERVER_HANDLE: OnceLock<Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>> =
-    OnceLock::new();
-
-/// 获取 server handle（restart 用）
-pub fn get_server_handle() -> Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> {
-    Arc::clone(SERVER_HANDLE.get_or_init(|| Arc::new(Mutex::new(None))))
-}
-
-/// 关闭当前运行的 HTTP server（restart 时调用）
-async fn shutdown_current_server() {
-    let handle = get_server_handle();
-    let opt = {
-        let mut guard = handle.lock().unwrap();
-        guard.take()
-    };
-    if let Some(h) = opt {
-        h.abort();
-        eprintln!("[agent-http] previous server aborted");
-    }
-}
 
 pub struct AgentHttpStore {
     /// task_id → AgentTask
@@ -245,23 +162,15 @@ impl Default for AgentHttpStore {
 // ── HTTP Server（极简手写，不引入框架）──────────────────────────────────────
 
 /// 启动 HTTP server。在 Tauri setup 里 tokio::spawn 调用。
-pub async fn start_agent_http_server(
-    port: u16,
-    auth_token: Option<String>,
-    store: Arc<AgentHttpStore>,
-) {
+pub async fn start_agent_http_server(port: u16, store: Arc<AgentHttpStore>) {
     let addr = format!("127.0.0.1:{}", port);
     // A development restart or a previous app instance can briefly keep the
-    // port occupied.  Hooks must recover once that process exits instead of
+    // port occupied.  Endpoints must recover once that process exits instead of
     // silently remaining offline for the lifetime of this desktop instance.
     let listener = loop {
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
-                eprintln!(
-                    "[agent-http] listening on http://{} (auth={})",
-                    addr,
-                    auth_token.is_some()
-                );
+                eprintln!("[agent-http] listening on http://{}", addr);
                 break listener;
             }
             Err(error) => {
@@ -275,8 +184,7 @@ pub async fn start_agent_http_server(
         match listener.accept().await {
             Ok((stream, _)) => {
                 let store = Arc::clone(&store);
-                let token = auth_token.clone();
-                tokio::spawn(handle_connection(stream, store, token));
+                tokio::spawn(handle_connection(stream, store));
             }
             Err(e) => {
                 eprintln!("[agent-http] accept error: {}", e);
@@ -285,14 +193,10 @@ pub async fn start_agent_http_server(
     }
 }
 
-async fn handle_connection(
-    mut stream: tokio::net::TcpStream,
-    store: Arc<AgentHttpStore>,
-    auth_token: Option<String>,
-) {
+async fn handle_connection(mut stream: tokio::net::TcpStream, store: Arc<AgentHttpStore>) {
     use tokio::io::AsyncWriteExt;
 
-    // Read the complete HTTP body.  Hook payloads often include tool output and
+    // Read the complete HTTP body.  Payloads often include tool output and
     // exceed a single TCP frame; the old 8 KiB one-shot read silently truncated
     // such events and turned them into ignored JSON.
     const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -330,29 +234,6 @@ async fn handle_connection(
     } else {
         ""
     };
-
-    // 提取 Authorization header（阶段四：auth_token 校验）
-    let auth_header = extract_header(&raw, "authorization");
-
-    // 鉴权校验
-    if let Some(ref expected_token) = auth_token {
-        if !expected_token.is_empty() {
-            let provided = auth_header
-                .as_deref()
-                .and_then(|h| h.strip_prefix("Bearer "))
-                .unwrap_or("");
-            if provided != expected_token {
-                let resp = json!({"error": "unauthorized", "hint": "provide Authorization: Bearer <token>"}).to_string();
-                let http = format!(
-                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                    resp.len(),
-                    resp
-                );
-                let _ = stream.write_all(http.as_bytes()).await;
-                return;
-            }
-        }
-    }
 
     // 路由
     let (status, response) = route(method, path, body, &store).await;
@@ -427,27 +308,6 @@ async fn read_http_request(
         }
     }
     String::from_utf8(bytes[..required].to_vec()).map_err(|_| "HTTP request is not UTF-8".into())
-}
-
-/// 从原始 HTTP 请求文本中提取指定 header 的值（大小写不敏感）
-fn extract_header(raw: &str, name: &str) -> Option<String> {
-    let name_lower = name.to_lowercase();
-    for line in raw.lines() {
-        if line.is_empty() || !line.contains(':') {
-            continue;
-        }
-        // 跳过请求行
-        if line.starts_with("GET ") || line.starts_with("POST ") || line.starts_with("OPTIONS ") {
-            continue;
-        }
-        let mut parts = line.splitn(2, ':');
-        let key = parts.next()?.trim().to_lowercase();
-        let value = parts.next()?.trim().to_string();
-        if key == name_lower {
-            return Some(value);
-        }
-    }
-    None
 }
 
 async fn route(
@@ -560,7 +420,37 @@ async fn route(
             )
         }
 
-        // ── 阶段四：外部 Hook 触发工作流 ──────────────────────────────────────
+        // ── 记忆注入：SessionStart hook 拉取共享上下文 ────────────────────
+        // Claude 形态 harness（Qoder / Claude Code / WorkBuddy）只解析
+        // hookSpecificOutput.additionalContext 的结构化 JSON stdout，纯文本
+        // 会被当作 "no parsed output" 丢弃；端点直接返回协议格式，hook 命令
+        // 保持 curl 透传。不依赖 MCP instructions，也不需要 Agent 主动调用工具。
+        ("GET", p) if p == "/memory/context" || p.starts_with("/memory/context") => {
+            let source = p
+                .split_once('?')
+                .and_then(|(_, query)| {
+                    query
+                        .split('&')
+                        .find_map(|part| part.strip_prefix("source="))
+                })
+                .filter(|source| matches!(*source, "claude" | "qoder" | "codex" | "workbuddy"))
+                .unwrap_or("unknown");
+            let context = crate::memory_mcp::shared_context_instructions();
+            // 与 MCP 调用同表审计：记忆注入摘要同时覆盖 Hook 启动注入与 MCP 检索，
+            // detail 保存完整注入正文，面板可逐字回放。
+            if let Some(store) = crate::telemetry_store::shared_store() {
+                let _ = store.try_record_mcp_access(
+                    crate::agent_sources::agent_label(source),
+                    "session_start_inject",
+                    &format!("会话启动注入 L3+L2 共享上下文（{} 字符）", context.chars().count()),
+                    Some(&context),
+                    true,
+                );
+            }
+            ("200 OK", session_start_hook_body(source, context))
+        }
+
+        // ── 记忆沉淀 Agent Hook 回调 ──────────────────────────────────────
         ("POST", p) if p == "/memory/hook" || p.starts_with("/memory/hook") => {
             // Agent hook 回调：自动沉淀记忆与 skill（异步处理，不阻塞）
             let source = p
@@ -633,83 +523,7 @@ async fn route(
             }
         }
 
-        ("POST", p) if p == "/hook" || p.starts_with("/hook") => {
-            let payload: Value = match serde_json::from_str(body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return (
-                        "400 Bad Request",
-                        json!({"error": format!("invalid body: {}", e)}).to_string(),
-                    );
-                }
-            };
-
-            let template_key = payload["template_key"].as_str().unwrap_or("");
-            if template_key.is_empty() {
-                return (
-                    "400 Bad Request",
-                    json!({"error": "template_key is required"}).to_string(),
-                );
-            }
-
-            // 按 template_key 查找工作流模板
-            let workflows = crate::workflow::read_workflows();
-            let wf = workflows
-                .into_iter()
-                .find(|w| w.template_key.as_deref() == Some(template_key));
-
-            let Some(wf) = wf else {
-                return (
-                    "404 Not Found",
-                    json!({"error": format!("template not found: {}", template_key)}).to_string(),
-                );
-            };
-
-            // 构造 RunWorkflowRequest
-            let title = payload["title"].as_str().unwrap_or("").to_string();
-            let description = payload["description"].as_str().unwrap_or("").to_string();
-            let input = if !description.is_empty() {
-                description
-            } else {
-                title
-            };
-
-            // 阶段四：payload 可携带 callback_url，优先于模板配置
-            let callback_url = payload["callback_url"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
-
-            let request = crate::workflow::RunWorkflowRequest {
-                workflow: wf,
-                provider: None, // 用默认 LLM 配置
-                mcp_servers: vec![],
-                input,
-                rework: None,
-                callback_url,
-                trigger: Some(crate::workflow_store::RunTrigger::Hook {
-                    source: payload["source"].as_str().unwrap_or("external").to_string(),
-                    external_id: payload["external_id"].as_str().unwrap_or("").to_string(),
-                }),
-            };
-
-            // 异步启动工作流
-            let run_store = crate::workflow_store::WorkflowRunStore::new();
-            tauri::async_runtime::spawn(async move {
-                let _ = crate::workflow::run_workflow_core(request, None, &run_store).await;
-            });
-
-            (
-                "202 Accepted",
-                json!({
-                    "status": "workflow_started",
-                    "template_key": template_key,
-                })
-                .to_string(),
-            )
-        }
-
-        // ── 阶段四：Run 管理 API ──────────────────────────────────────────────
+        // ── Run 管理 API ──────────────────────────────────────────────
         ("GET", p) if p == "/runs" || p.starts_with("/runs?") => {
             let run_store = crate::workflow_store::WorkflowRunStore::new();
             let list = run_store.list_runs();
@@ -764,6 +578,25 @@ async fn route(
             "404 Not Found",
             json!({"error": "not found", "path": path}).to_string(),
         ),
+    }
+}
+
+/// SessionStart hook 的 stdout 响应体。Claude 形态 harness（Qoder / Claude
+/// Code / WorkBuddy）要求结构化 JSON，注入正文放在
+/// `hookSpecificOutput.additionalContext`；纯文本 stdout 会被丢弃（日志中的
+/// "winner=none (no parsed output)"）。Codex 的 hook 协议不同且未验证，
+/// 保持纯文本以免破坏其现有行为。
+fn session_start_hook_body(source: &str, context: String) -> String {
+    if matches!(source, "claude" | "qoder" | "workbuddy") {
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context
+            }
+        })
+        .to_string()
+    } else {
+        context
     }
 }
 
@@ -829,8 +662,7 @@ pub async fn dispatch_agent_task(
 ) -> Result<String, String> {
     let store = get_store();
     let task_id = uuid::Uuid::new_v4().to_string();
-    let config = read_hook_server_config();
-    let callback_url = format!("http://localhost:{}/agent/submit", config.port);
+    let callback_url = format!("http://localhost:{}/agent/submit", AGENT_HTTP_PORT);
 
     let agent_task = AgentTask {
         task_id: task_id.clone(),
@@ -903,47 +735,42 @@ pub fn list_agent_results() -> Vec<AgentResult> {
     results.values().cloned().collect()
 }
 
-// ── 阶段四 4h：Hook Server 配置管理（Tauri 命令）──────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::session_start_hook_body;
 
-/// 读取当前 Hook Server 配置
-#[tauri::command]
-pub fn get_hook_server_config() -> HookServerConfig {
-    read_hook_server_config()
-}
-
-/// 保存 Hook Server 配置（持久化到 hook_server.json）
-#[tauri::command]
-pub fn set_hook_server_config(config: HookServerConfig) -> Result<HookServerConfig, String> {
-    write_hook_server_config(&config)?;
-    Ok(config)
-}
-
-/// 重启 Hook Server（先关闭旧 server，再用新配置启动）
-#[tauri::command]
-pub async fn restart_hook_server() -> Result<String, String> {
-    let config = read_hook_server_config();
-    if !config.enabled {
-        shutdown_current_server().await;
-        return Ok("hook server disabled (config.enabled=false)".to_string());
+    #[test]
+    fn claude_shape_sources_get_structured_hook_envelope() {
+        for source in ["claude", "qoder", "workbuddy"] {
+            let body = session_start_hook_body(source, "记忆正文".to_string());
+            let value: serde_json::Value =
+                serde_json::from_str(&body).expect("envelope must be valid JSON");
+            assert_eq!(
+                value["hookSpecificOutput"]["hookEventName"],
+                "SessionStart"
+            );
+            assert_eq!(
+                value["hookSpecificOutput"]["additionalContext"],
+                "记忆正文"
+            );
+        }
     }
 
-    // 关闭旧 server
-    shutdown_current_server().await;
-
-    // 启动新 server
-    let store = get_store();
-    let port = config.port;
-    let token = config.auth_token.clone();
-    let handle = tauri::async_runtime::spawn(async move {
-        start_agent_http_server(port, token, store).await;
-    });
-
-    // 记录新 handle
-    let h = get_server_handle();
-    {
-        let mut guard = h.lock().unwrap();
-        *guard = Some(handle);
+    #[test]
+    fn codex_and_unknown_sources_keep_plain_text() {
+        for source in ["codex", "unknown"] {
+            let body = session_start_hook_body(source, "plain body".to_string());
+            assert_eq!(body, "plain body");
+        }
     }
 
-    Ok(format!("hook server restarted on port {}", config.port))
+    #[test]
+    fn envelope_escapes_special_characters() {
+        let body = session_start_hook_body("qoder", "line1\n\"quoted\"\t端".to_string());
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["additionalContext"],
+            "line1\n\"quoted\"\t端"
+        );
+    }
 }

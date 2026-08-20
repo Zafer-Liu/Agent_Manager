@@ -26,9 +26,6 @@ pub struct RunRecord {
     pub run_id: String,
     /// 使用的模板 id
     pub template_id: String,
-    /// 外部系统传入的模板标识（阶段四 Hook 用）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_key: Option<String>,
     /// Run 整体状态
     pub status: RunStatus,
     /// 每个节点的一次执行实例
@@ -76,7 +73,7 @@ impl Default for RunStatus {
 pub enum RunTrigger {
     /// 手动触发
     Manual { user: String },
-    /// 外部 Hook 触发（阶段四）
+    /// 外部 Hook 触发（历史变体，仅用于反序列化旧记录）
     Hook { source: String, external_id: String },
     /// 定时触发（阶段四）
     Schedule { cron: String },
@@ -239,8 +236,6 @@ pub struct RetryAttempt {
 pub struct RunSummary {
     pub run_id: String,
     pub template_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_key: Option<String>,
     pub status: RunStatus,
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,7 +331,6 @@ impl WorkflowRunStore {
         let summary = RunSummary {
             run_id: run.run_id.clone(),
             template_id: run.template_id.clone(),
-            template_key: run.template_key.clone(),
             status: run.status.clone(),
             created_at: run.created_at,
             finished_at: run.finished_at,
@@ -506,17 +500,6 @@ pub fn list_workflow_runs(store: State<'_, WorkflowRunStore>) -> Vec<RunSummary>
     store.list_runs()
 }
 
-/// 阶段四 P1：列出 Hook 触发的 Run（前端外部触发页用）
-#[allow(dead_code)]
-#[tauri::command]
-pub fn list_hook_triggered_runs(store: State<'_, WorkflowRunStore>) -> Vec<RunSummary> {
-    store
-        .list_runs()
-        .into_iter()
-        .filter(|r| matches!(r.trigger, RunTrigger::Hook { .. }))
-        .collect()
-}
-
 /// 按 run_id 读取完整 Run（含 steps）。
 #[allow(dead_code)]
 #[tauri::command]
@@ -614,7 +597,6 @@ pub fn reject_run_inner(
     let new_run = RunRecord {
         run_id: new_run_id.clone(),
         template_id: orig_run.template_id.clone(),
-        template_key: orig_run.template_key.clone(),
         status: RunStatus::Running,
         steps: vec![],
         created_at: now,
@@ -639,7 +621,6 @@ mod tests {
         RunRecord {
             run_id: id.to_string(),
             template_id: template.to_string(),
-            template_key: None,
             status: RunStatus::Running,
             steps: vec![],
             created_at: Utc::now().timestamp_millis(),
@@ -713,7 +694,6 @@ mod tests {
         let run = RunRecord {
             run_id: "r1".into(),
             template_id: "t1".into(),
-            template_key: Some("standard-req".into()),
             status: RunStatus::Success,
             steps: vec![StepInstance::new("r1", "n1")],
             created_at: 1700000000_000,
@@ -726,12 +706,11 @@ mod tests {
         let s = serde_json::to_string(&run).unwrap();
         let back: RunRecord = serde_json::from_str(&s).unwrap();
         assert_eq!(back.run_id, "r1");
-        assert_eq!(back.template_key.as_deref(), Some("standard-req"));
         assert_eq!(back.status, RunStatus::Success);
         assert_eq!(back.steps.len(), 1);
     }
 
-    /// 旧 JSON（无 template_key/rework_context/failure_trace 等新字段）必须能反序列化。
+    /// 旧 JSON（无 rework_context/failure_trace 等新字段）必须能反序列化。
     #[test]
     fn run_record_legacy_json_back_compat() {
         let legacy = r#"{
@@ -744,7 +723,6 @@ mod tests {
         }"#;
         let run: RunRecord = serde_json::from_str(legacy).unwrap();
         assert_eq!(run.run_id, "r2");
-        assert!(run.template_key.is_none());
         assert!(run.finished_at.is_none());
         assert!(run.rework_context.is_none());
     }
@@ -754,7 +732,6 @@ mod tests {
         let s = RunSummary {
             run_id: "r1".into(),
             template_id: "t1".into(),
-            template_key: None,
             status: RunStatus::Running,
             created_at: 123,
             finished_at: None,
@@ -764,7 +741,6 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&s).unwrap();
-        assert!(!json.contains("template_key"));
         assert!(!json.contains("finished_at"));
     }
 

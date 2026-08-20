@@ -79,9 +79,7 @@ interface Workflow {
   description: string
   nodes: WorkflowNode[]
   edges?: WorkflowEdge[]
-  template_key?: string | null
   callback_url?: string | null
-  allowed_sources?: string[]
   schedule?: string | null
   entry_node_id?: string
   end_node_ids?: string[]
@@ -477,16 +475,8 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                 </button>
               </div>
 
-              {/* External trigger config */}
+              {/* Trigger & callback config */}
               <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="mb-0.5 block text-[10px] font-medium text-gray-400">{t('wfBuilder.templateKey')}</label>
-                  <input
-                    value={editing.template_key ?? ''}
-                    onChange={e => setEditing(w => w ? { ...w, template_key: e.target.value || null } : w)}
-                    placeholder={t('wfBuilder.templateKeyPlaceholder')}
-                    className="field-input text-[11px] font-mono" />
-                </div>
                 <div>
                   <label className="mb-0.5 block text-[10px] font-medium text-gray-400">{t('wfBuilder.callbackUrl')}</label>
                   <input
@@ -507,17 +497,6 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                     placeholder={t('wfBuilder.schedulePlaceholder')}
                     className={`field-input text-[11px] font-mono ${cronError ? 'border-red-400' : ''}`} />
                   {cronError && <p className="mt-0.5 text-[10px] text-red-500">{t('wfBuilder.cronInvalid')}</p>}
-                </div>
-                <div>
-                  <label className="mb-0.5 block text-[10px] font-medium text-gray-400">{t('wfBuilder.allowedSources')}</label>
-                  <input
-                    value={(editing.allowed_sources ?? []).join(', ')}
-                    onChange={e => {
-                      const arr = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
-                      setEditing(w => w ? { ...w, allowed_sources: arr } : w)
-                    }}
-                    placeholder={t('wfBuilder.allowedSourcesPlaceholder')}
-                    className="field-input text-[11px] font-mono" />
                 </div>
               </div>
 

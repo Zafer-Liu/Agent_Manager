@@ -62,7 +62,6 @@ export type RunTrigger =
 export interface RunSummary {
   runId: string
   templateId: string
-  templateKey?: string
   status: RunStatus
   createdAt: number
   finishedAt?: number
@@ -80,7 +79,6 @@ export interface RunRecord extends RunSummary {
 export interface RawRunSummary {
   run_id: string
   template_id: string
-  template_key?: string
   status: RunStatus
   created_at: number
   finished_at?: number
@@ -160,7 +158,6 @@ export function mapSummary(r: RawRunSummary): RunSummary {
   return {
     runId: r.run_id,
     templateId: r.template_id,
-    templateKey: r.template_key,
     status: r.status,
     createdAt: r.created_at,
     finishedAt: r.finished_at,
@@ -311,7 +308,6 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       get().upsertRunSummary({
         runId: updated.runId,
         templateId: updated.templateId,
-        templateKey: updated.templateKey,
         status: updated.status,
         createdAt: updated.createdAt,
         finishedAt: updated.finishedAt,

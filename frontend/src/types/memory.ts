@@ -15,6 +15,8 @@ export interface MemoryItem {
   memory: string
   memory_type?: string
   durability?: 'session' | 'short_term' | 'long_term'
+  /** 用户手动添加的自定义记忆：只有用户能删改，自动整理会跳过。 */
+  user_defined?: boolean
   last_update_at?: string
   event_time?: string | null
   score?: number | null
@@ -70,18 +72,20 @@ export interface ConversationSearchHit {
   preview: string
 }
 
-/** Global overview distilled from completed conversations across all Agents. */
-export interface WorkspaceSummary {
-  workspace_id: string
-  content: string
-  source_event_count: number
-  updated_at: string
+/** Agent 数据源（转录目录 / MCP 配置）的当前生效路径，支持按设备覆盖。 */
+export interface AgentSourcePathInfo {
+  path: string
+  exists: boolean
+  is_override: boolean
 }
 
-export interface ProfileSummary {
-  content: string
-  source_workspace_count: number
-  updated_at: string
+export interface AgentSourceInfo {
+  id: string
+  label: string
+  supports_hooks: boolean
+  transcript_roots: AgentSourcePathInfo[]
+  default_transcript_roots: string[]
+  mcp_config_path?: string | null
 }
 
 export interface MemoryLayerDocument {
@@ -157,7 +161,7 @@ export interface IngestLog {
   at: string
   agent_id: string
   kind: 'memory' | 'skill'
-  state: 'working' | 'stored' | 'retrying'
+  state: 'working' | 'stored' | 'retrying' | 'failed'
   detail: string
 }
 
@@ -175,7 +179,7 @@ export interface MemoryMcpStatus {
   detail: string
 }
 
-export type MemoryMcpTarget = 'codex_cli' | 'claude_cli' | 'codex_desktop' | 'claude_desktop' | 'qoder' | 'workbuddy'
+export type MemoryMcpTarget = 'codex_cli' | 'claude_cli' | 'codex_desktop' | 'claude_desktop' | 'qoder' | 'workbuddy' | 'minimax' | 'kimi'
 
 export interface IngestStatus {
   enabled: boolean
@@ -202,13 +206,39 @@ export interface OrganizeConversationsResult {
   failure_reasons: string[]
 }
 
-/** A privacy-preserving summary of one external Agent MCP request. */
+/** 「待提取记忆」面板的一行：已完成但尚未成功提炼为记忆的会话。 */
+export interface PendingMemorySession {
+  event_key: string
+  source: string
+  session_id: string
+  occurred_at: string
+  message_count: number
+  l1_state: string
+  error: string | null
+  excerpt: string
+}
+
+/** 面板弹窗展示的完整 sanitized 对话（仅 user/assistant 正文）。 */
+export interface MemoryConversationDetail {
+  event_key: string
+  source: string
+  session_id: string
+  occurred_at: string
+  message_count: number
+  l1_state: string
+  error: string | null
+  conversation_text: string
+}
+
+/** One external Agent memory-injection record (MCP tool or SessionStart hook),
+ *  with the full exchanged content kept in `detail` for replay. */
 export interface McpAccessLog {
   id: number
   occurred_at: string
   client_name: string
   tool_name: string
   summary: string
+  detail?: string | null
   success: boolean
 }
 
@@ -256,6 +286,8 @@ export interface TelemetryUsageAnalytics {
 export interface TelemetryLiveStatus {
   captured_sessions: number
   active_sessions: number
+  /** 活跃会话对应的 Agent 来源（如 claude / codex），无活跃会话时为空。 */
+  active_sources?: string[]
   completed_conversations: number
   organized_memory_conversations: number
   pending_memory_sessions: number

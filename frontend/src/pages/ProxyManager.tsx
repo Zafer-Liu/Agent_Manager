@@ -50,7 +50,7 @@ function copyText(text: string) {
 // 临时分享 Section（Cloudflare Tunnel）
 // ════════════════════════════════════════════════════════════
 
-function TunnelSection({ agents, hookServerPort }: { agents: AgentState[]; hookServerPort: number | null }) {
+function TunnelSection({ agents }: { agents: AgentState[] }) {
   const { t } = useTranslation()
   const [cloudflaredPath, setCloudflaredPath] = useState<string | null>(null)
   const [tunnels, setTunnels] = useState<Record<string, TunnelState>>({})
@@ -87,10 +87,7 @@ function TunnelSection({ agents, hookServerPort }: { agents: AgentState[]; hookS
   const canStart = !!cloudflaredPath
 
   async function startTunnel(agentId: string) {
-    // 阶段四 P1：__hook_server__ 是特殊的隧道目标
-    const port = agentId === '__hook_server__'
-      ? hookServerPort
-      : agents.find(a => a.config.id === agentId)?.config.port
+    const port = agents.find(a => a.config.id === agentId)?.config.port
     if (!port) return
     setTunnels(prev => ({ ...prev, [agentId]: { status: 'connecting', url: '', error: '' } }))
     try {
@@ -163,79 +160,13 @@ function TunnelSection({ agents, hookServerPort }: { agents: AgentState[]; hookS
       )}
 
       {/* Agent 列表 */}
-      {activeAgents.length === 0 && !hookServerPort ? (
+      {activeAgents.length === 0 ? (
         <div className="rounded-xl border border-gray-200 bg-white py-8 text-center text-sm text-gray-400 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-600">
           {t('proxy.noPortAgents')}
         </div>
       ) : (
         <div className="rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900 overflow-hidden">
           <div className="divide-y divide-gray-100 dark:divide-gray-800">
-            {/* Hook Server 隧道条目（阶段四 P1） */}
-            {hookServerPort && (() => {
-              const hookId = '__hook_server__'
-              const tunnel = tunnels[hookId] ?? { status: 'idle', url: '', error: '' }
-              const isConnecting = tunnel.status === 'connecting'
-              const isActive = tunnel.status === 'active'
-              const isError = tunnel.status === 'error'
-              return (
-                <div key={hookId} className="p-4 bg-blue-50/30 dark:bg-blue-900/10">
-                  <div className="flex items-center gap-3">
-                    <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                      isActive ? 'bg-green-100 dark:bg-green-900/30'
-                      : isConnecting ? 'bg-blue-100 dark:bg-blue-900/30'
-                      : isError ? 'bg-red-100 dark:bg-red-900/30'
-                      : 'bg-gray-100 dark:bg-gray-800'
-                    }`}>
-                      {isConnecting
-                        ? <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />
-                        : isActive ? <Wifi className="h-4 w-4 text-green-500" />
-                        : isError ? <WifiOff className="h-4 w-4 text-red-500" />
-                        : <Link className="h-4 w-4 text-gray-400" />}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-800 dark:text-gray-200">Hook Server</span>
-                        <span className="shrink-0 text-xs text-gray-400">:{hookServerPort}</span>
-                        <span className="shrink-0 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">{t('settings.externalTriggers')}</span>
-                      </div>
-                      {isActive && (
-                        <div className="mt-1 flex items-center gap-2">
-                          <span className="font-mono text-xs text-blue-600 dark:text-blue-400 truncate">{tunnel.url}</span>
-                          <button onClick={() => handleCopy(tunnel.url, hookId)}
-                            className="shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300 transition-colors">
-                            {copied === hookId
-                              ? <><CheckCircle className="h-3 w-3 text-green-500" /> {t('common.copied')}</>
-                              : <><Copy className="h-3 w-3" /> {t('common.copy')}</>}
-                          </button>
-                        </div>
-                      )}
-                      {isConnecting && (
-                        <p className="mt-1 text-xs text-blue-500 dark:text-blue-400 animate-pulse">{t('proxy.generating')}</p>
-                      )}
-                      {isError && (
-                        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-red-50 px-3 py-2 text-[11px] leading-relaxed text-red-600 dark:bg-red-900/30 dark:text-red-400">{tunnel.error}</pre>
-                      )}
-                    </div>
-                    <div className="shrink-0">
-                      {isActive ? (
-                        <button onClick={() => stopTunnel(hookId)}
-                          className="flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20 transition-colors">
-                          <Square className="h-3.5 w-3.5" /> {t('common.close')}
-                        </button>
-                      ) : (
-                        <button onClick={() => startTunnel(hookId)}
-                          disabled={isConnecting || !canStart}
-                          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40 transition-colors">
-                          {isConnecting
-                            ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('proxy.connecting')}</>
-                            : <><Play className="h-3.5 w-3.5" /> {t('proxy.generateLink')}</>}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )
-            })()}
             {activeAgents.map(agent => {
               const tunnel = tunnels[agent.config.id] ?? { status: 'idle', url: '', error: '' }
               const isConnecting = tunnel.status === 'connecting'
@@ -346,14 +277,6 @@ export function ProxyManager({ agents }: Props) {
   const [caddyPath, setCaddyPath] = useState<string | null>(null)
   const [isRunning, setIsRunning] = useState(false)
   const [busy, setBusy] = useState(false)
-  // 阶段四 P1：Hook Server 端口（用于 Tunnel 暴露）
-  const [hookServerPort, setHookServerPort] = useState<number | null>(null)
-
-  useEffect(() => {
-    invoke<{ port: number; enabled: boolean }>('get_hook_server_config')
-      .then(c => setHookServerPort(c.enabled ? c.port : null))
-      .catch(() => {})
-  }, [])
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const [caddyfilePreview, setCaddyfilePreview] = useState('')
   const [showPreview, setShowPreview] = useState(false)
@@ -489,7 +412,7 @@ export function ProxyManager({ agents }: Props) {
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
 
         {/* ── 临时分享（主功能）── */}
-        <TunnelSection agents={agents} hookServerPort={hookServerPort} />
+        <TunnelSection agents={agents} />
 
         {/* ── 分隔线 ── */}
         <div className="flex items-center gap-3">

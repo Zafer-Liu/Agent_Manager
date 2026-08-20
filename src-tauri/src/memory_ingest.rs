@@ -23,7 +23,6 @@ use crate::thinking::strip_thinking_blocks;
 /// All harnesses serve the same local user.  Memories must stay portable when
 /// a conversation continues from Codex to Claude or another connected agent.
 const GLOBAL_MEMORY_OWNER: &str = "agent-manager";
-const GLOBAL_OVERVIEW_ID: &str = "all-conversations";
 const ORGANIZE_BATCH_LIMIT: u32 = 10;
 const ORGANIZE_ONE_CONVERSATION_TIMEOUT: Duration = Duration::from_secs(150);
 const IMPORT_MAX_FILES: usize = 100;
@@ -38,8 +37,14 @@ const NATIVE_SESSION_MAX_CHARS: usize = 120_000;
 // This caps only the final profile that is persisted. It must comfortably fit
 // a complete compact Markdown profile; reasoning payloads are removed before
 // this check and are not part of the persisted document.
-const L3_PROFILE_MAX_CHARS: usize = 6_000;
-const L3_PROFILE_TARGET_CHARS: usize = 3_200;
+//
+// L2/L3 预算统一为 10000 cl100k token（与注入侧
+// memory_mcp::MEMORY_LAYER_INJECTION_TOKENS 同源）。字符上限按 3 字符/token
+// 放缩，保证 10000 token 的中英混排内容不会被字符闸误杀。
+const MEMORY_LAYER_TOKEN_BUDGET: usize = 10_000;
+const MEMORY_LAYER_DOC_MAX_CHARS: usize = MEMORY_LAYER_TOKEN_BUDGET * 3;
+const L3_PROFILE_MAX_CHARS: usize = MEMORY_LAYER_DOC_MAX_CHARS;
+const L3_PROFILE_TARGET_CHARS: usize = MEMORY_LAYER_DOC_MAX_CHARS;
 const L3_L1_EVIDENCE_LIMIT: usize = 80;
 
 /// 全局单例（供 agent_http 的 route 无 State 上下文使用）。
@@ -57,6 +62,8 @@ pub fn ingest_store() -> Option<&'static IngestStore> {
 #[derive(Clone, Debug)]
 struct SessionBuffer {
     agent_id: String,
+    /// Hook 来源标识（如 claude / codex），用于在整理日志中显示所属 Agent。
+    source: String,
     messages: Vec<(String, String)>, // (role, content)
     last_active: Instant,
 }
@@ -140,12 +147,12 @@ impl IngestStore {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.push_message(&session_id, &agent_id, "user", &prompt);
+                self.push_message(&session_id, &agent_id, source, "user", &prompt);
             }
             // 工具轨迹属于同一段对话上下文。保留一个有大小上限的摘要，
             // 但绝不在此处提取，统一等待会话 Stop。
             "PostToolUse" => {
-                self.touch_session(&session_id, &agent_id);
+                self.touch_session(&session_id, &agent_id, source);
                 let tool_name = parsed
                     .get("tool_name")
                     .and_then(Value::as_str)
@@ -158,7 +165,7 @@ impl IngestStore {
                     4_000,
                 );
                 let detail = format!("工具 {tool_name}\n输入：{input}\n结果：{output}");
-                self.push_message(&session_id, &agent_id, "tool", &detail);
+                self.push_message(&session_id, &agent_id, source, "tool", &detail);
             }
             // 会话结束 → 冲刷：批量提取记忆。
             "Stop" => {
@@ -171,7 +178,7 @@ impl IngestStore {
                 if let Some(messages) = transcript_replaced {
                     conversation_state = "full";
                     conversation_messages = messages.clone();
-                    self.replace_session_messages(&session_id, &agent_id, messages);
+                    self.replace_session_messages(&session_id, &agent_id, source, messages);
                 } else if let Some(reply) = parsed
                     .get("last_assistant_message")
                     .or_else(|| parsed.get("assistant_message"))
@@ -180,7 +187,7 @@ impl IngestStore {
                 {
                     // Adapters without a readable transcript can still supply
                     // a final assistant response as a useful fallback.
-                    self.push_message(&session_id, &agent_id, "assistant", reply);
+                    self.push_message(&session_id, &agent_id, source, "assistant", reply);
                     conversation_state = "partial";
                     conversation_messages.push(("assistant".to_string(), reply.to_string()));
                 }
@@ -202,7 +209,7 @@ impl IngestStore {
         Ok(json!({"status": "ok"}))
     }
 
-    fn push_message(&self, session_id: &str, agent_id: &str, role: &str, content: &str) {
+    fn push_message(&self, session_id: &str, agent_id: &str, source: &str, role: &str, content: &str) {
         let content = strip_memory_thinking(role, content);
         if content.is_empty() {
             return;
@@ -214,6 +221,7 @@ impl IngestStore {
                 .entry(session_id.to_string())
                 .or_insert_with(|| SessionBuffer {
                     agent_id: agent_id.to_string(),
+                    source: source.to_string(),
                     messages: Vec::new(),
                     last_active: Instant::now(),
                 });
@@ -223,13 +231,14 @@ impl IngestStore {
         }
     }
 
-    fn touch_session(&self, session_id: &str, agent_id: &str) {
+    fn touch_session(&self, session_id: &str, agent_id: &str, source: &str) {
         let mut inner = self.inner.lock().unwrap();
         let buf = inner
             .sessions
             .entry(session_id.to_string())
             .or_insert_with(|| SessionBuffer {
                 agent_id: agent_id.to_string(),
+                source: source.to_string(),
                 messages: Vec::new(),
                 last_active: Instant::now(),
             });
@@ -240,6 +249,7 @@ impl IngestStore {
         &self,
         session_id: &str,
         agent_id: &str,
+        source: &str,
         messages: Vec<(String, String)>,
     ) {
         let messages = messages
@@ -255,6 +265,7 @@ impl IngestStore {
             session_id.to_string(),
             SessionBuffer {
                 agent_id: agent_id.to_string(),
+                source: source.to_string(),
                 messages,
                 last_active: Instant::now(),
             },
@@ -355,10 +366,19 @@ impl IngestStore {
                     agent_id: buf.agent_id.clone(),
                     kind: "memory".into(),
                     state: "stored".into(),
-                    detail: format!(
-                        "{} 已分析完整会话；已写入本地记忆库 {} 条（无需等待记忆服务二次提取）",
-                        provider.name, n
-                    ),
+                    detail: if buf.source.is_empty() {
+                        format!(
+                            "{} 已分析完整会话；已写入本地记忆库 {} 条（无需等待记忆服务二次提取）",
+                            provider.name, n
+                        )
+                    } else {
+                        format!(
+                            "{} 已分析 {} 的完整会话；已写入本地记忆库 {} 条（无需等待记忆服务二次提取）",
+                            provider.name,
+                            crate::agent_sources::agent_label(&buf.source),
+                            n
+                        )
+                    },
                 });
             }
             Err(e) => {
@@ -464,13 +484,16 @@ fn output_language_directive(source: &str) -> &'static str {
     }
 }
 
-/// Only assistant output is filtered: a user may deliberately discuss the
-/// literal marker syntax, while assistant reasoning must never enter L0.
+/// Only assistant output is filtered for thinking: a user may deliberately
+/// discuss the literal marker syntax, while assistant reasoning must never
+/// enter L0.  Injected harness context (system-reminder/meta 等) 对两个角色
+/// 都剥离——它是宿主对模型说的话，不是对话内容。
 fn strip_memory_thinking(role: &str, content: &str) -> String {
+    let cleaned = crate::telemetry_store::strip_injected_context(content);
     if role == "assistant" {
-        strip_thinking_blocks(content)
+        strip_thinking_blocks(&cleaned)
     } else {
-        content.trim().to_string()
+        cleaned.trim().to_string()
     }
 }
 
@@ -767,20 +790,29 @@ pub fn telemetry_backfill_conversations() -> Result<u32, String> {
 /// durable conversation ledger used by Hook traffic. This only stages L1
 /// candidates; model extraction remains governed by the existing explicit
 /// “organize conversations” action and its configured provider.
+/// 转录读取器清洗规则的版本。每次修改结构化/文本清洗规则时递增，
+/// 存量扫描状态会被清空并触发一次全量重扫，已污染的 L0 行随内容寻址
+/// 重录自动修复（同 event_key 覆盖正文、重新进入待提取队列）。
+/// v2：结构化块只保留 text 类；v3：注入包裹剥离下沉到读取器，
+///     保证内容指纹反映清洗后文本（否则指纹不变的旧行永不重录）。
+const TRANSCRIPT_SCANNER_VERSION: i64 = 3;
+
 fn scan_native_transcripts(
     store: &crate::telemetry_store::TelemetryStore,
     retry_failed: bool,
 ) -> Result<u32, String> {
-    let Some(home) = dirs_next::home_dir() else {
-        return Ok(0);
-    };
+    if store
+        .app_setting_get::<i64>("transcript_scanner_version")
+        .unwrap_or(0)
+        != TRANSCRIPT_SCANNER_VERSION
+    {
+        store.reset_transcript_scan_states()?;
+        store.app_setting_set("transcript_scanner_version", &TRANSCRIPT_SCANNER_VERSION)?;
+    }
     let mut imported = 0u32;
-    for (source, root) in [
-        ("codex", home.join(".codex").join("sessions")),
-        ("claude", home.join(".claude").join("projects")),
-        ("qoder", home.join(".qoder").join("projects")),
-        ("workbuddy", home.join(".workbuddy").join("projects")),
-    ] {
+    // 转录根目录来自统一的 Agent 数据源注册表，支持按设备覆盖。
+    for source in crate::agent_sources::AGENT_SOURCE_IDS {
+        for root in crate::agent_sources::transcript_roots(source) {
         let mut pending = vec![root];
         let mut visited = 0usize;
         let mut candidates = Vec::new();
@@ -852,19 +884,13 @@ fn scan_native_transcripts(
             }
             store.record_transcript_scan(source, &path, Some(&session_id), Ok(()));
         }
+        }
     }
     Ok(imported)
 }
 
 fn native_session_id(source: &str, path: &Path) -> Option<String> {
-    let stem = path.file_stem()?.to_str()?.trim();
-    if source == "codex" && stem.len() >= 36 {
-        let suffix = &stem[stem.len() - 36..];
-        if uuid::Uuid::parse_str(suffix).is_ok() {
-            return Some(suffix.to_string());
-        }
-    }
-    (!stem.is_empty()).then_some(stem.to_string())
+    crate::agent_sources::session_id_for_path(source, path)
 }
 
 fn read_native_session(source: &str, path: &Path) -> Result<Vec<(String, String)>, String> {
@@ -873,8 +899,119 @@ fn read_native_session(source: &str, path: &Path) -> Result<Vec<(String, String)
         "claude" => read_claude_session(path),
         "qoder" => read_qoder_session(path),
         "workbuddy" => read_workbuddy_session(path),
+        "minimax" => read_minimax_session(path),
+        "kimi" => read_kimi_session(path),
         _ => Ok(Vec::new()),
     }
+}
+
+/// MiniMax Code 会话位于 `v2/sessions/**/messages.jsonl`，每行
+/// `{message_id, turn_id, message:{role, content:[...]}}`。只保留
+/// user/assistant 的 text 片段；thinking 与工具载荷不进入记忆。
+fn read_minimax_session(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > 16 * 1024 * 1024 {
+        return Ok(Vec::new());
+    }
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut seen = HashSet::new();
+    let mut messages = Vec::new();
+    let mut total_chars = 0usize;
+    for line in BufReader::new(file).lines() {
+        if messages.len() >= NATIVE_SESSION_MAX_MESSAGES || total_chars >= NATIVE_SESSION_MAX_CHARS
+        {
+            break;
+        }
+        let line = line.map_err(|error| error.to_string())?;
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        let Some(role) = message
+            .get("role")
+            .and_then(Value::as_str)
+            .filter(|role| matches!(*role, "user" | "assistant"))
+        else {
+            continue;
+        };
+        // 同一 message_id 可能分多行追加（流式片段），按 message_id 去重。
+        let identity = entry
+            .get("message_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| line.clone());
+        if !seen.insert(identity) {
+            continue;
+        }
+        let text = qoder_transcript_text(message.get("content"));
+        if text.is_empty() {
+            continue;
+        }
+        append_native_message(&mut messages, &mut total_chars, role, text);
+    }
+    Ok(messages)
+}
+
+/// Kimi（Kimi Code / Kimi Work）会话是 `<home>/sessions/**/wire.jsonl`。
+/// 用户消息在 `context.append_message`，助手正文在 loop 事件的
+/// `content.part`（`part.type == "text"`；`think` 不进入记忆）。
+fn read_kimi_session(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > 16 * 1024 * 1024 {
+        return Ok(Vec::new());
+    }
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut messages = Vec::new();
+    let mut total_chars = 0usize;
+    for line in BufReader::new(file).lines() {
+        if messages.len() >= NATIVE_SESSION_MAX_MESSAGES || total_chars >= NATIVE_SESSION_MAX_CHARS
+        {
+            break;
+        }
+        let line = line.map_err(|error| error.to_string())?;
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match entry.get("type").and_then(Value::as_str) {
+            Some("context.append_message") => {
+                let Some(message) = entry.get("message") else {
+                    continue;
+                };
+                if message.get("role").and_then(Value::as_str) != Some("user") {
+                    continue;
+                }
+                let text = qoder_transcript_text(message.get("content"));
+                if text.is_empty() {
+                    continue;
+                }
+                append_native_message(&mut messages, &mut total_chars, "user", text);
+            }
+            Some("context.append_loop_event") => {
+                let event = entry.get("event").cloned().unwrap_or(Value::Null);
+                if event.get("type").and_then(Value::as_str) != Some("content.part") {
+                    continue;
+                }
+                let Some(part) = event.get("part") else {
+                    continue;
+                };
+                if part.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                let Some(text) = part.get("text").and_then(Value::as_str) else {
+                    continue;
+                };
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                append_native_message(&mut messages, &mut total_chars, "assistant", text);
+            }
+            _ => {}
+        }
+    }
+    Ok(messages)
 }
 
 /// Extract only user/assistant text from a Qoder project JSONL. Tool payloads
@@ -926,6 +1063,10 @@ fn read_qoder_session(path: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(messages)
 }
 
+/// 从消息 content 中提取纯文本。结构化块只接受文本类（`text` /
+/// `input_text` / `output_text`）；`tool_use`、`tool_result`、thinking、
+/// 图片等载荷一律不进入 L0——它们是 Agent 的操作细节，不是对话内容。
+/// 带 `tool_use_id` 的无 type 块同样视为工具结果剔除。
 fn qoder_transcript_text(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(text)) => text.trim().to_string(),
@@ -935,11 +1076,26 @@ fn qoder_transcript_text(value: Option<&Value>) -> String {
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n"),
-        Some(Value::Object(object)) => object
-            .get("text")
-            .or_else(|| object.get("content"))
-            .map(|child| qoder_transcript_text(Some(child)))
-            .unwrap_or_default(),
+        Some(Value::Object(object)) => {
+            if object.contains_key("tool_use_id") {
+                return String::new();
+            }
+            if let Some(kind) = object.get("type").and_then(Value::as_str) {
+                if !matches!(kind, "text" | "input_text" | "output_text") {
+                    return String::new();
+                }
+                return object
+                    .get("text")
+                    .or_else(|| object.get("content"))
+                    .map(|text| qoder_transcript_text(Some(text)))
+                    .unwrap_or_default();
+            }
+            object
+                .get("text")
+                .or_else(|| object.get("content"))
+                .map(|child| qoder_transcript_text(Some(child)))
+                .unwrap_or_default()
+        }
         _ => String::new(),
     }
 }
@@ -1319,78 +1475,6 @@ fn now_str() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
-/// Return the latest global memory overview without exposing LLM credentials.
-#[tauri::command]
-pub fn memory_workspace_summary_get(
-    telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
-    _working_dir: Option<String>,
-) -> Result<Option<crate::telemetry_store::WorkspaceSummary>, String> {
-    telemetry.workspace_summary(GLOBAL_OVERVIEW_ID)
-}
-
-/// Distil all recently completed conversations into an on-demand global memory
-/// overview. The user initiates this explicitly, so transcripts are never sent
-/// to the configured extraction model merely because the app opens.
-#[tauri::command]
-pub async fn memory_workspace_summary_refresh(
-    telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
-    _working_dir: Option<String>,
-) -> Result<crate::telemetry_store::WorkspaceSummary, String> {
-    let conversations = telemetry.all_conversations(50)?;
-    if conversations.is_empty() {
-        return Err("尚无已读取的完整对话，无法生成记忆概览".into());
-    }
-    let provider = llm::memory_extraction_provider()?;
-    let source_event_count = conversations.len() as i64;
-    let transcript = truncate_text(&conversations.join("\n\n--- 会话分隔 ---\n\n"), 36_000);
-    let language = output_language_directive(&transcript);
-    let messages = vec![
-        json!({"role": "system", "content": format!("You create a concise memory overview from completed Agent conversations. Include the current goals and state, confirmed decisions, constraints and risks, and next steps. Ignore tool noise, secrets, tokens, and verbatim transcripts; clearly mark uncertainty. {language}")}),
-        json!({"role": "user", "content": format!("已完成对话：\n{transcript}")}),
-    ];
-    let content = llm::complete_text(&provider, &messages).await?;
-    let summary = crate::telemetry_store::WorkspaceSummary {
-        workspace_id: GLOBAL_OVERVIEW_ID.into(),
-        content: truncate_text(&content, 8_000),
-        source_event_count,
-        updated_at: chrono::Utc::now().to_rfc3339(),
-    };
-    telemetry.save_workspace_summary(&summary)?;
-    Ok(summary)
-}
-
-#[tauri::command]
-pub fn memory_profile_summary_get(
-    telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
-) -> Result<Option<crate::telemetry_store::ProfileSummary>, String> {
-    telemetry.profile_summary()
-}
-
-#[tauri::command]
-pub async fn memory_profile_summary_refresh(
-    telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
-) -> Result<crate::telemetry_store::ProfileSummary, String> {
-    let summary = telemetry
-        .workspace_summary(GLOBAL_OVERVIEW_ID)?
-        .ok_or("请先生成记忆概览，再生成长期偏好与约束")?;
-    let provider = llm::memory_extraction_provider()?;
-    let source_workspace_count = summary.source_event_count;
-    let source = summary.content;
-    let language = output_language_directive(&source);
-    let messages = vec![
-        json!({"role":"system","content": format!("You create a durable user profile from project summaries. Retain only stable cross-project work preferences, technical constraints, collaboration habits, and long-term strategy; clearly mark uncertainty. Exclude short-lived tasks, secrets, tokens, and one-project temporary details. {language}")}),
-        json!({"role":"user","content": format!("记忆概览：\n{}", truncate_text(&source, 32_000))}),
-    ];
-    let content = llm::complete_text(&provider, &messages).await?;
-    let profile = crate::telemetry_store::ProfileSummary {
-        content: truncate_text(&content, 6_000),
-        source_workspace_count,
-        updated_at: chrono::Utc::now().to_rfc3339(),
-    };
-    telemetry.save_profile_summary(&profile)?;
-    Ok(profile)
-}
-
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MemoryLayerRunResult {
@@ -1497,7 +1581,7 @@ fn l2_map_messages(evidence: &str) -> Vec<Value> {
 
 fn l2_reduce_messages(parts: &[String]) -> Vec<Value> {
     vec![
-        json!({"role":"system","content":"Create the current L2 short-term working memory from evidence-preserving map summaries. Output ONLY the finished memory document in concise Markdown in the original language, at most 6000 characters. Begin directly with the memory; never describe the task, map summaries, source material, your plan, or reasoning. Organize: Current focus, Confirmed decisions, Constraints/preferences, Open items/risks. Retain source ids in square brackets for every factual bullet. Resolve neither ambiguity nor conflicts: label them explicitly. Exclude routine actions and stale details."}),
+        json!({"role":"system","content":format!("Create the current L2 short-term working memory from evidence-preserving map summaries. Output ONLY the finished memory document in concise Markdown in the original language, at most {MEMORY_LAYER_DOC_MAX_CHARS} characters. Begin directly with the memory; never describe the task, map summaries, source material, your plan, or reasoning. Organize: Current focus, Confirmed decisions, Constraints/preferences, Open items/risks. Retain source ids in square brackets for every factual bullet. Resolve neither ambiguity nor conflicts: label them explicitly. Exclude routine actions and stale details.")}),
         json!({"role":"user","content":format!("Map summaries:\n{}", parts.join("\n\n---\n\n"))}),
     ]
 }
@@ -1735,14 +1819,14 @@ fn is_usable_l3_profile(content: &str, source: &str) -> bool {
 
 fn l3_profile_messages(baseline: &str, evidence: &str, language: &str) -> Vec<Value> {
     vec![
-        json!({"role":"system","content":format!("You write a compact L3 user Profile for long-term reuse across agent sessions. {language}\n\nOutput ONLY the finished categorized Markdown document: no document title, preamble, code fence, approval notice, or explanation. Use 2–4 short category headings in the source language (each as `## Category`), with relevant short bullets below each heading. Use at most 10 factual bullets total, one short sentence per bullet, and stop after the final bullet. The final document MUST be no more than {L3_PROFILE_TARGET_CHARS} characters.\n\nYou receive both L2 working-memory context and filtered direct L1 evidence. Prefer explicit L1 preferences and constraints, using L2 only to corroborate or add durable context. Apply a strict 90-day, cross-project test: retain only an explicit user preference or a hard constraint that would still apply to unrelated future work. Exclude current tasks, project status, change logs, dates, paths, source ids, secrets, model/provider names, endpoints, token budgets, framework APIs, UI conventions, i18n file rules, date-parsing quirks, build/test commands, temporary incidents, and implementation details. If evidence is merely a project decision or current engineering practice, omit it. Do not infer preferences. Clearly label uncertainty instead of guessing.")}),
+        json!({"role":"system","content":format!("You write an L3 user Profile for long-term reuse across agent sessions. The existing published profile in the user message is the AUTHORITATIVE baseline and your most important input: carry its preferences, constraints and decisions forward by default, including any manual edits the user made, and only drop or change an existing item when the new evidence clearly contradicts it. {language}\n\nOutput ONLY the finished categorized Markdown document: no document title, preamble, code fence, approval notice, or explanation. Use 2–6 short category headings in the source language (each as `## Category`), with relevant factual bullets below each heading. Stop after the final bullet. The final document MUST be no more than {L3_PROFILE_TARGET_CHARS} characters.\n\nYou receive both L2 working-memory context and filtered direct L1 evidence. Prefer explicit L1 preferences and constraints, using L2 only to corroborate or add durable context. Apply a strict 90-day, cross-project test: retain only an explicit user preference or a hard constraint that would still apply to unrelated future work. Exclude current tasks, project status, change logs, dates, paths, source ids, secrets, model/provider names, endpoints, token budgets, framework APIs, UI conventions, i18n file rules, date-parsing quirks, build/test commands, temporary incidents, and implementation details. If evidence is merely a project decision or current engineering practice, omit it. Do not infer preferences. Clearly label uncertainty instead of guessing.")}),
         json!({"role":"user","content":format!("Existing published profile (may be empty):\n{baseline}\n\nL2 evidence:\n{evidence}")}),
     ]
 }
 
 fn l3_profile_retry_messages(baseline: &str, evidence: &str, language: &str) -> Vec<Value> {
     vec![
-        json!({"role":"system","content":format!("Write the final long-term L3 Profile now. {language} Output only Markdown with 2–4 `## Category` headings in the source language and concise bullets under them: at most 10 bullets total, one sentence per bullet, no document title, no preamble, no code fence, no explanation. Each bullet must be under 140 characters and the entire final body must be under {L3_PROFILE_TARGET_CHARS} characters. Stop immediately after the final bullet. Use explicit filtered L1 preferences and constraints plus corroborating L2 context. Keep only facts that still apply after 90 days across unrelated projects. Remove model/provider names, endpoints, token budgets, framework/UI/i18n rules, build/test commands, current work, implementation detail, tool lists, status updates, source ids, and anything temporary. Do not infer preferences.")}),
+        json!({"role":"system","content":format!("Write the final long-term L3 Profile now. The existing published profile is the authoritative baseline and your most important input: carry its items forward by default, including manual user edits, and only change them when the new evidence clearly contradicts them. {language} Output only Markdown with 2–6 `## Category` headings in the source language and concise bullets under them: no document title, no preamble, no code fence, no explanation. Each bullet should stay one or two sentences and the entire final body must be under {L3_PROFILE_TARGET_CHARS} characters. Stop immediately after the final bullet. Use explicit filtered L1 preferences and constraints plus corroborating L2 context. Keep only facts that still apply after 90 days across unrelated projects. Remove model/provider names, endpoints, token budgets, framework/UI/i18n rules, build/test commands, current work, implementation detail, tool lists, status updates, source ids, and anything temporary. Do not infer preferences.")}),
         json!({"role":"user","content":format!("Existing published profile (may be empty):\n{baseline}\n\nL2 evidence:\n{evidence}")}),
     ]
 }
@@ -1763,7 +1847,18 @@ pub async fn memory_short_term_consolidate(
     days: Option<i64>,
 ) -> Result<MemoryLayerRunResult, String> {
     let days = days.unwrap_or(30).clamp(1, 90);
-    let evidence = select_l2_evidence(telemetry.recent_l1_memories(days, 500)?);
+    let mut evidence = select_l2_evidence(telemetry.recent_l1_memories(days, 500)?);
+    // 归入 L2 的用户自定义记忆强制进入整理证据：不受时间窗与类型筛选
+    // 影响；L3 层自定义记忆只进 Profile，两者相互独立。
+    let selected_ids = evidence
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for item in telemetry.user_defined_l1_memories_for_scope("l2")? {
+        if !selected_ids.contains(&item.id) {
+            evidence.push(item);
+        }
+    }
     if evidence.is_empty() {
         return Err(format!("最近 {days} 天没有可用于 L2 的已提取会话记忆"));
     }
@@ -1785,7 +1880,7 @@ pub async fn memory_short_term_consolidate(
     }
     // Normalise before truncation.  Otherwise a long exposed planning preamble
     // can consume the L2 character budget and discard the actual memory.
-    content = truncate_text(&content, 6_000);
+    content = truncate_text(&content, MEMORY_LAYER_DOC_MAX_CHARS);
     if content.trim().is_empty() {
         return Err("L2 记忆模型返回空内容，未写入任何数据".into());
     }
@@ -1835,7 +1930,18 @@ pub async fn memory_long_term_profile_draft(
         return Err("请先手动生成 L2 近 30 天工作记忆，再创建 L3 Profile 草案".into());
     }
     let current = telemetry.active_memory_layer_document("l3")?;
-    let l1 = select_l3_l1_evidence(telemetry.local_l1_memory_snapshot()?);
+    let mut l1 = select_l3_l1_evidence(telemetry.local_l1_memory_snapshot()?);
+    // 归入 L3 的用户自定义记忆强制进入 Profile 证据：类型/易变性筛选
+    // 可能把它们挡在外面，但用户手写条目本身就是明确的长期偏好与约束。
+    let selected_ids = l1
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for item in telemetry.user_defined_l1_memories_for_scope("l3")? {
+        if !selected_ids.contains(&item.id) {
+            l1.push(item);
+        }
+    }
     let mut source_references = l2
         .iter()
         .map(|doc| ("l2".to_string(), doc.id.clone()))
@@ -1900,6 +2006,9 @@ pub async fn memory_long_term_profile_draft(
             "L3 Profile 未满足语言、长度或长期记忆格式要求，未保存草案；请稍后重新生成".into(),
         );
     }
+    // 永久写入 MCP 调用提示：确定性追加而非依赖生成模型，重生成后提示
+    // 依然存在；已含标记时 with_l3_mcp_hint 原样返回。
+    let content = crate::memory_mcp::with_l3_mcp_hint(&content);
     let document = telemetry.save_memory_layer_document_with_sources(
         "l3",
         &content,
@@ -1924,12 +2033,24 @@ pub async fn memory_long_term_profile_draft(
 pub fn memory_long_term_profile_publish(
     telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
     document_id: String,
+    content: Option<String>,
 ) -> Result<crate::telemetry_store::MemoryLayerDocument, String> {
-    let document = telemetry.publish_memory_layer_document(&document_id)?;
+    let document = telemetry.publish_memory_layer_document(&document_id, content.as_deref())?;
     if document.layer != "l3" {
         return Err("只能发布 L3 Profile 草案".into());
     }
     Ok(document)
+}
+
+/// 手动编辑已发布的 L2 工作记忆正文：L2 生成即发布、没有发布闸门，
+/// 保存即覆盖当前发布版，下一次注入与 L3 草案立刻生效。
+#[tauri::command]
+pub fn memory_layer_document_update(
+    telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
+    document_id: String,
+    content: String,
+) -> Result<crate::telemetry_store::MemoryLayerDocument, String> {
+    telemetry.update_published_memory_layer_content(&document_id, &content)
 }
 
 #[tauri::command]
@@ -1959,14 +2080,18 @@ pub fn memory_layer_documents(
 /// use the HTTP address here: the hook server port is user configurable.
 const HOOK_MARKER: &str = "X-Agent-Manager-Hook";
 const CLAUDE_SETTINGS: &str = ".claude/settings.json";
-const QODER_SETTINGS: &str = ".qoder/settings.json";
 const CODEX_HOOKS: &str = ".codex/hooks.json";
 const WORKBUDDY_SETTINGS: &str = ".workbuddy/settings.json";
 
 fn agent_settings_path(agent_type: &str) -> Option<PathBuf> {
+    if agent_type == "qoder" {
+        // Qoder 国际版在 ~/.qoder，国内版在 ~/.qoder-cn；由注册表按实际
+        // 活动目录（含用户覆盖）选出配置主目录。
+        return crate::agent_sources::config_home("qoder")
+            .map(|home| home.join("settings.json"));
+    }
     let relative = match agent_type {
         "claude" => CLAUDE_SETTINGS,
-        "qoder" => QODER_SETTINGS,
         "codex" => CODEX_HOOKS,
         "workbuddy" => WORKBUDDY_SETTINGS,
         _ => return None,
@@ -1975,45 +2100,38 @@ fn agent_settings_path(agent_type: &str) -> Option<PathBuf> {
 }
 
 fn hook_command(agent_type: &str) -> Result<String, String> {
-    let config = crate::agent_http::read_hook_server_config();
-    if !config.enabled {
-        return Err("Hook Server 未启用，请先在「外部触发」中启用它".into());
-    }
-
-    // The command is written into a shell configuration file.  Limiting the
-    // token alphabet makes interpolation safe on both cmd.exe and POSIX sh.
-    if let Some(token) = config.auth_token.as_deref() {
-        if !token.is_empty()
-            && !token
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        {
-            return Err(
-                "Hook 鉴权 token 仅支持字母、数字、-、_ 和 .，以避免写入 shell 配置时发生注入"
-                    .into(),
-            );
-        }
-    }
-
     let url = format!(
         "http://127.0.0.1:{}/memory/hook?source={agent_type}",
-        config.port
+        crate::agent_http::AGENT_HTTP_PORT
     );
-    let auth = config
-        .auth_token
-        .filter(|token| !token.is_empty())
-        .map(|token| format!(r#" -H "Authorization: Bearer {token}""#))
-        .unwrap_or_default();
     let marker = format!(r#" -H "{HOOK_MARKER}: 1""#);
 
     if cfg!(windows) {
         Ok(format!(
-            r#"curl.exe -fsS --max-time 5 -X POST "{url}" -H "Content-Type: application/json"{auth} --data-binary "@-" -o NUL{marker}"#
+            r#"curl.exe -fsS --max-time 5 -X POST "{url}" -H "Content-Type: application/json" --data-binary "@-" -o NUL{marker}"#
         ))
     } else {
         Ok(format!(
-            r#"curl -fsS --max-time 5 -X POST '{url}' -H 'Content-Type: application/json'{auth} --data-binary '@-' -o /dev/null{marker}"#
+            r#"curl -fsS --max-time 5 -X POST '{url}' -H 'Content-Type: application/json' --data-binary '@-' -o /dev/null{marker}"#
         ))
+    }
+}
+
+/// SessionStart 注入 hook：拉取共享记忆上下文并写到 stdout。端点已按来源
+/// 返回 Claude 形态的结构化 JSON（hookSpecificOutput.additionalContext），
+/// curl 只需透传，harness 解析后注入模型上下文。应用未运行时 curl 静默
+/// 失败，不阻塞会话启动。URL 携带 source 标识，端点据此把注入计入记忆
+/// 注入摘要。
+fn hook_inject_command(agent_type: &str) -> String {
+    let url = format!(
+        "http://127.0.0.1:{}/memory/context?source={agent_type}",
+        crate::agent_http::AGENT_HTTP_PORT
+    );
+    let marker = format!(r#" -H "{HOOK_MARKER}: 1""#);
+    if cfg!(windows) {
+        format!(r#"curl.exe -fsS --max-time 5 "{url}"{marker}"#)
+    } else {
+        format!(r#"curl -fsS --max-time 5 '{url}'{marker}"#)
     }
 }
 
@@ -2042,14 +2160,21 @@ fn install_command_hooks(agent_type: &str) -> Result<Vec<String>, String> {
     let mut hooks = if hooks.is_object() { hooks } else { json!({}) };
 
     let command = hook_command(agent_type)?;
+    let inject_command = hook_inject_command(agent_type);
     let mut installed = Vec::new();
-    for event in ["UserPromptSubmit", "PostToolUse", "Stop"] {
+    // 出站沉淀（Agent → 本应用）与入站注入（SessionStart → 模型上下文）
+    for (event, command) in [
+        ("UserPromptSubmit", &command),
+        ("PostToolUse", &command),
+        ("Stop", &command),
+        ("SessionStart", &inject_command),
+    ] {
         // 已有的该事件配置保留；若未包含我们的 hook 则追加
         let existing = hooks.get(event).cloned().unwrap_or_else(|| json!([]));
         let contains_ours = serde_json::to_string(&existing)
             .map(|s| s.contains(HOOK_MARKER))
             .unwrap_or(false);
-        if contains_ours {
+        if contains_ours && event != "SessionStart" {
             continue;
         }
         let mut arr = if existing.is_array() {
@@ -2057,6 +2182,15 @@ fn install_command_hooks(agent_type: &str) -> Result<Vec<String>, String> {
         } else {
             vec![]
         };
+        // 注入命令可能随版本演进（例如补充 source 标识）；始终把我们旧版的
+        // SessionStart hook 替换为最新命令，其余事件的已有配置保持不动。
+        if event == "SessionStart" {
+            arr.retain(|item| {
+                serde_json::to_string(item)
+                    .map(|s| !s.contains(HOOK_MARKER))
+                    .unwrap_or(true)
+            });
+        }
         arr.push(json!({
             "hooks": [{"type": "command", "command": command}]
         }));
@@ -2098,7 +2232,7 @@ pub fn memory_hook_uninstall(agent_type: String) -> Result<(), String> {
     if !hooks.is_object() {
         return Ok(());
     }
-    for event in ["UserPromptSubmit", "PostToolUse", "Stop"] {
+    for event in ["UserPromptSubmit", "PostToolUse", "Stop", "SessionStart"] {
         if let Some(arr) = hooks.get_mut(event) {
             if let Some(list) = arr.as_array_mut() {
                 list.retain(|item| {
@@ -2141,7 +2275,7 @@ pub fn memory_hook_status(agent_type: String) -> HookStatus {
                         events: vec![],
                     };
                 };
-                let events = ["UserPromptSubmit", "PostToolUse", "Stop"]
+                let events = ["UserPromptSubmit", "PostToolUse", "Stop", "SessionStart"]
                     .iter()
                     .filter(|e| {
                         settings
@@ -2151,7 +2285,13 @@ pub fn memory_hook_status(agent_type: String) -> HookStatus {
                             .map(|items| {
                                 items.iter().any(|item| {
                                     serde_json::to_string(item)
-                                        .map(|item| item.contains(HOOK_MARKER))
+                                        .map(|item| {
+                                            item.contains(HOOK_MARKER)
+                                                // 旧版注入命令不带 source 标识，无法计入
+                                                // 记忆注入摘要；视为未启用以引导升级。
+                                                && (**e != "SessionStart"
+                                                    || item.contains("memory/context?source="))
+                                        })
                                         .unwrap_or(false)
                                 })
                             })
@@ -2321,6 +2461,110 @@ pub async fn memory_ingest_organize_conversations() -> Result<OrganizeConversati
     Ok(result)
 }
 
+/// 「待提取记忆」面板的会话列表：已完成但尚未成功提炼的会话，
+/// 只带开头摘要，不返回完整对话正文。
+#[tauri::command]
+pub fn memory_pending_l1_sessions(
+    limit: Option<u32>,
+) -> Result<Vec<crate::telemetry_store::PendingMemorySession>, String> {
+    let telemetry = crate::telemetry_store::shared_store().ok_or("本地对话账本尚未初始化")?;
+    telemetry.pending_memory_session_list(limit.unwrap_or(200))
+}
+
+/// 「已整理对话」面板的会话列表：已成功提炼为记忆的完整会话，
+/// 只带开头摘要，不返回完整对话正文。
+#[tauri::command]
+pub fn memory_organized_l1_sessions(
+    limit: Option<u32>,
+) -> Result<Vec<crate::telemetry_store::PendingMemorySession>, String> {
+    let telemetry = crate::telemetry_store::shared_store().ok_or("本地对话账本尚未初始化")?;
+    telemetry.organized_memory_session_list(limit.unwrap_or(200))
+}
+
+/// 面板弹窗用的完整 sanitized 对话正文（user/assistant 轮次）。
+#[tauri::command]
+pub fn memory_l1_conversation_detail(
+    event_key: String,
+) -> Result<crate::telemetry_store::MemoryConversationDetail, String> {
+    let telemetry = crate::telemetry_store::shared_store().ok_or("本地对话账本尚未初始化")?;
+    telemetry
+        .conversation_detail_by_event_key(&event_key)?
+        .ok_or_else(|| "未找到该会话的完整对话记录".to_string())
+}
+
+/// Organize a single staged conversation from the pending panel.  Extraction
+/// still goes through the configured memory model; nothing is written when
+/// the model is unavailable, and the row is marked failed with the reason.
+#[tauri::command]
+pub async fn memory_ingest_organize_session(
+    event_key: String,
+) -> Result<OrganizeConversationsResult, String> {
+    let ingest = ingest_store().ok_or("自动沉淀模块尚未初始化")?;
+    let telemetry = crate::telemetry_store::shared_store().ok_or("本地对话账本尚未初始化")?;
+    let conversation = telemetry
+        .conversation_by_event_key(&event_key)?
+        .ok_or("该会话不在待提取列表中（可能已整理完成）")?;
+    let mut result = OrganizeConversationsResult {
+        attempted: 1,
+        succeeded: 0,
+        failed: 0,
+        failure_reasons: Vec::new(),
+    };
+    let mut last_error = String::new();
+    let mut stored = false;
+    for retry in 0..=1 {
+        ingest.log(IngestLog {
+            at: now_str(),
+            agent_id: GLOBAL_MEMORY_OWNER.into(),
+            kind: "memory".into(),
+            state: "working".into(),
+            detail: format!("正在提取单个会话要点（第 {}/2 次）", retry + 1),
+        });
+        match tokio::time::timeout(
+            ORGANIZE_ONE_CONVERSATION_TIMEOUT,
+            extract_l1_conversation(&conversation.conversation_text),
+        )
+        .await
+        {
+            Ok(Ok(candidates)) => {
+                let count =
+                    telemetry.store_typed_l1_memories(&conversation.event_key, &candidates)?;
+                crate::memory_backend::queue_semantic_l1_index(
+                    candidates.iter().map(|item| item.content.clone()).collect(),
+                );
+                result.succeeded = 1;
+                stored = true;
+                ingest.log(IngestLog {
+                    at: now_str(),
+                    agent_id: GLOBAL_MEMORY_OWNER.into(),
+                    kind: "memory".into(),
+                    state: "stored".into(),
+                    detail: format!("单会话整理完成：写入 {count} 条记忆"),
+                });
+                break;
+            }
+            Err(_) => {
+                last_error = format!(
+                    "记忆模型在 {} 秒内未完成",
+                    ORGANIZE_ONE_CONVERSATION_TIMEOUT.as_secs()
+                )
+            }
+            Ok(Err(error)) => last_error = error,
+        }
+        if retry < 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+    if !stored {
+        telemetry.set_l1_failure(&conversation.event_key, &last_error)?;
+        result.failed = 1;
+        result
+            .failure_reasons
+            .push(format!("{}：{}", conversation.event_key, last_error));
+    }
+    Ok(result)
+}
+
 /// Native L1 storage is the reliable source of completed-conversation memory.
 /// The optional semantic service remains available for legacy/hand-written
 /// items, but its failure must never make captured conversations disappear.
@@ -2372,6 +2616,23 @@ pub fn local_memory_delete(
     id: String,
 ) -> Result<(), String> {
     telemetry.delete_local_l1_memory(&id)
+}
+
+/// 用户手动添加自定义长期记忆：固定 long_term 并标记 user_defined，
+/// 自动整理与 L1 重建都会跳过它，只有用户能在面板删改；scope 指定
+/// 归属层级（l2 工作记忆 / l3 长期 Profile，默认 l3），两层相互独立。
+#[tauri::command]
+pub fn local_memory_add_user(
+    telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
+    content: String,
+    memory_type: Option<String>,
+    scope: Option<String>,
+) -> Result<crate::telemetry_store::LocalMemory, String> {
+    telemetry.add_user_defined_l1_memory(
+        &content,
+        memory_type.as_deref().unwrap_or("fact"),
+        scope.as_deref().unwrap_or("l3"),
+    )
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2454,6 +2715,7 @@ mod tests {
                 durability: "short_term".into(),
                 source: "codex".into(),
                 session_id: session_id.into(),
+                user_defined: false,
                 event_time: Some("2026-08-16T00:00:00Z".into()),
                 created_at: "2026-08-16T00:00:00Z".into(),
                 updated_at: "2026-08-16T00:00:00Z".into(),
@@ -2675,5 +2937,41 @@ mod tests {
         for path in [claude, codex, workbuddy] {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn qoder_reader_drops_tool_calls_results_and_thinking_blocks() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-manager-qoder-clean-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let rows = [
+            // 真实用户消息：纯字符串 content。
+            serde_json::json!({"type":"user", "uuid":"u-1", "message":{"role":"user", "content":"记忆中心只保留对话"}}),
+            // 工具调用：type=tool_use，携带完整参数 JSON。
+            serde_json::json!({"type":"assistant", "uuid":"a-1", "message":{"role":"assistant", "content":[{"type":"tool_use", "id":"call_1", "name":"Bash", "input":{"command":"secret command"}}]}}),
+            // 助手思考块。
+            serde_json::json!({"type":"assistant", "uuid":"a-2", "message":{"role":"assistant", "content":[{"type":"thinking", "thinking":"secret reasoning"}]}}),
+            // 助手正文。
+            serde_json::json!({"type":"assistant", "uuid":"a-3", "message":{"role":"assistant", "content":[{"type":"text", "text":"好的，只保留用户与回复。"}]}}),
+            // 工具结果：伪装成 user，带 tool_use_id / type=tool_result。
+            serde_json::json!({"type":"user", "uuid":"u-2", "message":{"role":"user", "content":[{"type":"tool_result", "tool_use_id":"call_1", "is_error":false, "content":"Command completed. secret output"}]}}),
+        ];
+        std::fs::write(
+            &path,
+            rows.iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            read_qoder_session(&path).unwrap(),
+            vec![
+                ("user".into(), "记忆中心只保留对话".into()),
+                ("assistant".into(), "好的，只保留用户与回复。".into()),
+            ]
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

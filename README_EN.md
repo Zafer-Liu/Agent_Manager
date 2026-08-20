@@ -47,6 +47,7 @@
   - [MCP Agent Tool Conversation](#mcp)
   - [Agent Publishing and Temporary Sharing](#share)
   - [Port Manager](#ports)
+- [Memory Center](#memory)
 - [Installation](#install)
 - [Quick Start](#quickstart)
 - [LLM Configuration](#llm-config)
@@ -289,6 +290,49 @@ View all ports currently listening on your machine.
 
 ---
 
+<a id="memory"></a>
+
+## 7️⃣ Memory Center — Cross-Agent Layered Memory
+
+Let every Agent remember your preferences, decisions and current focus. The Memory Center extracts memories from your local coding agents automatically, organizes them in layers and injects them back into new sessions — **one shared brain for all your agents**.
+
+### 🧬 Layered memory model (L1–L3)
+
+| Layer | Name | Source | Role |
+|-------|------|--------|------|
+| L1 | Searchable memories | The model extracts facts / decisions / constraints / preferences per completed conversation | Semantic recall on demand |
+| L2 | 30-day working memory | One-click consolidation of recent L1 evidence | Injected as current working context |
+| L3 | Long-term Profile | Drafted from published L2, injected only after human approval | Stable long-term preferences & constraints |
+
+### 📥 Automatic collection (Agent → memory)
+
+- Supports Codex, Claude Code, Qoder, WorkBuddy, MiniMax Code and Kimi via hooks or local transcript scanning
+- Conversations land in a local SQLite ledger first and are extracted asynchronously — nothing is lost offline, and failed sessions can be retried manually
+
+### ✍️ Custom memories
+
+- Hand-write memories under either the working-memory or the long-term-Profile card; **the two layers are fully independent**, each with its own list, edit and delete
+- Always delivered with consolidation and injection; only you can edit or delete them — automatic cleanup never touches them
+
+### 🧹 Cleanup & deduplication
+
+- Local semantic candidates are generated in chunks with live progress; the adjudication budget adapts automatically, so large libraries finish completely
+- A restorable rollback checkpoint keeps duplicate deletions safe
+
+### 💉 Memory injection (memory → Agent, two channels)
+
+| Channel | How it works | Best for |
+|---------|--------------|----------|
+| Session-start injection | Pulls L3 + L2 automatically on SessionStart, no tool call needed | Hook-capable agents get context from the first message |
+| Shared memory MCP | Agents call `recall_memory` for on-demand semantic search | Task-scoped retrieval with bounded context size |
+
+### 📊 Token usage & shared Skills
+
+- Aggregates real input / output / cache usage from each agent's local transcripts, aligned with provider billing
+- Collects each agent's `SKILL.md` into a shared Skill library, syncing new / updated / conflicting entries after a hash-based preview
+
+---
+
 <a id="install"></a>
 
 # ⚙️ Installation
@@ -385,6 +429,14 @@ Click **Test Connection**. A green status means the configuration is valid.
 | DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
 | Any compatible API | Custom | Custom |
+
+**Local models (Ollama):**
+
+The LLM Settings page includes a built-in **Ollama Local Models** module:
+
+1. Make sure Ollama is running locally (default `http://localhost:11434`, configurable)
+2. Click **Test Connection** to list the pulled local models (parameter size / quantization / disk size)
+3. Click **Add** on a model to register it as a custom provider automatically — ready to test or set as the memory extraction model
 
 ---
 

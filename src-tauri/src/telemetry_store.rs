@@ -61,6 +61,9 @@ pub struct TelemetryUsageRefresh {
 pub struct TelemetryLiveStatus {
     pub captured_sessions: i64,
     pub active_sessions: i64,
+    /// Distinct adapter sources behind `active_sessions`, e.g. `["claude"]`.
+    /// Empty when no session is currently active.
+    pub active_sources: Vec<String>,
     pub completed_conversations: i64,
     pub organized_memory_conversations: i64,
     pub pending_memory_sessions: i64,
@@ -161,6 +164,36 @@ pub struct PendingConversation {
     pub conversation_text: String,
 }
 
+/// 「待提取记忆」面板的一行：已完成但尚未成功提炼为记忆的会话。
+/// 只暴露 sanitized 对话的开头摘要，不返回完整对话正文。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PendingMemorySession {
+    pub event_key: String,
+    pub source: String,
+    pub session_id: String,
+    pub occurred_at: String,
+    pub message_count: i64,
+    pub l1_state: String,
+    pub error: Option<String>,
+    pub excerpt: String,
+}
+
+/// 面板弹窗展示的完整对话：仅 sanitized 的 user/assistant 正文，
+/// 工具载荷从进入账本时就已被剔除。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MemoryConversationDetail {
+    pub event_key: String,
+    pub source: String,
+    pub session_id: String,
+    pub occurred_at: String,
+    pub message_count: i64,
+    pub l1_state: String,
+    pub error: Option<String>,
+    pub conversation_text: String,
+}
+
 /// A bounded L0 conversation candidate used as a keyword-recall fallback.
 /// It intentionally contains only the original user/assistant transcript,
 /// never raw tool payloads.
@@ -185,6 +218,8 @@ pub struct LocalMemory {
     pub memory: String,
     pub memory_type: String,
     pub durability: String,
+    /// 用户手动添加的自定义记忆：只有用户能删改，自动整理/重建必须跳过。
+    pub user_defined: bool,
     pub last_update_at: String,
     pub event_time: Option<String>,
     pub score: Option<f64>,
@@ -201,7 +236,7 @@ pub struct L1MemoryCandidate {
     pub durability: String,
 }
 
-fn normalize_l1_memory_type(value: &str) -> &'static str {
+pub(crate) fn normalize_l1_memory_type(value: &str) -> &'static str {
     match value.trim().to_ascii_lowercase().as_str() {
         "summary" => "summary",
         "fact" | "conversation" => "fact",
@@ -210,6 +245,16 @@ fn normalize_l1_memory_type(value: &str) -> &'static str {
         "preference" | "preference_candidate" => "preference_candidate",
         "open_item" => "open_item",
         _ => "fact",
+    }
+}
+
+/// 用户自定义记忆的归属层级：按 id 前缀判定，`local-user-l2:` 属于
+/// 工作记忆；`local-user-l3:` 与旧版 `local-user:` 属于长期 Profile。
+pub(crate) fn user_defined_memory_scope(id: &str) -> &'static str {
+    if id.starts_with("local-user-l2:") {
+        "l2"
+    } else {
+        "l3"
     }
 }
 
@@ -279,26 +324,10 @@ pub struct LocalMemorySnapshot {
     pub durability: String,
     pub source: String,
     pub session_id: String,
+    /// 用户手动添加的自定义记忆：只有用户能删改，自动整理/重建必须跳过。
+    pub user_defined: bool,
     pub event_time: Option<String>,
     pub created_at: String,
-    pub updated_at: String,
-}
-
-/// A global overview distilled from all completed conversations.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct WorkspaceSummary {
-    pub workspace_id: String,
-    pub content: String,
-    pub source_event_count: i64,
-    pub updated_at: String,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ProfileSummary {
-    pub content: String,
-    pub source_workspace_count: i64,
     pub updated_at: String,
 }
 
@@ -331,9 +360,11 @@ pub struct MemoryImportance {
     pub updated_at: String,
 }
 
-/// Privacy-preserving audit record for a connected Agent's shared-memory MCP
-/// access.  It records the operation and outcome, never the returned memory
-/// content or the Agent's original task prompt.
+/// Audit record for a connected Agent's memory injection (shared-memory MCP
+/// tools and SessionStart hook injections).  By explicit product decision the
+/// ledger keeps the full exchanged content (query arguments, returned memory
+/// text, Skill bodies, injected context) in `detail`, so the「记忆注入摘要」
+/// panel can replay exactly what entered or left the memory store.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct McpAccessLog {
@@ -342,6 +373,7 @@ pub struct McpAccessLog {
     pub client_name: String,
     pub tool_name: String,
     pub summary: String,
+    pub detail: Option<String>,
     pub success: bool,
 }
 
@@ -426,6 +458,7 @@ impl TelemetryStore {
                durability TEXT NOT NULL DEFAULT 'short_term',
                source TEXT NOT NULL,
                session_id TEXT NOT NULL,
+               user_defined INTEGER NOT NULL DEFAULT 0,
                event_time TEXT,
                created_at TEXT NOT NULL,
                updated_at TEXT NOT NULL,
@@ -437,7 +470,19 @@ impl TelemetryStore {
                client_name TEXT NOT NULL,
                tool_name TEXT NOT NULL,
                summary TEXT NOT NULL,
+               detail TEXT,
                success INTEGER NOT NULL DEFAULT 1
+             );
+             -- 对话整理记录（沉淀活动日志）与对话接收记录一样持久化，
+             -- 应用重启后仍可回看；只保留最近 200 条防止无限增长。
+             CREATE TABLE IF NOT EXISTS ingest_logs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               occurred_at TEXT NOT NULL,
+               display_time TEXT NOT NULL,
+               agent_id TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               state TEXT NOT NULL,
+               detail TEXT NOT NULL
              );
              -- Application-owned configuration is kept with the durable
              -- memory/telemetry ledger.  Values stay JSON so settings can
@@ -497,10 +542,31 @@ impl TelemetryStore {
         add_column_if_missing(&conn, "conversation_text", "TEXT")?;
         add_column_if_missing(&conn, "l1_state", "TEXT NOT NULL DEFAULT 'unavailable'")?;
         add_column_if_missing(&conn, "l1_error_detail", "TEXT")?;
+        // mcp_access_logs 增加 detail 列：记忆注入摘要需要回放完整内容
+        // （查询参数、返回的记忆正文、Skill 正文、注入上下文）。
+        let access_log_has_detail = conn
+            .prepare("PRAGMA table_info(mcp_access_logs)")
+            .map_err(|e| e.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|name| name == "detail");
+        if !access_log_has_detail {
+            conn.execute_batch("ALTER TABLE mcp_access_logs ADD COLUMN detail TEXT")
+                .map_err(|e| e.to_string())?;
+        }
         add_local_memory_column_if_missing(
             &conn,
             "durability",
             "TEXT NOT NULL DEFAULT 'short_term'",
+        )?;
+        // 用户自定义记忆标记：旧库升级后默认 0（自动提取），仅手动添加置 1。
+        add_local_memory_column_if_missing(
+            &conn,
+            "user_defined",
+            "INTEGER NOT NULL DEFAULT 0",
         )?;
         // Older releases created one TranscriptSync event for every append to
         // the same native session. Keep only the newest revision's memories;
@@ -585,6 +651,17 @@ impl TelemetryStore {
             }
             Some((_, _, state)) => state == "failed" && retry_failed,
         }
+    }
+
+    /// 读取器清洗规则升级后，旧扫描状态会让已污染的 L0 行永远不被重读；
+    /// 清空全部扫描状态可强制一次全量重扫（内容寻址保证幂等）。
+    pub fn reset_transcript_scan_states(&self) -> Result<(), String> {
+        self.conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?
+            .execute("DELETE FROM transcript_scan_states", [])
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn record_transcript_scan(
@@ -704,14 +781,16 @@ impl TelemetryStore {
     /// Attach the completed conversation to the exact Stop receipt already
     /// written by `record_hook`.  Keeping it in the local event ledger makes
     /// it visible even when the memory engine is unavailable or rejects the
-    /// later extraction request.
+    /// later extraction request.  Returns the anchored `event_key` so the
+    /// extraction pipeline can write memories against this exact row instead
+    /// of re-querying by session_id.
     pub fn record_conversation(
         &self,
         source: &str,
         payload: &Value,
         state: &str,
         messages: &[(String, String)],
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let serialized = serde_json::to_string(payload).map_err(|e| e.to_string())?;
         let session_id =
             get_str(payload, &["session_id", "conversation_id", "thread_id"]).unwrap_or("unknown");
@@ -760,7 +839,7 @@ impl TelemetryStore {
                 ).map_err(|e| e.to_string())?;
             }
         }
-        Ok(())
+        Ok(event_key)
     }
 
     /// Retain a conversation discovered directly from a local transcript, so
@@ -818,7 +897,7 @@ impl TelemetryStore {
             return Ok(false);
         }
         self.record_hook(source, &payload)?;
-        self.record_conversation(source, &payload, "full", messages)?;
+        let _ = self.record_conversation(source, &payload, "full", messages)?;
         let serialized = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
         let conversation_text = format_conversation(messages);
         let mut conn = self
@@ -900,24 +979,170 @@ impl TelemetryStore {
         Ok(())
     }
 
-    pub fn set_l1_failure_for_session(&self, session_id: &str, error: &str) -> Result<(), String> {
+    /// List complete conversations still waiting for memory extraction, for
+    /// the「待提取记忆」面板。Failed sessions sort first so users see what
+    /// needs attention; only a short sanitized excerpt leaves the ledger.
+    pub fn pending_memory_session_list(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<PendingMemorySession>, String> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
-        let event_key = conn
+        let mut statement = conn.prepare(
+            "SELECT event_key, source, session_id, occurred_at, conversation_message_count,
+                    l1_state, l1_error_detail, substr(conversation_text, 1, 160)
+               FROM agent_events
+              WHERE conversation_state = 'full'
+                AND l1_state IN ('failed', 'retrying', 'pending')
+                AND conversation_text IS NOT NULL AND conversation_text != ''
+              ORDER BY CASE l1_state WHEN 'failed' THEN 0 WHEN 'retrying' THEN 1 ELSE 2 END,
+                       id DESC LIMIT ?1",
+        ).map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([limit.min(500)], |row| {
+                Ok(PendingMemorySession {
+                    event_key: row.get(0)?,
+                    source: row.get(1)?,
+                    session_id: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                    message_count: row.get(4)?,
+                    l1_state: row.get(5)?,
+                    error: row.get(6)?,
+                    excerpt: row.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// List complete conversations already organized into L1 memories, for
+    /// the「已整理对话」面板。Newest first; only a short sanitized excerpt
+    /// leaves the ledger, same as the pending list.
+    pub fn organized_memory_session_list(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<PendingMemorySession>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut statement = conn.prepare(
+            "SELECT event_key, source, session_id, occurred_at, conversation_message_count,
+                    l1_state, l1_error_detail, substr(conversation_text, 1, 160)
+               FROM agent_events
+              WHERE conversation_state = 'full'
+                AND l1_state = 'stored'
+                AND conversation_text IS NOT NULL AND conversation_text != ''
+              ORDER BY id DESC LIMIT ?1",
+        ).map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([limit.min(500)], |row| {
+                Ok(PendingMemorySession {
+                    event_key: row.get(0)?,
+                    source: row.get(1)?,
+                    session_id: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                    message_count: row.get(4)?,
+                    l1_state: row.get(5)?,
+                    error: row.get(6)?,
+                    excerpt: row.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// Load one staged conversation for a single-session organize action.
+    pub fn conversation_by_event_key(
+        &self,
+        event_key: &str,
+    ) -> Result<Option<PendingConversation>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.query_row(
+            "SELECT event_key, conversation_text FROM agent_events
+              WHERE event_key = ?1 AND conversation_state = 'full'
+                AND l1_state IN ('failed', 'retrying', 'pending')
+                AND conversation_text IS NOT NULL AND conversation_text != ''",
+            [event_key],
+            |row| {
+                Ok(PendingConversation {
+                    event_key: row.get(0)?,
+                    conversation_text: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// Full sanitized conversation for the pending panel's detail dialog.
+    /// Any completed conversation may be viewed, including rows already
+    /// organized, so an open dialog never breaks when extraction succeeds.
+    pub fn conversation_detail_by_event_key(
+        &self,
+        event_key: &str,
+    ) -> Result<Option<MemoryConversationDetail>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.query_row(
+            "SELECT event_key, source, session_id, occurred_at, conversation_message_count,
+                    l1_state, l1_error_detail, conversation_text
+               FROM agent_events
+              WHERE event_key = ?1 AND conversation_state = 'full'
+                AND conversation_text IS NOT NULL AND conversation_text != ''",
+            [event_key],
+            |row| {
+                Ok(MemoryConversationDetail {
+                    event_key: row.get(0)?,
+                    source: row.get(1)?,
+                    session_id: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                    message_count: row.get(4)?,
+                    l1_state: row.get(5)?,
+                    error: row.get(6)?,
+                    conversation_text: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn set_l1_failure_for_session(&self, session_id: &str, error: &str) -> Result<(), String> {
+        let event_key = self.latest_full_event_key_for_session(session_id)?;
+        if let Some(event_key) = event_key {
+            self.set_l1_failure(&event_key, error)?;
+        }
+        Ok(())
+    }
+
+    /// 找到该会话最近一次完整会话记录的锚点。提取结果必须锚定到这一行，
+    /// 而不是按 session_id 盲查后直接报错。
+    pub fn latest_full_event_key_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, String> {
+        self.conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?
             .query_row(
                 "SELECT event_key FROM agent_events WHERE session_id = ?1 AND conversation_state = 'full' ORDER BY id DESC LIMIT 1",
                 [session_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
-            .map_err(|error| error.to_string())?;
-        drop(conn);
-        if let Some(event_key) = event_key {
-            self.set_l1_failure(&event_key, error)?;
-        }
-        Ok(())
+            .map_err(|error| error.to_string())
     }
 
     pub fn store_typed_l1_memories(
@@ -989,21 +1214,17 @@ impl TelemetryStore {
         Ok(written)
     }
 
+    /// Session-level variant of [`store_typed_l1_memories`]: anchors the
+    /// session to its latest full conversation receipt before writing, so the
+    /// hook-driven ingest path never stores memory against a stale anchor.
     pub fn store_typed_l1_memories_for_session(
         &self,
         session_id: &str,
         candidates: &[L1MemoryCandidate],
     ) -> Result<usize, String> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| "telemetry store lock poisoned".to_string())?;
-        let event_key = conn.query_row(
-            "SELECT event_key FROM agent_events WHERE session_id = ?1 AND conversation_state = 'full' ORDER BY id DESC LIMIT 1",
-            [session_id],
-            |row| row.get::<_, String>(0),
-        ).map_err(|error| format!("未找到会话结束记录：{error}"))?;
-        drop(conn);
+        let event_key = self
+            .latest_full_event_key_for_session(session_id)?
+            .ok_or_else(|| "未找到该会话的完整对话记录，无法写入 L1".to_string())?;
         self.store_typed_l1_memories(&event_key, candidates)
     }
 
@@ -1070,7 +1291,7 @@ impl TelemetryStore {
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let mut statement = conn
             .prepare(
-                "SELECT id, memory, memory_type, durability, updated_at, event_time FROM local_memory_items
+                "SELECT id, memory, memory_type, durability, user_defined, updated_at, event_time FROM local_memory_items
               ORDER BY updated_at DESC LIMIT ?1",
             )
             .map_err(|e| e.to_string())?;
@@ -1081,8 +1302,9 @@ impl TelemetryStore {
                     memory: row.get(1)?,
                     memory_type: row.get(2)?,
                     durability: row.get(3)?,
-                    last_update_at: row.get(4)?,
-                    event_time: row.get(5)?,
+                    user_defined: row.get::<_, i64>(4)? != 0,
+                    last_update_at: row.get(5)?,
+                    event_time: row.get(6)?,
                     score: None,
                 })
             })
@@ -1122,10 +1344,13 @@ impl TelemetryStore {
             .lock()
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // 用户自定义记忆只有用户能删改：L1 重建只清理自动提取的条目。
         let cleared_l1 = tx
-            .query_row("SELECT COUNT(*) FROM local_memory_items", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM local_memory_items WHERE user_defined = 0",
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| e.to_string())?;
         let cleared_derived_documents = tx
             .query_row("SELECT COUNT(*) FROM memory_layer_documents", [], |row| {
@@ -1136,10 +1361,14 @@ impl TelemetryStore {
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM memory_layer_documents", [])
             .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM local_memory_items", [])
+        tx.execute("DELETE FROM local_memory_items WHERE user_defined = 0", [])
             .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM memory_importance", [])
-            .map_err(|e| e.to_string())?;
+        // 保留用户自定义条目的重要度记录，其余随被清理的记忆一并删除。
+        tx.execute(
+            "DELETE FROM memory_importance WHERE memory_id NOT IN (SELECT id FROM local_memory_items)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
         // These are legacy compatibility mirrors/fallbacks. Leaving them
         // behind would inject pre-reset context while the new L1 library is
         // empty, which defeats a clean validation run.
@@ -1179,7 +1408,7 @@ impl TelemetryStore {
             .lock()
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let mut statement = conn.prepare(
-            "SELECT id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, event_time, created_at, updated_at
+            "SELECT id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, user_defined, event_time, created_at, updated_at
                FROM local_memory_items ORDER BY updated_at DESC",
         ).map_err(|e| e.to_string())?;
         let rows = statement
@@ -1193,9 +1422,10 @@ impl TelemetryStore {
                     durability: row.get(5)?,
                     source: row.get(6)?,
                     session_id: row.get(7)?,
-                    event_time: row.get(8)?,
-                    created_at: row.get(9)?,
-                    updated_at: row.get(10)?,
+                    user_defined: row.get::<_, i64>(8)? != 0,
+                    event_time: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1217,7 +1447,7 @@ impl TelemetryStore {
             .lock()
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let mut statement = conn.prepare(
-            "SELECT id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, event_time, created_at, updated_at
+            "SELECT id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, user_defined, event_time, created_at, updated_at
                FROM local_memory_items
               WHERE COALESCE(event_time, updated_at) >= ?1
               ORDER BY COALESCE(event_time, updated_at) DESC
@@ -1234,9 +1464,10 @@ impl TelemetryStore {
                     durability: row.get(5)?,
                     source: row.get(6)?,
                     session_id: row.get(7)?,
-                    event_time: row.get(8)?,
-                    created_at: row.get(9)?,
-                    updated_at: row.get(10)?,
+                    user_defined: row.get::<_, i64>(8)? != 0,
+                    event_time: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1373,7 +1604,14 @@ impl TelemetryStore {
 
     /// Publishing L3 is the only operation allowed to replace the Profile
     /// used by MCP initialization. Drafts remain inert and reversible.
-    pub fn publish_memory_layer_document(&self, id: &str) -> Result<MemoryLayerDocument, String> {
+    /// 发布 L3 草案。`content_override` 携带用户在面板里编辑后的正文：
+    /// 编辑本身不单独持久化（无版本/无中间保存），仅在发布这一刻覆盖
+    /// 草案内容并随发布落盘。
+    pub fn publish_memory_layer_document(
+        &self,
+        id: &str,
+        content_override: Option<&str>,
+    ) -> Result<MemoryLayerDocument, String> {
         let mut conn = self
             .conn
             .lock()
@@ -1389,6 +1627,13 @@ impl TelemetryStore {
         if layer != "l3" {
             return Err("只有 L3 Profile 草案需要人工发布".into());
         }
+        if let Some(content) = content_override.map(str::trim).filter(|text| !text.is_empty()) {
+            tx.execute(
+                "UPDATE memory_layer_documents SET content = ?1 WHERE id = ?2",
+                params![content, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         let now = chrono::Utc::now().to_rfc3339();
         tx.execute("UPDATE memory_layer_documents SET state = 'archived' WHERE layer = ?1 AND scope = 'global' AND state = 'published'", [&layer]).map_err(|e| e.to_string())?;
         tx.execute("UPDATE memory_layer_documents SET state = 'published', published_at = ?1 WHERE id = ?2", params![now, id]).map_err(|e| e.to_string())?;
@@ -1403,17 +1648,58 @@ impl TelemetryStore {
         Ok(document)
     }
 
-    /// Remove an un-published L3 draft. Published and archived Profiles are
-    /// intentionally excluded so the active MCP context cannot be removed by
-    /// the draft-management UI.
+    /// 手动编辑已发布的层级记忆文档正文（目前仅 L2 工作记忆走这条路径：
+    /// L2 生成即发布、没有草案发布闸门，编辑确认后直接覆盖当前发布版，
+    /// 下一次注入与 L3 草案立刻使用新内容；同步刷新 token_estimate）。
+    pub fn update_published_memory_layer_content(
+        &self,
+        id: &str,
+        content: &str,
+    ) -> Result<MemoryLayerDocument, String> {
+        let content = strip_thinking_blocks(content);
+        if content.trim().is_empty() {
+            return Err("记忆内容不能为空".into());
+        }
+        let token_estimate = estimate_transcript_tokens(&content);
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let updated = conn
+            .execute(
+                "UPDATE memory_layer_documents SET content = ?1, token_estimate = ?2 WHERE id = ?3 AND state = 'published'",
+                params![content, token_estimate, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("未找到可编辑的已发布记忆文档".into());
+        }
+        conn.query_row(
+            "SELECT id, layer, scope, content, state, token_estimate, source_count, window_start, window_end, created_at, published_at
+               FROM memory_layer_documents WHERE id = ?1", [id], |row| Ok(MemoryLayerDocument {
+                id: row.get(0)?, layer: row.get(1)?, scope: row.get(2)?, content: row.get(3)?, state: row.get(4)?, token_estimate: row.get(5)?, source_count: row.get(6)?, window_start: row.get(7)?, window_end: row.get(8)?, created_at: row.get(9)?, published_at: row.get(10)?,
+            }),
+        ).map_err(|e| e.to_string())
+    }
+
+    /// Remove an un-published L3 document: drafts plus archived historical
+    /// versions (e.g. leftovers from manual injection tests). Published
+    /// Profiles are intentionally excluded so the active MCP context cannot
+    /// be removed by the draft-management UI.
     pub fn delete_l3_draft(&self, id: &str) -> Result<(), String> {
-        let changed = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?.execute(
-            "DELETE FROM memory_layer_documents WHERE id = ?1 AND layer = 'l3' AND state = 'draft'",
+        let mut conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let changed = tx.execute(
+            "DELETE FROM memory_layer_documents WHERE id = ?1 AND layer = 'l3' AND state IN ('draft', 'archived')",
             [id],
         ).map_err(|e| e.to_string())?;
         if changed == 0 {
-            return Err("未找到可删除的 L3 Profile 草案".into());
+            return Err("未找到可删除的 L3 Profile 草案或归档版".into());
         }
+        // 同步清理该草案的来源关联，避免残留孤儿记录。
+        tx.execute("DELETE FROM memory_layer_sources WHERE document_id = ?1", [id])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -1432,11 +1718,11 @@ impl TelemetryStore {
         for memory in memories {
             transaction.execute(
                 "INSERT INTO local_memory_items
-                    (id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, event_time, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    (id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, user_defined, event_time, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     memory.id, memory.source_event_key, memory.ordinal, memory.memory, memory.memory_type, memory.durability,
-                    memory.source, memory.session_id, memory.event_time, memory.created_at, memory.updated_at,
+                    memory.source, memory.session_id, memory.user_defined, memory.event_time, memory.created_at, memory.updated_at,
                 ],
             ).map_err(|e| e.to_string())?;
         }
@@ -1527,6 +1813,106 @@ impl TelemetryStore {
         Ok(())
     }
 
+    /// 用户手动添加的自定义 L1 记忆：固定 long_term，标记 user_defined，
+    /// 自动整理（BGE 巩固）与 L1 重建都必须跳过；删改只能由用户在面板
+    /// 手动执行。scope 区分归属层级（l2 工作记忆 / l3 长期 Profile），
+    /// id 用 `local-user-{scope}:` 前缀，与自动提取（local-l1:）和导入
+    /// （local-import:）区分。
+    pub fn add_user_defined_l1_memory(
+        &self,
+        content: &str,
+        memory_type: &str,
+        scope: &str,
+    ) -> Result<LocalMemory, String> {
+        let content = content.trim();
+        if content.is_empty() {
+            return Err("自定义记忆内容不能为空".into());
+        }
+        let memory_type = normalize_l1_memory_type(memory_type);
+        if memory_type == "summary" {
+            return Err("自定义记忆不支持 summary 类型，请选择 fact / decision / constraint / preference / open_item".into());
+        }
+        let scope = match scope {
+            "l2" => "l2",
+            _ => "l3",
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let digest = Sha256::digest(format!("user-defined:{scope}:{now}").as_bytes());
+        let id = format!("local-user-{scope}:{}", hex(&digest)[..24].to_string());
+        let source_event_key = format!("user-defined:{id}");
+        let session_id = format!("user-defined:{scope}");
+        self.conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?
+            .execute(
+                "INSERT INTO local_memory_items
+                    (id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, user_defined, event_time, created_at, updated_at)
+                 VALUES (?1, ?2, 0, ?3, ?4, 'long_term', 'user', ?5, 1, ?6, ?6, ?6)",
+                params![id, source_event_key, content, memory_type, session_id, now],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(LocalMemory {
+            id,
+            memory: content.to_string(),
+            memory_type: memory_type.to_string(),
+            durability: "long_term".to_string(),
+            user_defined: true,
+            last_update_at: now.clone(),
+            event_time: Some(now),
+            score: None,
+        })
+    }
+
+    /// 按归属层级返回用户自定义 L1 记忆（不受时间窗限制）：注入与
+    /// 整理证据都要强制携带，确保用户手写的长期约束不会被窗口或类型
+    /// 筛选掉。旧版无层级前缀的 `local-user:` 条目视为 l3（长期 Profile）。
+    pub fn user_defined_l1_memories_for_scope(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<LocalMemorySnapshot>, String> {
+        self.user_defined_l1_memories().map(|items| {
+            items
+                .into_iter()
+                .filter(|item| user_defined_memory_scope(&item.id) == scope)
+                .collect()
+        })
+    }
+
+    /// 全部用户自定义 L1 记忆（不受时间窗限制）：注入与整理证据都要
+    /// 强制携带，确保用户手写的长期约束不会被窗口或类型筛选掉。
+    pub fn user_defined_l1_memories(&self) -> Result<Vec<LocalMemorySnapshot>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut statement = conn.prepare(
+            "SELECT id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, user_defined, event_time, created_at, updated_at
+               FROM local_memory_items
+              WHERE user_defined = 1
+              ORDER BY created_at ASC",
+        ).map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(LocalMemorySnapshot {
+                    id: row.get(0)?,
+                    source_event_key: row.get(1)?,
+                    ordinal: row.get(2)?,
+                    memory: row.get(3)?,
+                    memory_type: row.get(4)?,
+                    durability: row.get(5)?,
+                    source: row.get(6)?,
+                    session_id: row.get(7)?,
+                    user_defined: row.get::<_, i64>(8)? != 0,
+                    event_time: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
     fn search_conversations(
         &self,
         query: &str,
@@ -1581,83 +1967,6 @@ impl TelemetryStore {
         });
         hits.truncate(limit.min(100) as usize);
         Ok(hits)
-    }
-
-    pub fn all_conversations(&self, limit: u32) -> Result<Vec<String>, String> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| "telemetry store lock poisoned".to_string())?;
-        let mut statement = conn
-            .prepare(
-                "SELECT conversation_text FROM agent_events
-                  WHERE event_type = 'Stop' AND conversation_text IS NOT NULL
-                  ORDER BY id DESC LIMIT ?1",
-            )
-            .map_err(|e| e.to_string())?;
-        let conversations = statement
-            .query_map([limit.min(50)], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        Ok(conversations)
-    }
-
-    pub fn workspace_summary(
-        &self,
-        workspace_id: &str,
-    ) -> Result<Option<WorkspaceSummary>, String> {
-        self.conn
-            .lock()
-            .map_err(|_| "telemetry store lock poisoned".to_string())?
-            .query_row(
-                "SELECT workspace_id, content, source_event_count, updated_at
-                   FROM workspace_summaries WHERE workspace_id = ?1",
-                [workspace_id],
-                |row| {
-                    Ok(WorkspaceSummary {
-                        workspace_id: row.get(0)?,
-                        content: row.get(1)?,
-                        source_event_count: row.get(2)?,
-                        updated_at: row.get(3)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|e| e.to_string())
-    }
-
-    pub fn save_workspace_summary(&self, summary: &WorkspaceSummary) -> Result<(), String> {
-        self.conn
-            .lock()
-            .map_err(|_| "telemetry store lock poisoned".to_string())?
-            .execute(
-                "INSERT INTO workspace_summaries (workspace_id, content, source_event_count, updated_at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(workspace_id) DO UPDATE SET
-                   content = excluded.content,
-                   source_event_count = excluded.source_event_count,
-                   updated_at = excluded.updated_at",
-                params![summary.workspace_id, summary.content, summary.source_event_count, summary.updated_at],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn profile_summary(&self) -> Result<Option<ProfileSummary>, String> {
-        self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?
-            .query_row("SELECT content, source_workspace_count, updated_at FROM profile_summaries WHERE profile_id = 'local-user'", [], |row| {
-                Ok(ProfileSummary { content: row.get(0)?, source_workspace_count: row.get(1)?, updated_at: row.get(2)? })
-            })
-            .optional()
-            .map_err(|e| e.to_string())
-    }
-
-    pub fn save_profile_summary(&self, profile: &ProfileSummary) -> Result<(), String> {
-        self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?
-            .execute("INSERT INTO profile_summaries (profile_id, content, source_workspace_count, updated_at) VALUES ('local-user', ?1, ?2, ?3) ON CONFLICT(profile_id) DO UPDATE SET content=excluded.content, source_workspace_count=excluded.source_workspace_count, updated_at=excluded.updated_at", params![profile.content, profile.source_workspace_count, profile.updated_at])
-            .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     pub fn importance_records(
@@ -1766,13 +2075,16 @@ impl TelemetryStore {
         result
     }
 
-    /// Keep a short, local-only audit trail of MCP use without persisting
-    /// prompts, memory contents, Skill contents, or tool arguments.
+    /// Keep a local audit trail of memory injection (MCP tools and SessionStart
+    /// hook pulls).  `detail` carries the full exchanged content (query
+    /// arguments, returned memory text, Skill bodies, injected context) so the
+    /// panel can replay it; it is capped at 64K chars to bound the ledger.
     pub fn try_record_mcp_access(
         &self,
         client_name: &str,
         tool_name: &str,
         summary: &str,
+        detail: Option<&str>,
         success: bool,
     ) -> Result<(), String> {
         let conn = self
@@ -1782,8 +2094,8 @@ impl TelemetryStore {
         conn.busy_timeout(std::time::Duration::from_millis(50))
             .map_err(|e| e.to_string())?;
         let result = conn.execute(
-            "INSERT INTO mcp_access_logs (occurred_at, client_name, tool_name, summary, success) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![chrono::Utc::now().to_rfc3339(), truncate_chars(client_name, 80), truncate_chars(tool_name, 80), truncate_chars(summary, 240), success as i64],
+            "INSERT INTO mcp_access_logs (occurred_at, client_name, tool_name, summary, detail, success) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![chrono::Utc::now().to_rfc3339(), truncate_chars(client_name, 80), truncate_chars(tool_name, 80), truncate_chars(summary, 240), detail.map(|text| truncate_chars(text, 65_536)), success as i64],
         ).map(|_| ()).map_err(|e| e.to_string());
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         result
@@ -1796,7 +2108,7 @@ impl TelemetryStore {
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let mut statement = conn
             .prepare(
-                "SELECT id, occurred_at, client_name, tool_name, summary, success
+                "SELECT id, occurred_at, client_name, tool_name, summary, detail, success
                FROM mcp_access_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(|e| e.to_string())?;
@@ -1808,8 +2120,67 @@ impl TelemetryStore {
                     client_name: row.get(2)?,
                     tool_name: row.get(3)?,
                     summary: row.get(4)?,
-                    success: row.get::<_, i64>(5)? != 0,
+                    detail: row.get(5)?,
+                    success: row.get::<_, i64>(6)? != 0,
                 })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /// 持久化一条对话整理记录（沉淀活动日志）。失败静默降级：日志不阻断提取。
+    pub fn record_ingest_log(
+        &self,
+        display_time: &str,
+        agent_id: &str,
+        kind: &str,
+        state: &str,
+        detail: &str,
+    ) {
+        let Ok(conn) = self.conn.lock() else { return };
+        let _ = conn.execute(
+            "INSERT INTO ingest_logs (occurred_at, display_time, agent_id, kind, state, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                chrono::Utc::now().to_rfc3339(),
+                display_time,
+                truncate_chars(agent_id, 80),
+                truncate_chars(kind, 20),
+                truncate_chars(state, 20),
+                truncate_chars(detail, 2_000),
+            ],
+        );
+        let _ = conn.execute(
+            "DELETE FROM ingest_logs WHERE id NOT IN (SELECT id FROM ingest_logs ORDER BY id DESC LIMIT 200)",
+            [],
+        );
+    }
+
+    /// 最近对话整理记录，新的在前。返回 (display_time, agent_id, kind, state, detail)。
+    pub fn recent_ingest_logs(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(String, String, String, String, String)>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut statement = conn
+            .prepare(
+                "SELECT display_time, agent_id, kind, state, detail
+                   FROM ingest_logs ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([limit.min(200)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
             })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -1980,7 +2351,7 @@ impl TelemetryStore {
                 scanned_sessions: 0,
                 updated_sessions: 0,
                 unavailable_sessions: 0,
-                message: "尚未捕获可统计的 Codex 或 Claude 会话".into(),
+                message: "尚未捕获可统计的 Agent 会话".into(),
             });
         }
 
@@ -2007,6 +2378,10 @@ impl TelemetryStore {
                         // estimate instead of pretending it is billable usage.
                         "qoder" => read_qoder_transcript_estimate(path)
                             .map(|usage| (usage, "estimated_transcript")),
+                        "minimax" => read_minimax_transcript_usage(path)
+                            .map(|usage| (usage, "native_transcript")),
+                        "kimi" => read_kimi_transcript_usage(path)
+                            .map(|usage| (usage, "native_transcript")),
                         _ => None,
                     })
                     .or_else(|| {
@@ -2088,7 +2463,7 @@ impl TelemetryStore {
             "SELECT event.source, event.session_id, event.payload_json FROM agent_events event
                LEFT JOIN session_token_usage usage
                  ON usage.source = event.source AND usage.session_id = event.session_id
-              WHERE event.source IN ('codex', 'claude', 'qoder', 'workbuddy') AND event.session_id != 'unknown'
+              WHERE event.source IN ('codex', 'claude', 'qoder', 'workbuddy', 'minimax', 'kimi') AND event.session_id != 'unknown'
                 -- Historical sessions are already durable.  Revisit only a
                 -- new Hook receipt (or a session with no previous result).
                 AND (usage.refreshed_at IS NULL OR event.occurred_at > usage.refreshed_at)
@@ -2190,37 +2565,55 @@ impl TelemetryStore {
     fn live_status(&self) -> Result<TelemetryLiveStatus, String> {
         let recent_cutoff = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
         let now = chrono::Utc::now().to_rfc3339();
-        self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?.query_row(
-            "WITH sessions AS (
-                 SELECT DISTINCT source, session_id FROM agent_events WHERE session_id != 'unknown'
-                 UNION
-                 SELECT source, session_id FROM session_token_usage
-             )
-             SELECT
-               (SELECT COUNT(*) FROM sessions),
-               (SELECT COUNT(*) FROM (
+        // Same latest-event window as the `active_sessions` counter below, so
+        // the reported sources always match the reported session count.
+        const ACTIVE_SESSION_FILTER: &str = "(
                   SELECT source, session_id, event_type, occurred_at,
                          ROW_NUMBER() OVER (PARTITION BY source, session_id ORDER BY id DESC) AS rank
                     FROM agent_events WHERE session_id != 'unknown'
                 ) latest WHERE rank = 1
                     AND occurred_at >= ?1 AND occurred_at <= ?2
-                    AND event_type NOT IN ('Stop', 'TranscriptSync', 'session_end', 'session_usage')),
-               (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full'),
-               (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full' AND l1_state = 'stored'),
-               (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full' AND l1_state = 'pending'),
-               (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full' AND l1_state = 'retrying'),
-               (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full' AND l1_state = 'failed'),
-               (SELECT COUNT(*) FROM sessions LEFT JOIN session_token_usage usage ON usage.source=sessions.source AND usage.session_id=sessions.session_id WHERE usage.session_id IS NULL),
-               (SELECT COUNT(*) FROM transcript_scan_states WHERE state = 'failed'),
-               (SELECT MAX(occurred_at) FROM agent_events)",
-            [recent_cutoff, now],
+                    AND event_type NOT IN ('Stop', 'TranscriptSync', 'session_end', 'session_usage')";
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut status = conn.query_row(
+            &format!(
+                "WITH sessions AS (
+                     SELECT DISTINCT source, session_id FROM agent_events WHERE session_id != 'unknown'
+                     UNION
+                     SELECT source, session_id FROM session_token_usage
+                 )
+                 SELECT
+                   (SELECT COUNT(*) FROM sessions),
+                   (SELECT COUNT(*) FROM {ACTIVE_SESSION_FILTER}),
+                   (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full'),
+                   (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full' AND l1_state = 'stored'),
+                   (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full' AND l1_state = 'pending'),
+                   (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full' AND l1_state = 'retrying'),
+                   (SELECT COUNT(*) FROM agent_events WHERE conversation_state = 'full' AND l1_state = 'failed'),
+                   (SELECT COUNT(*) FROM sessions LEFT JOIN session_token_usage usage ON usage.source=sessions.source AND usage.session_id=sessions.session_id WHERE usage.session_id IS NULL),
+                   (SELECT COUNT(*) FROM transcript_scan_states WHERE state = 'failed'),
+                   (SELECT MAX(occurred_at) FROM agent_events)"
+            ),
+            [&recent_cutoff, &now],
             |row| Ok(TelemetryLiveStatus {
-                captured_sessions: row.get(0)?, active_sessions: row.get(1)?, completed_conversations: row.get(2)?,
+                captured_sessions: row.get(0)?, active_sessions: row.get(1)?, active_sources: Vec::new(),
+                completed_conversations: row.get(2)?,
                 organized_memory_conversations: row.get(3)?, pending_memory_sessions: row.get(4)?,
                 retrying_memory_sessions: row.get(5)?, failed_memory_sessions: row.get(6)?, pending_usage_sessions: row.get(7)?,
                 failed_transcript_scans: row.get(8)?, last_event_at: row.get(9)?,
             }),
-        ).map_err(|e| e.to_string())
+        ).map_err(|e| e.to_string())?;
+        if status.active_sessions > 0 {
+            let mut statement = conn
+                .prepare(&format!("SELECT DISTINCT source FROM {ACTIVE_SESSION_FILTER} ORDER BY source"))
+                .map_err(|e| e.to_string())?;
+            status.active_sources = statement
+                .query_map([&recent_cutoff, &now], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|source| source.ok())
+                .collect();
+        }
+        Ok(status)
     }
 
     fn recent_events(&self, limit: u32) -> Result<Vec<TelemetryEvent>, String> {
@@ -2463,10 +2856,13 @@ fn format_conversation(messages: &[(String, String)]) -> String {
         .iter()
         .filter(|(role, _)| matches!(role.as_str(), "user" | "assistant"))
         .filter_map(|(role, content)| {
+            // L0 清洗：先剥离宿主注入的上下文包裹（system-reminder/meta 等），
+            // 再按角色剔除助手思考块；两个角色都只保留人说的话和 Agent 的回复。
+            let cleaned = strip_injected_context(content);
             let content = if role == "assistant" {
-                strip_thinking_blocks(content)
+                strip_thinking_blocks(&cleaned).trim().to_string()
             } else {
-                content.trim().to_string()
+                cleaned.trim().to_string()
             };
             (!content.is_empty()).then(|| {
                 format!(
@@ -2488,6 +2884,69 @@ fn format_conversation(messages: &[(String, String)]) -> String {
                 .collect::<String>()
         )
     }
+}
+
+/// 宿主环境注入的上下文包裹（Kimi 的 `<meta/>`、各 Agent 的
+/// `<system-reminder>` / `<agent-context>` 等）是 harness 对模型说的话，
+/// 不是用户对 Agent 说的话，一律不得进入 L0。只剥离成对闭合或自闭合的
+/// 完整块；未闭合的标签保留原文，避免误删用户刻意引用的内容。
+///
+/// pub(crate)：转录读取器在计算内容指纹前就要应用同一规则，否则
+/// 「指纹未变」的旧行永远不会被新清洗规则重录。
+pub(crate) fn strip_injected_context(text: &str) -> String {
+    const PAIRED_TAGS: [&str; 7] = [
+        "system-reminder",
+        "agent-context",
+        "user_info",
+        "identity_context",
+        "environment_context",
+        "relevant_memory_details",
+        "relevant_memories",
+    ];
+    let mut cleaned = text.to_string();
+    // 自闭合 <meta ... /> 注入。
+    while let Some(start) = cleaned.find("<meta") {
+        let boundary = cleaned[start + 5..].chars().next();
+        if !matches!(boundary, Some(' ' | '\t' | '\n' | '\r' | '/')) {
+            break;
+        }
+        let Some(end) = cleaned[start..].find("/>") else {
+            break;
+        };
+        cleaned.replace_range(start..start + end + 2, "");
+    }
+    for tag in PAIRED_TAGS {
+        let open = format!("<{tag}");
+        let close = format!("</{tag}>");
+        while let Some(start) = cleaned.find(&open) {
+            let boundary = cleaned[start + open.len()..].chars().next();
+            if !matches!(boundary, Some(' ' | '\t' | '\n' | '\r' | '>' | '/')) {
+                break;
+            }
+            let Some(end) = cleaned[start..].find(&close) else {
+                break;
+            };
+            cleaned.replace_range(start..start + end + close.len(), "");
+        }
+    }
+    // 折叠剥离后残留的连续空行。
+    let mut out = String::with_capacity(cleaned.len());
+    let mut blank_lines = 0u32;
+    for line in cleaned.lines() {
+        if line.trim().is_empty() {
+            blank_lines += 1;
+            if blank_lines > 1 {
+                continue;
+            }
+        } else {
+            blank_lines = 0;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out.trim().to_string()
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -2655,9 +3114,6 @@ fn extract_usage(payload: &Value) -> (&'static str, i64, i64, i64) {
 fn discover_native_transcripts(
     sessions: &[(String, String, Option<PathBuf>)],
 ) -> HashMap<(String, String), PathBuf> {
-    let Some(home) = dirs_next::home_dir() else {
-        return HashMap::new();
-    };
     let wanted = |source: &str| {
         sessions
             .iter()
@@ -2666,47 +3122,14 @@ fn discover_native_transcripts(
             .collect::<HashSet<_>>()
     };
     let mut found = HashMap::new();
-    let wanted_codex = wanted("codex");
-    if !wanted_codex.is_empty() {
-        scan_transcript_tree(
-            &home.join(".codex").join("sessions"),
-            "codex",
-            &wanted_codex,
-            &mut found,
-        );
-        scan_transcript_tree(
-            &home.join(".codex").join("archived_sessions"),
-            "codex",
-            &wanted_codex,
-            &mut found,
-        );
-    }
-    let wanted_claude = wanted("claude");
-    if !wanted_claude.is_empty() {
-        scan_transcript_tree(
-            &home.join(".claude").join("projects"),
-            "claude",
-            &wanted_claude,
-            &mut found,
-        );
-    }
-    let wanted_qoder = wanted("qoder");
-    if !wanted_qoder.is_empty() {
-        scan_transcript_tree(
-            &home.join(".qoder").join("projects"),
-            "qoder",
-            &wanted_qoder,
-            &mut found,
-        );
-    }
-    let wanted_workbuddy = wanted("workbuddy");
-    if !wanted_workbuddy.is_empty() {
-        scan_transcript_tree(
-            &home.join(".workbuddy").join("projects"),
-            "workbuddy",
-            &wanted_workbuddy,
-            &mut found,
-        );
+    for source in crate::agent_sources::AGENT_SOURCE_IDS {
+        let wanted = wanted(source);
+        if wanted.is_empty() {
+            continue;
+        }
+        for root in crate::agent_sources::transcript_roots(source) {
+            scan_transcript_tree(&root, source, &wanted, &mut found);
+        }
     }
     found
 }
@@ -2715,21 +3138,14 @@ fn discover_native_transcripts(
 /// This is a metadata-only discovery pass; callers decide whether a file has
 /// changed and therefore needs its content parsed.  Codex keeps older session
 /// files under `archived_sessions`, which is just as authoritative as its live
-/// `sessions` tree for usage history.
+/// `sessions` tree for usage history.  Transcript roots come from the agent
+/// source registry so per-device overrides apply to every supported Agent.
 fn discover_all_native_transcripts() -> Vec<(String, String, PathBuf)> {
-    let Some(home) = dirs_next::home_dir() else {
-        return Vec::new();
-    };
-    let roots = [
-        ("codex", home.join(".codex").join("sessions")),
-        ("codex", home.join(".codex").join("archived_sessions")),
-        ("claude", home.join(".claude").join("projects")),
-        ("qoder", home.join(".qoder").join("projects")),
-        ("workbuddy", home.join(".workbuddy").join("projects")),
-    ];
     let mut latest = HashMap::<(String, String), (std::time::SystemTime, PathBuf)>::new();
-    for (source, root) in roots {
-        scan_all_transcript_tree(root.as_path(), source, &mut latest);
+    for source in crate::agent_sources::AGENT_SOURCE_IDS {
+        for root in crate::agent_sources::transcript_roots(source) {
+            scan_all_transcript_tree(root.as_path(), source, &mut latest);
+        }
     }
     latest
         .into_iter()
@@ -2782,17 +3198,7 @@ fn scan_all_transcript_tree(
 }
 
 fn transcript_session_id(source: &str, path: &Path) -> Option<String> {
-    let stem = path.file_stem()?.to_str()?;
-    if source == "codex" {
-        // Codex names sessions `rollout-<timestamp>-<uuid>.jsonl`; using the
-        // final UUID preserves IDs containing hyphens without parsing dates.
-        stem.rsplit_once('-')
-            .and_then(|_| stem.get(stem.len().saturating_sub(36)..))
-            .filter(|id| id.len() == 36)
-            .map(str::to_string)
-    } else {
-        (!stem.is_empty()).then(|| stem.to_string())
-    }
+    crate::agent_sources::session_id_for_path(source, path)
 }
 
 fn scan_transcript_tree(
@@ -2824,20 +3230,10 @@ fn scan_transcript_tree(
             if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
                 continue;
             }
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-            let session_id = if matches!(source, "claude" | "qoder" | "workbuddy") {
-                path.file_stem()
-                    .and_then(|name| name.to_str())
-                    .filter(|id| wanted.contains(*id))
-            } else {
-                wanted
-                    .iter()
-                    .find(|id| file_name.ends_with(&format!("-{id}.jsonl")))
-                    .map(String::as_str)
-            };
+            // 会话 id 推导统一走注册表：Claude/Qoder/WorkBuddy 用文件 stem，
+            // Codex 用文件名末尾 UUID，MiniMax/Kimi 用会话目录名。
+            let session_id = crate::agent_sources::session_id_for_path(source, &path)
+                .filter(|id| wanted.contains(id));
             if let Some(session_id) = session_id {
                 found
                     .entry((source.to_string(), session_id.to_string()))
@@ -2893,6 +3289,8 @@ fn read_transcript_usage_records(
         // rows can use the same transparent transcript estimate at a
         // message-level boundary. They remain explicitly marked estimated.
         "qoder" => read_qoder_usage_records(session_id, path),
+        "minimax" => read_minimax_usage_records(session_id, path),
+        "kimi" => read_kimi_usage_records(session_id, path),
         _ => Vec::new(),
     }
 }
@@ -3119,6 +3517,200 @@ fn read_qoder_usage_records(session_id: &str, path: &Path) -> Vec<TranscriptUsag
         .collect()
 }
 
+/// MiniMax Code 把每个模型响应写在 `~/.minimax/v2/sessions/**/messages.jsonl`
+/// 的 assistant 记录里，`message.usage` 形如
+/// `{input, output, cacheRead, cacheWrite, totalTokens}`。`input` 不含缓存，
+/// 缓存读取/写入仍是真实输入上下文，与 Claude 口径一样并入输入总量、缓存
+/// 命中单独作为明细。去重边界是响应级 `responseId`（缺失时退回 message_id）。
+fn read_minimax_transcript_usage(path: &Path) -> Option<TranscriptUsage> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut response_ids = HashSet::new();
+    let mut total = TranscriptUsage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_tokens: 0,
+    };
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        let response_id = get_str(message, &["responseId", "response_id", "id"])
+            .map(str::to_string)
+            .or_else(|| {
+                entry
+                    .get("message_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| serde_json::to_string(usage).unwrap_or_default());
+        if !response_ids.insert(response_id) {
+            continue;
+        }
+        let cache_read = get_i64(usage, &["cacheRead", "cache_read"]).unwrap_or(0);
+        let cache_write = get_i64(usage, &["cacheWrite", "cache_write"]).unwrap_or(0);
+        total.input_tokens +=
+            get_i64(usage, &["input", "input_tokens"]).unwrap_or(0) + cache_read + cache_write;
+        total.output_tokens += get_i64(usage, &["output", "output_tokens"]).unwrap_or(0);
+        total.cached_tokens += cache_read;
+    }
+    (total.input_tokens > 0 || total.output_tokens > 0).then_some(total)
+}
+
+/// Kimi（Kimi Code / Kimi Work）的会话转录是
+/// `<kimi-code home>/sessions/<workspace>/<conv>/agents/main/wire.jsonl`。
+/// 每个 `usage.record` 事件携带一轮（turn）的
+/// `{inputOther, output, inputCacheRead, inputCacheCreation}`；与 Claude 口径
+/// 一致，缓存读取/创建并入输入总量，缓存命中单列。事件没有稳定 id，按
+/// (时间, 各计数) 元组去重，避免文件重写时重复累计。
+fn read_kimi_transcript_usage(path: &Path) -> Option<TranscriptUsage> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut seen = HashSet::new();
+    let mut total = TranscriptUsage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_tokens: 0,
+    };
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("usage.record") {
+            continue;
+        }
+        let Some(usage) = entry.get("usage") else {
+            continue;
+        };
+        let input_other = get_i64(usage, &["inputOther", "input_other"]).unwrap_or(0);
+        let output = get_i64(usage, &["output", "output_tokens"]).unwrap_or(0);
+        let cache_read = get_i64(usage, &["inputCacheRead", "input_cache_read"]).unwrap_or(0);
+        let cache_write =
+            get_i64(usage, &["inputCacheCreation", "input_cache_creation"]).unwrap_or(0);
+        let identity = format!(
+            "{}:{}:{}:{}:{}",
+            get_str(&entry, &["time", "timestamp", "occurred_at"]).unwrap_or(""),
+            input_other,
+            output,
+            cache_read,
+            cache_write
+        );
+        if !seen.insert(identity) {
+            continue;
+        }
+        total.input_tokens += input_other + cache_read + cache_write;
+        total.output_tokens += output;
+        total.cached_tokens += cache_read;
+    }
+    (total.input_tokens > 0 || total.output_tokens > 0).then_some(total)
+}
+
+fn read_minimax_usage_records(session_id: &str, path: &Path) -> Vec<TranscriptUsageRecord> {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| {
+            let entry = serde_json::from_str::<Value>(&line).ok()?;
+            let message = entry.get("message")?;
+            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                return None;
+            }
+            let usage = message.get("usage")?;
+            let identity = get_str(message, &["responseId", "response_id", "id"])
+                .map(str::to_string)
+                .or_else(|| {
+                    entry
+                        .get("message_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| serde_json::to_string(usage).unwrap_or_default());
+            if !seen.insert(identity.clone()) {
+                return None;
+            }
+            let cache_read = get_i64(usage, &["cacheRead", "cache_read"]).unwrap_or(0);
+            let cache_write = get_i64(usage, &["cacheWrite", "cache_write"]).unwrap_or(0);
+            let input_tokens =
+                get_i64(usage, &["input", "input_tokens"]).unwrap_or(0) + cache_read + cache_write;
+            let output_tokens = get_i64(usage, &["output", "output_tokens"]).unwrap_or(0);
+            ((input_tokens > 0 || output_tokens > 0) as bool).then_some(TranscriptUsageRecord {
+                record_id: usage_record_id("minimax", session_id, "message", &identity),
+                occurred_at: message
+                    .get("timestamp")
+                    .and_then(Value::as_i64)
+                    .and_then(|millis| {
+                        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
+                    })
+                    .map(|time| time.to_rfc3339())
+                    .or_else(|| get_str(&entry, &["timestamp", "occurred_at", "time"]).map(str::to_string)),
+                model: get_str(message, &["model", "model_name"]).map(str::to_string),
+                input_tokens,
+                output_tokens,
+                cached_tokens: cache_read.min(input_tokens),
+            })
+        })
+        .collect()
+}
+
+fn read_kimi_usage_records(session_id: &str, path: &Path) -> Vec<TranscriptUsageRecord> {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| {
+            let entry = serde_json::from_str::<Value>(&line).ok()?;
+            if entry.get("type").and_then(Value::as_str) != Some("usage.record") {
+                return None;
+            }
+            let usage = entry.get("usage")?;
+            let input_other = get_i64(usage, &["inputOther", "input_other"]).unwrap_or(0);
+            let output_tokens = get_i64(usage, &["output", "output_tokens"]).unwrap_or(0);
+            let cache_read = get_i64(usage, &["inputCacheRead", "input_cache_read"]).unwrap_or(0);
+            let cache_write =
+                get_i64(usage, &["inputCacheCreation", "input_cache_creation"]).unwrap_or(0);
+            let occurred_at = entry
+                .get("time")
+                .and_then(Value::as_i64)
+                .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                .map(|time| time.to_rfc3339());
+            let identity = format!(
+                "{}:{}:{}:{}:{}",
+                occurred_at.as_deref().unwrap_or(""),
+                input_other,
+                output_tokens,
+                cache_read,
+                cache_write
+            );
+            if !seen.insert(identity.clone()) {
+                return None;
+            }
+            let input_tokens = input_other + cache_read + cache_write;
+            ((input_tokens > 0 || output_tokens > 0) as bool).then_some(TranscriptUsageRecord {
+                record_id: usage_record_id("kimi", session_id, "usage_record", &identity),
+                occurred_at,
+                model: get_str(&entry, &["model", "model_name"]).map(str::to_string),
+                input_tokens,
+                output_tokens,
+                cached_tokens: cache_read.min(input_tokens),
+            })
+        })
+        .collect()
+}
+
 /// Codex emits `token_count` records containing a cumulative session total and
 /// a per-response delta.  Only the greatest cumulative total is authoritative
 /// for a session; summing every record was the old over-counting bug.
@@ -3308,7 +3900,12 @@ fn transcript_value_text(value: Option<&Value>) -> String {
 /// than character-counting for other providers; provider-native counters
 /// always take precedence elsewhere in the ledger.
 fn estimate_transcript_tokens(text: &str) -> i64 {
-    if let Ok(encoding) = tiktoken_rs::cl100k_base() {
+    // Building the BPE ranks is expensive (~100ms); transcripts hold thousands
+    // of messages, so the encoding must be constructed once and reused.
+    static ENCODING: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> =
+        std::sync::OnceLock::new();
+    let encoding = ENCODING.get_or_init(|| tiktoken_rs::cl100k_base().ok());
+    if let Some(encoding) = encoding {
         return encoding.encode_with_special_tokens(text).len() as i64;
     }
     // The bundled vocabulary should always load. Retain a deterministic
@@ -3574,6 +4171,74 @@ mod tests {
         assert!(records
             .iter()
             .all(|record| record.model.as_deref() == Some("gpt-5.6-terra")));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn minimax_transcript_usage_deduplicates_by_response_id() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-manager-minimax-usage-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let rows = [
+            serde_json::json!({"message_id":"msg-1","message":{"role":"user","content":[{"type":"text","text":"你好"}]}}),
+            serde_json::json!({"message_id":"msg-2","message":{"role":"assistant","model":"MiniMax-M3","responseId":"r-1","usage":{"input":100,"output":20,"cacheRead":40,"cacheWrite":10}}}),
+            serde_json::json!({"message_id":"msg-2","message":{"role":"assistant","model":"MiniMax-M3","responseId":"r-1","usage":{"input":100,"output":20,"cacheRead":40,"cacheWrite":10}}}),
+            serde_json::json!({"message_id":"msg-3","message":{"role":"assistant","model":"MiniMax-M3","responseId":"r-2","usage":{"input":7,"output":3,"cacheRead":0,"cacheWrite":0}}}),
+        ];
+        std::fs::write(
+            &path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let usage = read_minimax_transcript_usage(&path).unwrap();
+        // 输入 = input + cacheRead + cacheWrite；重复 responseId 只计一次。
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
+            (157, 23, 40)
+        );
+        let records = read_minimax_usage_records("session-1", &path);
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .all(|record| record.model.as_deref() == Some("MiniMax-M3")));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn kimi_transcript_usage_sums_turn_records_once() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-manager-kimi-usage-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let rows = [
+            serde_json::json!({"type":"usage.record","model":"k3-agent","usageScope":"turn","time":1787051603421i64,"usage":{"inputOther":100,"output":20,"inputCacheRead":40,"inputCacheCreation":10}}),
+            // 文件重写产生的完全重复事件不得再次累计。
+            serde_json::json!({"type":"usage.record","model":"k3-agent","usageScope":"turn","time":1787051603421i64,"usage":{"inputOther":100,"output":20,"inputCacheRead":40,"inputCacheCreation":10}}),
+            serde_json::json!({"type":"usage.record","model":"k3-agent","usageScope":"turn","time":1787051609500i64,"usage":{"inputOther":7,"output":3,"inputCacheRead":0,"inputCacheCreation":0}}),
+        ];
+        std::fs::write(
+            &path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let usage = read_kimi_transcript_usage(&path).unwrap();
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
+            (157, 23, 40)
+        );
+        let records = read_kimi_usage_records("conv-1", &path);
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .all(|record| record.model.as_deref() == Some("k3-agent")));
+        assert!(records.iter().all(|record| record.occurred_at.is_some()));
         let _ = std::fs::remove_file(path);
     }
 
@@ -3922,5 +4587,84 @@ mod tests {
             ) > 0.0
         );
         assert!(keyword_score("用户长期偏好：使用中文输出", "约束", &keyword_terms("约束")) > 0.0);
+    }
+
+    #[test]
+    fn pending_memory_session_list_orders_failures_first_and_hides_stored_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL, session_id TEXT NOT NULL, project_path TEXT,
+                event_type TEXT NOT NULL, occurred_at TEXT NOT NULL,
+                token_source TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                cached_tokens INTEGER NOT NULL, payload_json TEXT NOT NULL,
+                conversation_state TEXT NOT NULL DEFAULT 'unavailable',
+                conversation_message_count INTEGER NOT NULL DEFAULT 0, conversation_text TEXT,
+                l1_state TEXT NOT NULL DEFAULT 'unavailable', l1_error_detail TEXT
+             );",
+        )
+        .unwrap();
+        for (key, state, text) in [
+            ("k-pending", "pending", "[用户]\n待整理会话"),
+            ("k-failed", "failed", "[用户]\n失败会话"),
+            ("k-stored", "stored", "[用户]\n已整理会话"),
+            ("k-empty", "pending", ""),
+        ] {
+            conn.execute(
+                "INSERT INTO agent_events (event_key, source, session_id, event_type, occurred_at, token_source, input_tokens, output_tokens, cached_tokens, payload_json, conversation_state, conversation_message_count, conversation_text, l1_state, l1_error_detail)
+                 VALUES (?1, 'qoder', ?1, 'TranscriptSync', '2026-08-18T08:00:00Z', 'unavailable', 0, 0, 0, '{}', 'full', 3, ?2, ?3, CASE WHEN ?3 = 'failed' THEN '模型超时' ELSE NULL END)",
+                rusqlite::params![key, text, state],
+            )
+            .unwrap();
+        }
+        let store = TelemetryStore {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        let rows = store.pending_memory_session_list(50).unwrap();
+        let keys = rows
+            .iter()
+            .map(|row| row.event_key.as_str())
+            .collect::<Vec<_>>();
+        // stored 与空正文不进入面板；失败排在待整理之前。
+        assert_eq!(keys, vec!["k-failed", "k-pending"]);
+        assert_eq!(rows[0].error.as_deref(), Some("模型超时"));
+        assert_eq!(rows[0].message_count, 3);
+        assert!(rows[1].excerpt.contains("待整理会话"));
+        let one = store.conversation_by_event_key("k-pending").unwrap().unwrap();
+        assert!(one.conversation_text.contains("待整理会话"));
+        // 已整理完成的会话不允许通过单会话整理重复提取。
+        assert!(store.conversation_by_event_key("k-stored").unwrap().is_none());
+        assert!(store.conversation_by_event_key("k-empty").unwrap().is_none());
+    }
+
+    #[test]
+    fn format_conversation_strips_injected_context_but_keeps_dialogue() {
+        let messages = vec![
+            (
+                "user".to_string(),
+                "<meta awareness=\"low\" timestamp=\"2026-08-18 19:13\" />\n这个项目的记忆中心有问题".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "<system-reminder>\n<tools_added>\nWidget\n</tools_added>\n</system-reminder>".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "好的，我来修复。<system-reminder>内部提示</system-reminder>马上开始。".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "<system-reminder>未闭合的块，用户可能是在引用这个语法".to_string(),
+            ),
+        ];
+        let text = format_conversation(&messages);
+        assert!(text.contains("[用户]\n这个项目的记忆中心有问题"));
+        assert!(text.contains("[助手]\n好的，我来修复。马上开始。"));
+        // 纯注入消息整块消失；未闭合的标签按用户原文保留。
+        assert!(!text.contains("tools_added"));
+        assert!(!text.contains("内部提示"));
+        assert!(!text.contains("meta awareness"));
+        assert!(text.contains("未闭合的块"));
     }
 }

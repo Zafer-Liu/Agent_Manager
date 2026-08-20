@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
-import { Plus, Trash2, CheckCircle, XCircle, Loader2, Eye, EyeOff, AlertCircle, Brain } from 'lucide-react'
+import { Plus, Trash2, CheckCircle, XCircle, Loader2, Eye, EyeOff, AlertCircle, Brain, Server } from 'lucide-react'
 
 interface LlmProvider {
   id: string
@@ -17,6 +17,22 @@ interface LlmProvider {
 
 interface MemoryExtractionConfig {
   provider_id: string | null
+}
+
+interface OllamaConfig {
+  base_url: string
+}
+
+interface OllamaModelInfo {
+  name: string
+  size: number
+  parameter_size?: string
+  quantization_level?: string
+}
+
+interface OllamaTestResult {
+  version: string | null
+  models: OllamaModelInfo[]
 }
 
 const EMPTY_CUSTOM: LlmProvider = {
@@ -40,12 +56,16 @@ export function LlmSettings({ embedded = false }: { embedded?: boolean }) {
   const [savingMemoryConfig, setSavingMemoryConfig] = useState(false)
 
   async function load() {
-    const [list, config] = await Promise.all([
-      invoke<LlmProvider[]>('list_llm_providers'),
-      invoke<MemoryExtractionConfig>('memory_extraction_config_get'),
-    ])
-    setProviders(list)
-    setMemoryConfig(config)
+    try {
+      const [list, config] = await Promise.all([
+        invoke<LlmProvider[]>('list_llm_providers'),
+        invoke<MemoryExtractionConfig>('memory_extraction_config_get'),
+      ])
+      setProviders(list)
+      setMemoryConfig(config)
+    } catch (e) {
+      setError(String(e))
+    }
   }
 
   useEffect(() => { load() }, [])
@@ -153,6 +173,9 @@ export function LlmSettings({ embedded = false }: { embedded?: boolean }) {
           />
         ))}
       </div>
+
+      {/* Ollama local models */}
+      <OllamaPanel providers={providers} onChanged={load} />
 
       {/* Custom providers */}
       <div className="space-y-3">
@@ -327,6 +350,142 @@ function BuiltinCard({ provider, showKey, onToggleKey, testResult, testing, onSa
   )
 }
 
+function OllamaPanel({ providers, onChanged }: { providers: LlmProvider[]; onChanged: () => Promise<void> }) {
+  const { t } = useTranslation()
+  const [baseUrl, setBaseUrl] = useState('http://localhost:11434')
+  const [loaded, setLoaded] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [adding, setAdding] = useState<string | null>(null)
+  const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [report, setReport] = useState<OllamaTestResult | null>(null)
+
+  useEffect(() => {
+    invoke<OllamaConfig>('ollama_config_get')
+      .then(cfg => setBaseUrl(cfg.base_url))
+      .catch(() => { /* keep the default URL when config is unavailable */ })
+      .finally(() => setLoaded(true))
+  }, [])
+
+  const normalizedBase = baseUrl.trim().replace(/\/+$/, '')
+
+  async function saveConfig() {
+    setSaving(true)
+    try {
+      await invoke('ollama_config_set', { config: { base_url: baseUrl.trim() } })
+    } catch (e) {
+      setResult({ ok: false, msg: String(e) })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function testConnection() {
+    setTesting(true)
+    setResult(null)
+    try {
+      const res = await invoke<OllamaTestResult>('test_ollama_connection', { baseUrl: baseUrl.trim() })
+      setReport(res)
+      const version = res.version ? ` · v${res.version}` : ''
+      setResult({ ok: true, msg: `${t('llm.ollamaConnected')}${version} · ${t('llm.ollamaModelCount', { count: res.models.length })}` })
+    } catch (e) {
+      setReport(null)
+      setResult({ ok: false, msg: String(e) })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  function isAdded(model: OllamaModelInfo) {
+    return providers.some(p => p.is_custom && p.base_url.replace(/\/+$/, '') === `${normalizedBase}/v1` && p.model === model.name)
+  }
+
+  async function addAsProvider(model: OllamaModelInfo) {
+    setAdding(model.name)
+    try {
+      // Ollama's OpenAI-compatible endpoint ignores Authorization; the
+      // placeholder key only satisfies the provider validation rules.
+      const provider: LlmProvider = {
+        id: `ollama_${model.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+        name: `Ollama · ${model.name}`,
+        base_url: `${normalizedBase}/v1`,
+        model: model.name,
+        api_key: 'ollama',
+        is_custom: true,
+        enabled: true,
+        context_window: 32768,
+        max_output_tokens: 8192,
+      }
+      await invoke('save_llm_provider', { provider })
+      await onChanged()
+      setResult({ ok: true, msg: `${model.name} — ${t('llm.ollamaAddedHint')}` })
+    } catch (e) {
+      setResult({ ok: false, msg: String(e) })
+    } finally {
+      setAdding(null)
+    }
+  }
+
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center gap-2"><Server size={15} className="text-emerald-600 dark:text-emerald-400" /><h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{t('llm.ollamaTitle')}</h3></div>
+      <p className="text-xs leading-5 text-gray-600 dark:text-gray-300">{t('llm.ollamaHint')}</p>
+      <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-3">
+        <div className="flex items-end gap-2">
+          <div className="flex-1">
+            <label className="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">{t('llm.ollamaBaseUrl')}</label>
+            <input value={baseUrl} onChange={e => setBaseUrl(e.target.value)}
+              placeholder="http://localhost:11434" disabled={!loaded}
+              className="field-input font-mono text-xs" />
+          </div>
+          <button onClick={saveConfig} disabled={saving || !loaded}
+            className="flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-700 dark:text-gray-400">
+            {saving && <Loader2 className="h-3 w-3 animate-spin" />} {t('llm.save')}
+          </button>
+          <button onClick={testConnection} disabled={testing || !loaded}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-60">
+            {testing && <Loader2 className="h-3 w-3 animate-spin" />} {t('llm.testConnection')}
+          </button>
+        </div>
+
+        {result && <TestBadge result={result} />}
+
+        {report && report.models.length > 0 && (
+          <ul className="divide-y divide-gray-100 dark:divide-gray-800">
+            {report.models.map(m => (
+              <li key={m.name} className="flex items-center justify-between gap-3 py-2">
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-mono text-gray-800 dark:text-gray-200">{m.name}</p>
+                  <p className="text-[11px] text-gray-400">
+                    {[m.parameter_size, m.quantization_level, formatOllamaSize(m.size)].filter(Boolean).join(' · ')}
+                  </p>
+                </div>
+                {isAdded(m) ? (
+                  <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">{t('llm.ollamaAdded')}</span>
+                ) : (
+                  <button onClick={() => addAsProvider(m)} disabled={adding !== null}
+                    className="shrink-0 rounded-lg border border-emerald-200 px-2.5 py-1 text-xs text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-800 dark:text-emerald-400 dark:hover:bg-emerald-900/20">
+                    {adding === m.name ? <Loader2 className="h-3 w-3 animate-spin" /> : t('llm.ollamaAdd')}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {report && report.models.length === 0 && (
+          <p className="text-xs text-gray-400">{t('llm.ollamaNoModels')}</p>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function formatOllamaSize(bytes: number): string {
+  if (!bytes) return ''
+  const gb = bytes / 1e9
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`
+}
+
 function TestBadge({ result }: { result: { ok: boolean; msg: string } }) {
   return (
     <div className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs ${
@@ -343,9 +502,12 @@ function EnableToggle({ enabled, onChange }: { enabled: boolean; onChange: (v: b
   return (
     <button
       onClick={() => onChange(!enabled)}
-      className={`relative h-5 w-9 rounded-full transition-colors ${enabled ? 'bg-blue-600' : 'bg-gray-200 dark:bg-gray-700'}`}
+      // overflow-hidden keeps the thumb clipped inside the rounded track
+      // throughout the slide animation; left-0.5 pins the resting position
+      // so translate-x-4 lands flush with the track's right edge.
+      className={`relative h-5 w-9 shrink-0 overflow-hidden rounded-full transition-colors ${enabled ? 'bg-blue-600' : 'bg-gray-200 dark:bg-gray-700'}`}
     >
-      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+      <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0'}`} />
     </button>
   )
 }

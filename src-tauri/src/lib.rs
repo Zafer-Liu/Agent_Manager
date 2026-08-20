@@ -1,5 +1,6 @@
 mod agent;
 mod agent_http;
+mod agent_sources;
 mod commands;
 mod github;
 mod llm;
@@ -67,24 +68,11 @@ pub fn run() {
             }
         })
         .setup(|_app| {
-            // 阶段四：初始化全局 AgentHttpStore 并从配置启动 HTTP server
+            // 初始化全局 AgentHttpStore 并启动 HTTP server（固定端口，供记忆沉淀/遥测/agent 回调使用）
             let store = agent_http::init_store();
-            let config = agent_http::read_hook_server_config();
-            if config.enabled {
-                let port = config.port;
-                let token = config.auth_token.clone();
-                let h = tauri::async_runtime::spawn(async move {
-                    agent_http::start_agent_http_server(port, token, store).await;
-                });
-                // 记录 server handle（restart 用）
-                let handle = agent_http::get_server_handle();
-                {
-                    let mut guard = handle.lock().unwrap();
-                    *guard = Some(h);
-                }
-            } else {
-                eprintln!("[agent-http] disabled by config");
-            }
+            tauri::async_runtime::spawn(async move {
+                agent_http::start_agent_http_server(agent_http::AGENT_HTTP_PORT, store).await;
+            });
 
             // 阶段三 3c：启动 Sweeper 巡检
             sweeper::start_sweeper(_app.handle().clone());
@@ -146,6 +134,9 @@ pub fn run() {
             test_llm_provider,
             memory_extraction_config_get,
             memory_extraction_config_set,
+            ollama_config_get,
+            ollama_config_set,
+            test_ollama_connection,
             // MCP Agent
             run_mcp_agent,
             chat_with_mcp,
@@ -161,10 +152,6 @@ pub fn run() {
             dispatch_agent_task,
             list_agent_tasks,
             list_agent_results,
-            // Agent HTTP config (phase 4 - 4h)
-            get_hook_server_config,
-            set_hook_server_config,
-            restart_hook_server,
             // PTY terminal
             pty_start,
             pty_write,
@@ -221,6 +208,10 @@ pub fn run() {
             memory_ingest_set_enabled,
             memory_ingest_flush_pending,
             memory_ingest::memory_ingest_organize_conversations,
+            memory_ingest::memory_ingest_organize_session,
+            memory_ingest::memory_pending_l1_sessions,
+            memory_ingest::memory_organized_l1_sessions,
+            memory_ingest::memory_l1_conversation_detail,
             memory_ingest::memory_import_folder,
             memory_ingest::local_memory_list,
             memory_ingest::local_memory_stats,
@@ -228,15 +219,16 @@ pub fn run() {
             memory_ingest::local_memory_search,
             memory_ingest::local_memory_update,
             memory_ingest::local_memory_delete,
-            memory_ingest::memory_workspace_summary_get,
-            memory_ingest::memory_workspace_summary_refresh,
-            memory_ingest::memory_profile_summary_get,
-            memory_ingest::memory_profile_summary_refresh,
+            memory_ingest::local_memory_add_user,
+            memory_ingest::memory_layer_document_update,
             memory_ingest::memory_short_term_consolidate,
             memory_ingest::memory_long_term_profile_draft,
             memory_ingest::memory_long_term_profile_publish,
             memory_ingest::memory_long_term_profile_delete_draft,
             memory_ingest::memory_layer_documents,
+            // Agent 数据源（跨设备目录覆盖）
+            agent_sources::agent_sources_list,
+            agent_sources::agent_source_set_override,
             // Shared memory MCP (Codex / Claude one-click setup)
             memory_mcp_status,
             memory_mcp_install,

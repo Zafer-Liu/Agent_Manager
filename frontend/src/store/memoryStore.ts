@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { createBgeConsolidationCandidateBatches, searchMemoriesWithBge } from '../lib/bgeSemanticSearch'
-import type { AddEventItem, AddResult, ConsolidationResult, EngineStatus, HookStatus, IngestStatus, L1ResetResult, LocalMemoryStats, McpAccessLog, MemoryImportance, MemoryImportanceSummary, MemoryImportResult, MemoryItem, MemoryLayerDocument, MemoryLayerRunResult, MemoryMcpStatus, MemoryMcpTarget, OrganizeConversationsResult, ProfileSummary, SkillDocument, SkillItem, SkillSyncPreview, TelemetryEvent, TelemetryLiveStatus, TelemetrySummary, TelemetryUsageAnalytics, TelemetryUsageRecord, TelemetryUsageRefresh, WorkspaceSummary } from '../types/memory'
+import type { AddEventItem, AddResult, AgentSourceInfo, ConsolidationResult, EngineStatus, HookStatus, IngestStatus, L1ResetResult, LocalMemoryStats, McpAccessLog, MemoryConversationDetail, MemoryImportance, MemoryImportanceSummary, MemoryImportResult, MemoryItem, MemoryLayerDocument, MemoryLayerRunResult, MemoryMcpStatus, MemoryMcpTarget, OrganizeConversationsResult, PendingMemorySession, SkillDocument, SkillItem, SkillSyncPreview, TelemetryEvent, TelemetryLiveStatus, TelemetrySummary, TelemetryUsageAnalytics, TelemetryUsageRecord, TelemetryUsageRefresh } from '../types/memory'
 
 /** 全局记忆归属（未选择具体 Agent 时的 user_id） */
 export const GLOBAL_USER_ID = 'agent-manager'
@@ -50,8 +50,7 @@ interface MemoryStore {
   telemetryEvents: TelemetryEvent[]
   telemetryUsageRecords: TelemetryUsageRecord[]
   mcpAccessLogs: McpAccessLog[]
-  workspaceSummary: WorkspaceSummary | null
-  profileSummary: ProfileSummary | null
+  agentSources: AgentSourceInfo[]
   l2Documents: MemoryLayerDocument[]
   l3Documents: MemoryLayerDocument[]
   skills: SkillItem[]
@@ -77,19 +76,23 @@ interface MemoryStore {
   setIngestEnabled: (on: boolean) => Promise<void>
   flushIngestQueue: () => Promise<number>
   organizeConversations: () => Promise<OrganizeConversationsResult>
+  loadPendingSessions: (limit?: number) => Promise<PendingMemorySession[]>
+  loadOrganizedSessions: (limit?: number) => Promise<PendingMemorySession[]>
+  loadConversationDetail: (eventKey: string) => Promise<MemoryConversationDetail>
+  organizeSession: (eventKey: string) => Promise<OrganizeConversationsResult>
   importMemoryFolder: (folder: string) => Promise<MemoryImportResult>
   /** 常规刷新只读取账本；仅在用户主动刷新时回扫本机转录。 */
   checkTelemetry: (options?: { backfill?: boolean; refreshUsage?: boolean; limit?: number }) => Promise<TelemetryUsageRefresh | null>
   loadUsageAnalytics: (filters: { startAt?: string; endAt?: string; source?: string; bucket: 'hour' | 'day' }) => Promise<TelemetryUsageAnalytics>
   checkMcpAccessLogs: () => Promise<void>
-  loadWorkspaceSummary: () => Promise<void>
-  refreshWorkspaceSummary: () => Promise<WorkspaceSummary>
-  loadProfileSummary: () => Promise<void>
-  refreshProfileSummary: () => Promise<ProfileSummary>
+  loadAgentSources: () => Promise<void>
+  setAgentSourceOverride: (id: string, transcriptRoots?: string[] | null, configHome?: string | null) => Promise<AgentSourceInfo>
   loadMemoryLayers: () => Promise<void>
   consolidateShortTermMemory: () => Promise<MemoryLayerRunResult>
   draftLongTermProfile: () => Promise<MemoryLayerRunResult>
-  publishLongTermProfile: (documentId: string) => Promise<MemoryLayerDocument>
+  publishLongTermProfile: (documentId: string, content?: string) => Promise<MemoryLayerDocument>
+  /** 手动编辑已发布的层级记忆文档（L2 工作记忆 / L3 Profile）：保存即覆盖当前发布版并立刻生效。 */
+  updatePublishedMemoryDocument: (documentId: string, content: string) => Promise<MemoryLayerDocument>
   deleteLongTermProfileDraft: (documentId: string) => Promise<void>
   scanSkills: () => Promise<SkillItem[]>
   loadSkills: (force?: boolean) => Promise<SkillItem[]>
@@ -100,12 +103,14 @@ interface MemoryStore {
   setSkillAssignment: (source: string, name: string, target: string, equipped: boolean) => Promise<SkillItem>
   rollbackSkillLatest: (source: string, name: string) => Promise<SkillItem>
   addMemory: (messages: { role: string; content: string }[]) => Promise<AddEventItem[]>
+  /** 用户手动添加自定义长期记忆：只有用户能删改；scope 指定归属 L2/L3，两层相互独立。 */
+  addUserMemory: (content: string, memoryType: string, scope: 'l2' | 'l3') => Promise<MemoryItem>
   search: (query: string, topK: number) => Promise<MemoryItem[]>
   listMemories: (force?: boolean) => Promise<void>
   resetL1ForReextraction: () => Promise<L1ResetResult>
   updateMemory: (id: string, content: string) => Promise<void>
   deleteMemory: (id: string) => Promise<void>
-  dreaming: () => Promise<ConsolidationResult>
+  dreaming: (onProgress?: (processed: number, total: number) => void) => Promise<ConsolidationResult>
   restoreConsolidation: (snapshotId: string) => Promise<ConsolidationResult>
   refreshImportance: () => Promise<MemoryImportanceSummary>
   setMemoryPinned: (memoryId: string, pinned: boolean) => Promise<void>
@@ -120,15 +125,14 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
   qoderHookStatus: null,
   codexHookStatus: null,
   workbuddyHookStatus: null,
-  memoryMcp: { codex_cli: null, claude_cli: null, codex_desktop: null, claude_desktop: null, qoder: null, workbuddy: null },
+  memoryMcp: { codex_cli: null, claude_cli: null, codex_desktop: null, claude_desktop: null, qoder: null, workbuddy: null, minimax: null, kimi: null },
   ingestStatus: null,
   telemetrySummary: null,
   telemetryLiveStatus: null,
   telemetryEvents: [],
   telemetryUsageRecords: [],
   mcpAccessLogs: [],
-  workspaceSummary: null,
-  profileSummary: null,
+  agentSources: [],
   l2Documents: [],
   l3Documents: [],
   skills: [],
@@ -173,7 +177,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   async checkMemoryMcp() {
     try {
-      const targets: MemoryMcpTarget[] = ['codex_cli', 'claude_cli', 'codex_desktop', 'claude_desktop', 'qoder', 'workbuddy']
+      const targets: MemoryMcpTarget[] = ['codex_cli', 'claude_cli', 'codex_desktop', 'claude_desktop', 'qoder', 'workbuddy', 'minimax', 'kimi']
       const statuses = await Promise.all(targets.map((agentType) => invoke<MemoryMcpStatus>('memory_mcp_status', { agentType })))
       set({ memoryMcp: Object.fromEntries(statuses.map((status) => [status.agent_type, status])) as Record<MemoryMcpTarget, MemoryMcpStatus> })
     } catch {
@@ -207,6 +211,24 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     const result = await invoke<OrganizeConversationsResult>('memory_ingest_organize_conversations')
     // This action writes new SQLite memories; bypass the in-session page
     // cache so the count and list change immediately after a successful run.
+    await Promise.all([get().checkTelemetry(), get().listMemories(true), get().checkIngest()])
+    return result
+  },
+
+  async loadPendingSessions(limit?: number) {
+    return invoke<PendingMemorySession[]>('memory_pending_l1_sessions', { limit: limit ?? 200 })
+  },
+
+  async loadOrganizedSessions(limit?: number) {
+    return invoke<PendingMemorySession[]>('memory_organized_l1_sessions', { limit: limit ?? 200 })
+  },
+
+  async loadConversationDetail(eventKey) {
+    return invoke<MemoryConversationDetail>('memory_l1_conversation_detail', { eventKey })
+  },
+
+  async organizeSession(eventKey) {
+    const result = await invoke<OrganizeConversationsResult>('memory_ingest_organize_session', { eventKey })
     await Promise.all([get().checkTelemetry(), get().listMemories(true), get().checkIngest()])
     return result
   },
@@ -263,29 +285,22 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     }
   },
 
-  async loadWorkspaceSummary() {
+  async loadAgentSources() {
     try {
-      const workspaceSummary = await invoke<WorkspaceSummary | null>('memory_workspace_summary_get')
-      set({ workspaceSummary })
+      set({ agentSources: await invoke<AgentSourceInfo[]>('agent_sources_list') })
     } catch {
-      set({ workspaceSummary: null })
+      /* 浏览器预览下无 Tauri 后端，忽略 */
     }
   },
 
-  async refreshWorkspaceSummary() {
-    const workspaceSummary = await invoke<WorkspaceSummary>('memory_workspace_summary_refresh')
-    set({ workspaceSummary })
-    return workspaceSummary
-  },
-
-  async loadProfileSummary() {
-    try { set({ profileSummary: await invoke<ProfileSummary | null>('memory_profile_summary_get') }) } catch { set({ profileSummary: null }) }
-  },
-
-  async refreshProfileSummary() {
-    const profileSummary = await invoke<ProfileSummary>('memory_profile_summary_refresh')
-    set({ profileSummary })
-    return profileSummary
+  async setAgentSourceOverride(id, transcriptRoots = null, configHome = null) {
+    const info = await invoke<AgentSourceInfo>('agent_source_set_override', {
+      id,
+      transcriptRoots: transcriptRoots ?? null,
+      configHome: configHome ?? null,
+    })
+    await get().loadAgentSources()
+    return info
   },
 
   async loadMemoryLayers() {
@@ -308,9 +323,15 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     return result
   },
 
-  async publishLongTermProfile(documentId) {
-    const document = await invoke<MemoryLayerDocument>('memory_long_term_profile_publish', { documentId })
-    await Promise.all([get().loadMemoryLayers(), get().loadProfileSummary()])
+  async publishLongTermProfile(documentId, content) {
+    const document = await invoke<MemoryLayerDocument>('memory_long_term_profile_publish', { documentId, content: content ?? null })
+    await get().loadMemoryLayers()
+    return document
+  },
+
+  async updatePublishedMemoryDocument(documentId, content) {
+    const document = await invoke<MemoryLayerDocument>('memory_layer_document_update', { documentId, content })
+    await get().loadMemoryLayers()
     return document
   },
 
@@ -412,6 +433,17 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     }
   },
 
+  async addUserMemory(content, memoryType, scope) {
+    set({ loading: true })
+    try {
+      const item = await invoke<MemoryItem>('local_memory_add_user', { content, memoryType, scope })
+      await get().listMemories(true)
+      return item
+    } finally {
+      set({ loading: false })
+    }
+  },
+
   async search(query, topK) {
     set({ loading: true, lastSearchQuery: query })
     try {
@@ -467,8 +499,8 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     await get().listMemories(true)
   },
 
-  async dreaming() {
-    const candidateBatches = await createBgeConsolidationCandidateBatches(get().memories)
+  async dreaming(onProgress) {
+    const candidateBatches = await createBgeConsolidationCandidateBatches(get().memories, onProgress)
     return invoke<ConsolidationResult>('memory_consolidate', { candidateBatches })
   },
 

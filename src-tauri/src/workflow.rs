@@ -463,15 +463,9 @@ pub struct Workflow {
     pub entry_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub end_node_ids: Vec<String>,
-    /// 阶段四：外部系统通过此 key 匹配模板
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_key: Option<String>,
-    /// 阶段四：Run 终态时回调此 URL
+    /// Run 终态时回调此 URL
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_url: Option<String>,
-    /// 阶段四：允许哪些来源触发（空 = 允许所有）
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_sources: Vec<String>,
     /// 阶段四 P2：定时触发 cron 表达式（如 "0 */5 * * * *" 每 5 分钟）。
     /// 为 None 时不参与定时调度。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -568,10 +562,7 @@ pub fn read_workflows() -> Vec<Workflow> {
         }
     };
     for wf in &list {
-        eprintln!(
-            "[workflow]   id={} name={} template_key={:?}",
-            wf.id, wf.name, wf.template_key
-        );
+        eprintln!("[workflow]   id={} name={}", wf.id, wf.name);
     }
     // 自动迁移旧模板：无 edges 字段时派生线性 Edge 链
     for wf in &mut list {
@@ -1021,7 +1012,6 @@ pub async fn run_workflow_core(
     let mut run = RunRecord {
         run_id: run_id.clone(),
         template_id: wf.id.clone(),
-        template_key: wf.template_key.clone(),
         status: RunStatus::Running,
         steps: vec![],
         created_at: now,
@@ -1324,7 +1314,6 @@ pub async fn run_workflow_core(
         let cb_payload = json!({
             "run_id": run_id,
             "template_id": wf.id,
-            "template_key": wf.template_key,
             "status": run.status,
             "created_at": run.created_at,
             "finished_at": run.finished_at,
@@ -1811,8 +1800,7 @@ async fn execute_agent_task_node(node: &WorkflowNode, current_input: &mut String
         };
     }
 
-    let hook_config = crate::agent_http::read_hook_server_config();
-    let callback_url = format!("http://localhost:{}/agent/submit", hook_config.port);
+    let callback_url = format!("http://localhost:{}/agent/submit", crate::agent_http::AGENT_HTTP_PORT);
     let store = crate::agent_http::get_store();
 
     let mut last_error = String::new();
@@ -3020,9 +3008,7 @@ mod tests {
             edges: vec![],
             entry_node_id: None,
             end_node_ids: vec![],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -3051,9 +3037,7 @@ mod tests {
             }],
             entry_node_id: Some("x".into()),
             end_node_ids: vec![],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -3075,9 +3059,7 @@ mod tests {
             edges: vec![],
             entry_node_id: None,
             end_node_ids: vec![],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -3116,9 +3098,7 @@ mod tests {
             ],
             entry_node_id: Some("a".into()),
             end_node_ids: vec![],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -3217,9 +3197,7 @@ mod tests {
             edges: vec![],
             entry_node_id: Some("b".into()),
             end_node_ids: vec![],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -3268,9 +3246,7 @@ mod tests {
             }],
             entry_node_id: Some("a".into()),
             end_node_ids: vec![],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: "2024-01-01".into(),
             updated_at: "2024-01-01".into(),
@@ -3298,9 +3274,7 @@ mod tests {
             edges: vec![],
             entry_node_id: None,
             end_node_ids: vec![],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -3324,9 +3298,7 @@ mod tests {
             edges: vec![],
             entry_node_id: None,
             end_node_ids: vec![],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -3408,9 +3380,7 @@ mod tests {
             }],
             entry_node_id: Some("a".into()),
             end_node_ids: vec!["b".into()],
-            template_key: None,
             callback_url: None,
-            allowed_sources: vec![],
             schedule: None,
             created_at: "2024-01-01".into(),
             updated_at: "2024-01-01".into(),

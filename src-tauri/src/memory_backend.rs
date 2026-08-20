@@ -1005,11 +1005,23 @@ pub async fn memory_consolidate(
             message: "本地 BGE-small 已完成全库语义筛查，未找到达到安全阈值的相近候选；未调用整理模型，也未修改记忆".into(),
         });
     }
-    const CONSOLIDATION_TOTAL_LIMIT: Duration = Duration::from_secs(75);
-    const CONSOLIDATION_CALL_LIMIT: Duration = Duration::from_secs(18);
-    let deadline = Instant::now() + CONSOLIDATION_TOTAL_LIMIT;
-    let known_ids = before
+    // Reasoning models plus the JSON-repair fallback need far more than the
+    // old 18s per adjudication call; a single slow provider reply used to
+    // skip the whole batch.  Give each call a generous but still bounded budget.
+    const CONSOLIDATION_CALL_LIMIT: Duration = Duration::from_secs(90);
+    // The global budget scales with the number of candidate batches so a full
+    // run is no longer cut short by the old fixed 75s ceiling, yet stays
+    // bounded so a stuck provider can never hang consolidation indefinitely.
+    let total_batches = candidate_batches.len();
+    let total_budget = Duration::from_secs(240u64.max(total_batches as u64 * 150))
+        .min(Duration::from_secs(1200));
+    let deadline = Instant::now() + total_budget;
+    // 用户自定义记忆只有用户能删改：不进入巩固的已知集合，任何合并
+    // 计划都无法把它们当作保留项改写或被合并项删除（前端候选已按
+    // local-l1: 前缀过滤，这里是后端兜底）。
+    let known_ids = local_before
         .iter()
+        .filter(|memory| !memory.user_defined)
         .map(|memory| memory.id.as_str())
         .collect::<std::collections::HashSet<_>>();
     let library_by_id = before
@@ -1019,7 +1031,6 @@ pub async fn memory_consolidate(
     let mut plan_actions = Vec::new();
     let mut skipped_length_pairs = 0usize;
     let mut skipped_timeout_batches = 0usize;
-    let total_batches = candidate_batches.len();
     for (batch_index, batch) in candidate_batches.into_iter().enumerate() {
         if Instant::now() >= deadline {
             skipped_timeout_batches += total_batches.saturating_sub(batch_index);

@@ -18,6 +18,35 @@ body {
   overflow: hidden;
 }
 
+/* ── Slim visible scrollbar for scrollable panels ───── */
+.scrollbar-slim {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+}
+.scrollbar-slim::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-slim::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-slim::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.55);
+}
+.scrollbar-slim::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.8);
+}
+.dark .scrollbar-slim {
+  scrollbar-color: rgba(100, 116, 139, 0.65) transparent;
+}
+.dark .scrollbar-slim::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.65);
+}
+.dark .scrollbar-slim::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.9);
+}
+
 /* ── Shared input styles (theme-aware) ─────────────── */
 .field-input {
   @apply w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors;

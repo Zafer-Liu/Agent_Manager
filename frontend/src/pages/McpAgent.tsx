@@ -1278,8 +1278,11 @@ function TestBadge({ result, small }: { result: { ok: boolean; msg: string }; sm
 function Toggle({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
   return (
     <button onClick={() => onChange(!enabled)}
-      className={`relative h-5 w-9 rounded-full transition-colors ${enabled ? 'bg-purple-600' : 'bg-gray-200 dark:bg-gray-700'}`}>
-      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+      // overflow-hidden keeps the thumb clipped inside the rounded track
+      // throughout the slide animation; left-0.5 pins the resting position
+      // so translate-x-4 lands flush with the track's right edge.
+      className={`relative h-5 w-9 shrink-0 overflow-hidden rounded-full transition-colors ${enabled ? 'bg-purple-600' : 'bg-gray-200 dark:bg-gray-700'}`}>
+      <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0'}`} />
     </button>
   )
 }
