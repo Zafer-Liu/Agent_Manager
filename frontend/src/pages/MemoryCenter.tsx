@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
@@ -46,7 +46,10 @@ function LayerWindow({ document }: { document: MemoryLayerDocument }) {
     「查看完整内容」，由用户手动展开。与 Tailwind `max-h-80` 保持同源。 */
 const DOCUMENT_COLLAPSED_MAX_HEIGHT_PX = 320
 
-function CollapsibleDocumentContent({ content, contentId, accent }: { content: string; contentId: string; accent: 'sky' | 'violet' }) {
+// memo 包装：props（content/contentId/accent）在页面级重渲染（App 5s Agent
+// 轮询、store 10s 遥测轮询）中保持不变，跳过文档子树的重复 diff 与
+// Markdown 重解析，消除滑动到 L2/L3 卡片时的卡顿。
+const CollapsibleDocumentContent = memo(function CollapsibleDocumentContent({ content, contentId, accent }: { content: string; contentId: string; accent: 'sky' | 'violet' }) {
   const ref = useRef<HTMLDivElement | null>(null)
   const [open, setOpen] = useState(false)
   const [overflows, setOverflows] = useState(false)
@@ -74,7 +77,7 @@ function CollapsibleDocumentContent({ content, contentId, accent }: { content: s
       </button>
     )}
   </>)
-}
+})
 
 export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOpenInjection }: { onOpenUsage?: () => void; onOpenPending?: () => void; onOpenOrganized?: () => void; onOpenInjection?: () => void }) {
   const { t } = useTranslation()
@@ -698,8 +701,10 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
             return <div className="mt-3 flex min-h-0 flex-1 flex-col border-t border-sky-200/70 pt-3 dark:border-sky-900/70">
               <UserMemoryList accent="sky" scope="l2" />
               {/* 已发布区块与右侧 L3 文档行同构：同一套底纹卡片 +
-                  绿色状态标签 + 灰色元信息行，两卡格式统一。 */}
-              <div className="min-w-0 flex-1 rounded-md bg-white/70 px-2.5 py-2 dark:bg-gray-900/30">
+                  绿色状态标签 + 灰色元信息行，两卡格式统一。
+                  content-visibility：滚出视口时跳过子树布局与绘制，
+                  降低滚动成本。 */}
+              <div className="min-w-0 flex-1 rounded-md bg-white/70 px-2.5 py-2 dark:bg-gray-900/30 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                   <span className="text-green-600 dark:text-green-300">已发布</span>
                   <span className="min-w-0 text-gray-500 dark:text-gray-400">{document.source_count} 条来源 · 约 {document.token_estimate} tokens · {localTime(document.created_at)}</span>
@@ -781,7 +786,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
           </div>
           {l3DraftError && <div role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs leading-5 text-red-800 dark:border-red-900/70 dark:bg-red-950/30 dark:text-red-200"><span className="font-medium">创建草案失败：</span>{l3DraftError}</div>}
           {visibleL3Documents.length || invalidL3Drafts.length ? <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain border-t border-violet-200/70 pt-3 dark:border-violet-900/70"><UserMemoryList accent="violet" scope="l3" />{visibleL3Documents.slice(0, 2).map((document) => {
-            return <div key={document.id} className="min-w-0 rounded-md bg-white/70 px-2.5 py-2 dark:bg-gray-900/30">
+            return <div key={document.id} className="min-w-0 rounded-md bg-white/70 px-2.5 py-2 dark:bg-gray-900/30 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                 <span className={document.state === 'published' ? 'text-green-600 dark:text-green-300' : document.state === 'archived' ? 'text-gray-500 dark:text-gray-400' : 'text-amber-700 dark:text-amber-300'}>{document.state === 'published' ? '已发布' : document.state === 'archived' ? '历史归档版' : '草案待确认'}</span>
                 <span className="min-w-0 text-gray-500 dark:text-gray-400">{document.source_count} 份来源 · 约 {document.token_estimate} tokens</span>
