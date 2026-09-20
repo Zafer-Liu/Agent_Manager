@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// 全部受支持的会话/Token 来源。
-pub const AGENT_SOURCE_IDS: [&str; 6] =
-    ["codex", "claude", "qoder", "workbuddy", "minimax", "kimi"];
+pub const AGENT_SOURCE_IDS: [&str; 8] =
+    ["codex", "claude", "qoder", "workbuddy", "minimax", "kimi", "copilot", "zcode"];
 
 pub fn is_supported_source(id: &str) -> bool {
     AGENT_SOURCE_IDS.contains(&id)
@@ -25,6 +25,9 @@ pub fn agent_label(id: &str) -> &'static str {
         "workbuddy" => "WorkBuddy",
         "minimax" => "MiniMax Code",
         "kimi" => "Kimi",
+        "copilot" => "GitHub Copilot",
+        // ZCode（Claude Code 兼容引擎）：目录 ~/.zcode。
+        "zcode" => "ZCode",
         _ => "Agent",
     }
 }
@@ -204,6 +207,19 @@ fn default_transcript_roots(id: &str) -> Vec<PathBuf> {
             .into_iter()
             .map(|home| home.join("sessions"))
             .collect(),
+        // GitHub Copilot 桌面端把会话存进 ~/.copilot/data.db（SQLite），目前
+        // 没有文档化的 jsonl 转录目录；Skill 装备目录已支持（~/.copilot/skills）。
+        "copilot" => Vec::new(),
+        // ZCode 是 Claude Code 兼容引擎：会话按账号哈希镜像在
+        // ~/.zcode/v2/agent-config/claude/<hash>/projects/<工程>/*.jsonl，
+        // 格式与 Claude Code 完全一致（扫描器按任意深度递归，多账号自动覆盖）。
+        // 注意其会话同时会镜像到 ~/.claude/projects，跨来源去重见
+        // memory_ingest 的原生扫描。
+        "zcode" => vec![home
+            .join(".zcode")
+            .join("v2")
+            .join("agent-config")
+            .join("claude")],
         _ => Vec::new(),
     }
 }
@@ -213,6 +229,8 @@ fn default_config_home(id: &str) -> Option<PathBuf> {
         "qoder" => qoder_home(),
         "minimax" => home().map(|home| home.join(".minimax")),
         "kimi" => kimi_code_home(),
+        "copilot" => home().map(|home| home.join(".copilot")),
+        "zcode" => home().map(|home| home.join(".zcode")),
         _ => None,
     }
 }
@@ -245,8 +263,74 @@ pub fn mcp_config_path(id: &str) -> Option<PathBuf> {
     match id {
         "qoder" | "minimax" | "kimi" => config_home(id).map(|home| home.join("mcp.json")),
         "workbuddy" => home().map(|home| home.join(".workbuddy").join(".mcp.json")),
+        // ZCode 的 MCP 服务器登记在 cli/config.json 的 mcp.servers 节点。
+        "zcode" => config_home(id).map(|home| home.join("cli").join("config.json")),
         _ => None,
     }
+}
+
+// ── Skill 路径解析 ────────────────────────────────────────────────────────────
+
+/// 该 Agent 的配置主目录，补齐 default_config_home 未覆盖的 codex/claude/workbuddy。
+fn resolved_config_home(id: &str) -> Option<PathBuf> {
+    if let Some(home) = config_home(id) {
+        return Some(home);
+    }
+    let home = home()?;
+    Some(match id {
+        "codex" => std::env::var("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".codex")),
+        "claude" => home.join(".claude"),
+        "workbuddy" => home.join(".workbuddy"),
+        "qoder" => qoder_home().unwrap_or_else(|| home.join(".qoder")),
+        "minimax" => home.join(".minimax"),
+        "kimi" => kimi_code_home().unwrap_or_else(|| home.join(".kimi-code")),
+        "zcode" => home.join(".zcode"),
+        _ => return None,
+    })
+}
+
+/// 每个 Agent 需要扫描 SKILL.md 的根目录列表（用于从 Agent 目录导入）。
+pub fn skill_scan_roots(id: &str) -> Vec<PathBuf> {
+    let Some(home) = resolved_config_home(id) else {
+        return Vec::new();
+    };
+    match id {
+        "codex" | "claude" => vec![home.join("skills")],
+        "qoder" => qoder_home_candidates()
+            .into_iter()
+            .flat_map(|base| [base.join("plugins").join("cache"), base.join("skills")])
+            .collect(),
+        "workbuddy" => vec![home.join("skills"), home.join("plugins").join("cache")],
+        "minimax" => vec![home.join(".builtin-skills"), home.join("plugins")],
+        "kimi" => vec![home.join("plugins")],
+        "copilot" => vec![home.join("skills")],
+        // ZCode 的 Skill 与 Claude Code 同构：~/.zcode/skills/<name>/SKILL.md。
+        "zcode" => vec![home.join("skills")],
+        _ => Vec::new(),
+    }
+}
+
+/// Kimi 只加载以插件形式注册（`kimi.plugin.json` 清单声明 `skills` 字段 +
+/// `plugins/installed.json` 登记启用）的 Skill，不扫描 `home/skills` 下的
+/// 独立目录。共享库同步到 Kimi 时统一打包为托管插件「agent-manager-skills」，
+/// 该插件根目录内的 `skills/` 即同步目标。
+pub fn kimi_skill_plugin_root() -> Option<PathBuf> {
+    kimi_code_home().map(|home| {
+        home.join("plugins")
+            .join("managed")
+            .join("agent-manager-skills")
+    })
+}
+
+/// 把共享库中的 Skill 同步回某个 Agent 时写入的目录，统一为 `<config_home>/skills`。
+/// Kimi 例外：写入托管插件的 `skills/` 子目录（见 `kimi_skill_plugin_root`）。
+pub fn skill_target_root(id: &str) -> Option<PathBuf> {
+    if id == "kimi" {
+        return kimi_skill_plugin_root().map(|root| root.join("skills"));
+    }
+    resolved_config_home(id).map(|home| home.join("skills"))
 }
 
 /// 从转录文件路径推导稳定会话 id。

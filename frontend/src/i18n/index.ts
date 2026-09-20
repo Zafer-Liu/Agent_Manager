@@ -42,4 +42,9 @@ export function getLanguage(): LangCode {
   return (i18n.language as LangCode) || 'zh'
 }
 
+/** Intl locale matching the current app language, for Intl.DateTimeFormat etc. */
+export function intlLocale(): string {
+  return getLanguage() === 'en' ? 'en-US' : 'zh-CN'
+}
+
 export default i18n

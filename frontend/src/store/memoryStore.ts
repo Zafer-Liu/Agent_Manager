@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { createBgeConsolidationCandidateBatches, searchMemoriesWithBge } from '../lib/bgeSemanticSearch'
-import type { AddEventItem, AddResult, AgentSourceInfo, ConsolidationResult, EngineStatus, HookStatus, IngestStatus, L1ResetResult, LocalMemoryStats, McpAccessLog, MemoryConversationDetail, MemoryImportance, MemoryImportanceSummary, MemoryImportResult, MemoryItem, MemoryLayerDocument, MemoryLayerRunResult, MemoryMcpStatus, MemoryMcpTarget, OrganizeConversationsResult, PendingMemorySession, SkillDocument, SkillItem, SkillSyncPreview, TelemetryEvent, TelemetryLiveStatus, TelemetrySummary, TelemetryUsageAnalytics, TelemetryUsageRecord, TelemetryUsageRefresh } from '../types/memory'
+import type { AddEventItem, AddResult, AgentSourceInfo, ConsolidationResult, EngineStatus, HookStatus, IngestStatus, L1ResetResult, LocalMemoryStats, McpAccessLog, McpAgentStatus, McpCatalogEntry, McpImportCandidate, MemoryConversationDetail, MemoryImportance, MemoryImportanceSummary, MemoryImportResult, MemoryItem, MemoryLayerDocument, MemoryLayerRunResult, MemoryMcpStatus, MemoryMcpTarget, OrganizeConversationsResult, PendingMemorySession, SkillAdoptResult, SkillDocument, SkillDriftFile, SkillItem, SkillPublishedDrift, SkillSyncPreview, TelemetryEvent, TelemetryLiveStatus, TelemetrySummary, TelemetryUsageAnalytics, TelemetryUsageRecord, TelemetryUsageRefresh } from '../types/memory'
 
 /** 全局记忆归属（未选择具体 Agent 时的 user_id） */
 export const GLOBAL_USER_ID = 'agent-manager'
@@ -22,6 +22,11 @@ async function request<T>(path: string, body: unknown): Promise<T> {
     const err = cause instanceof Error ? cause as MemoryApiError : new Error(String(cause)) as MemoryApiError
     throw err
   }
+}
+
+/** 轮询等值守卫用的序列化深比较；内容一致即视为未变化。 */
+function jsonEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
 }
 
 interface MemoryStore {
@@ -97,11 +102,30 @@ interface MemoryStore {
   scanSkills: () => Promise<SkillItem[]>
   loadSkills: (force?: boolean) => Promise<SkillItem[]>
   readSkill: (source: string, name: string) => Promise<SkillDocument>
+  skillDriftDetail: (target: string, source: string, name: string) => Promise<SkillDriftFile[]>
+  publishedDrift: () => Promise<SkillPublishedDrift[]>
+  adoptLocalSkill: (target: string, source: string, name: string) => Promise<SkillAdoptResult>
+  applySkillSyncOne: (target: string, source: string, name: string) => Promise<SkillItem>
   previewSkillSync: (target: string) => Promise<SkillSyncPreview>
   applySkillSync: (target: string, overwrite: boolean) => Promise<SkillSyncPreview>
   setSkillStatus: (source: string, name: string, status: 'draft' | 'published') => Promise<SkillItem>
   setSkillAssignment: (source: string, name: string, target: string, equipped: boolean) => Promise<SkillItem>
+  setSkillStatusBulk: (items: { source: string; name: string }[], status: 'draft' | 'published') => Promise<SkillItem[]>
+  setSkillAssignmentBulk: (items: { source: string; name: string }[], target: string, equipped: boolean) => Promise<SkillItem[]>
+  publishSkill: (source: string, name: string, assignedAgents: string[]) => Promise<SkillItem>
   rollbackSkillLatest: (source: string, name: string) => Promise<SkillItem>
+  deleteSkill: (source: string, name: string) => Promise<void>
+  // ── MCP 库 ──
+  mcpCatalog: McpCatalogEntry[]
+  mcpStatuses: McpAgentStatus[]
+  loadMcpCatalog: () => Promise<McpCatalogEntry[]>
+  upsertMcpEntry: (entry: McpCatalogEntry) => Promise<McpCatalogEntry>
+  deleteMcpEntry: (name: string) => Promise<void>
+  equipMcp: (name: string, agent: string) => Promise<McpCatalogEntry>
+  unequipMcp: (name: string, agent: string) => Promise<McpCatalogEntry>
+  syncMcpAgent: (agent: string) => Promise<void>
+  checkMcpStatuses: () => Promise<void>
+  importMcpFromAgents: () => Promise<McpImportCandidate[]>
   addMemory: (messages: { role: string; content: string }[]) => Promise<AddEventItem[]>
   /** 用户手动添加自定义长期记忆：只有用户能删改；scope 指定归属 L2/L3，两层相互独立。 */
   addUserMemory: (content: string, memoryType: string, scope: 'l2' | 'l3') => Promise<MemoryItem>
@@ -125,7 +149,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
   qoderHookStatus: null,
   codexHookStatus: null,
   workbuddyHookStatus: null,
-  memoryMcp: { codex_cli: null, claude_cli: null, codex_desktop: null, claude_desktop: null, qoder: null, workbuddy: null, minimax: null, kimi: null },
+  memoryMcp: { codex_cli: null, claude_cli: null, codex_desktop: null, claude_desktop: null, qoder: null, workbuddy: null, minimax: null, kimi: null, zcode: null },
   ingestStatus: null,
   telemetrySummary: null,
   telemetryLiveStatus: null,
@@ -136,6 +160,8 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
   l2Documents: [],
   l3Documents: [],
   skills: [],
+  mcpCatalog: [],
+  mcpStatuses: [],
   localMemoryStats: null,
   memoryCacheReady: false,
   skillCacheReady: false,
@@ -159,7 +185,13 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
         invoke<HookStatus>('memory_hook_status', { agentType: 'workbuddy' }),
         invoke<IngestStatus>('memory_ingest_status'),
       ])
-      set({ hookStatus: hook, qoderHookStatus: qoderHook, codexHookStatus: codexHook, workbuddyHookStatus: workbuddyHook, ingestStatus: ingest })
+      // 数据未变化时返回同一 state 引用，zustand 不通知订阅者 →
+      // 空闲轮询零重渲染。
+      set((state) => (
+        jsonEqual(state.hookStatus, hook) && jsonEqual(state.qoderHookStatus, qoderHook) && jsonEqual(state.codexHookStatus, codexHook) && jsonEqual(state.workbuddyHookStatus, workbuddyHook) && jsonEqual(state.ingestStatus, ingest)
+          ? state
+          : { hookStatus: hook, qoderHookStatus: qoderHook, codexHookStatus: codexHook, workbuddyHookStatus: workbuddyHook, ingestStatus: ingest }
+      ))
     } catch {
       /* 浏览器预览下无 Tauri 后端，忽略 */
     }
@@ -177,9 +209,10 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   async checkMemoryMcp() {
     try {
-      const targets: MemoryMcpTarget[] = ['codex_cli', 'claude_cli', 'codex_desktop', 'claude_desktop', 'qoder', 'workbuddy', 'minimax', 'kimi']
+      const targets: MemoryMcpTarget[] = ['codex_cli', 'claude_cli', 'codex_desktop', 'claude_desktop', 'qoder', 'workbuddy', 'minimax', 'kimi', 'zcode']
       const statuses = await Promise.all(targets.map((agentType) => invoke<MemoryMcpStatus>('memory_mcp_status', { agentType })))
-      set({ memoryMcp: Object.fromEntries(statuses.map((status) => [status.agent_type, status])) as Record<MemoryMcpTarget, MemoryMcpStatus> })
+      const next = Object.fromEntries(statuses.map((status) => [status.agent_type, status])) as Record<MemoryMcpTarget, MemoryMcpStatus>
+      set((state) => (jsonEqual(state.memoryMcp, next) ? state : { memoryMcp: next }))
     } catch {
       /* CLI may not be installed yet; retain the last visible state. */
     }
@@ -254,12 +287,17 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
         invoke<TelemetryUsageRecord[]>('telemetry_usage_records', { limit: Math.max(options.limit ?? 20, 200) }),
         invoke<TelemetryLiveStatus>('telemetry_live_status'),
       ])
-      set((state) => ({
-        telemetrySummary: summaryResult.status === 'fulfilled' ? summaryResult.value : state.telemetrySummary,
-        telemetryEvents: eventsResult.status === 'fulfilled' ? eventsResult.value : state.telemetryEvents,
-        telemetryUsageRecords: usageRecordsResult.status === 'fulfilled' ? usageRecordsResult.value : state.telemetryUsageRecords,
-        telemetryLiveStatus: liveResult.status === 'fulfilled' ? liveResult.value : state.telemetryLiveStatus,
-      }))
+      set((state) => {
+        const next = {
+          telemetrySummary: summaryResult.status === 'fulfilled' ? summaryResult.value : state.telemetrySummary,
+          telemetryEvents: eventsResult.status === 'fulfilled' ? eventsResult.value : state.telemetryEvents,
+          telemetryUsageRecords: usageRecordsResult.status === 'fulfilled' ? usageRecordsResult.value : state.telemetryUsageRecords,
+          telemetryLiveStatus: liveResult.status === 'fulfilled' ? liveResult.value : state.telemetryLiveStatus,
+        }
+        return jsonEqual(state.telemetrySummary, next.telemetrySummary) && jsonEqual(state.telemetryEvents, next.telemetryEvents) && jsonEqual(state.telemetryUsageRecords, next.telemetryUsageRecords) && jsonEqual(state.telemetryLiveStatus, next.telemetryLiveStatus)
+          ? state
+          : next
+      })
       return usageRefresh
     } catch {
       /* 浏览器预览下无 Tauri 后端，忽略 */
@@ -279,7 +317,8 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   async checkMcpAccessLogs() {
     try {
-      set({ mcpAccessLogs: await invoke<McpAccessLog[]>('memory_mcp_access_logs', { limit: 30 }) })
+      const logs = await invoke<McpAccessLog[]>('memory_mcp_access_logs', { limit: 30 })
+      set((state) => (jsonEqual(state.mcpAccessLogs, logs) ? state : { mcpAccessLogs: logs }))
     } catch {
       /* 浏览器预览或旧版后端不可用时保留当前内容。 */
     }
@@ -313,13 +352,15 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   async consolidateShortTermMemory() {
     const result = await invoke<MemoryLayerRunResult>('memory_short_term_consolidate', { days: 30 })
-    await get().loadMemoryLayers()
+    // Layer regeneration does not own user-defined L1 rows. Refresh both views
+    // so older custom memories remain visible even after a large L1 rebuild.
+    await Promise.all([get().loadMemoryLayers(), get().listMemories(true)])
     return result
   },
 
   async draftLongTermProfile() {
     const result = await invoke<MemoryLayerRunResult>('memory_long_term_profile_draft')
-    await get().loadMemoryLayers()
+    await Promise.all([get().loadMemoryLayers(), get().listMemories(true)])
     return result
   },
 
@@ -357,6 +398,26 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     return invoke<SkillDocument>('skill_read', { source, name })
   },
 
+  async skillDriftDetail(target, source, name) {
+    return invoke<SkillDriftFile[]>('skill_drift_detail', { target, source, name })
+  },
+
+  async publishedDrift() {
+    return invoke<SkillPublishedDrift[]>('skill_published_drift')
+  },
+
+  async adoptLocalSkill(target, source, name) {
+    const result = await invoke<SkillAdoptResult>('skill_adopt_local', { target, source, name })
+    set({ skills: get().skills.map(s => s.source === result.item.source && s.name === result.item.name ? result.item : s) })
+    return result
+  },
+
+  async applySkillSyncOne(target, source, name) {
+    const item = await invoke<SkillItem>('skill_sync_apply_one', { target, source, name })
+    set({ skills: get().skills.map(s => s.source === item.source && s.name === item.name ? item : s) })
+    return item
+  },
+
   async previewSkillSync(target) {
     return invoke<SkillSyncPreview>('skill_sync_preview', { target })
   },
@@ -366,22 +427,101 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     return result
   },
 
-  async setSkillStatus(source, name, status) {
-    const item = await invoke<SkillItem>('skill_set_status', { source, name, status })
-    await get().loadSkills(true)
-    return item
+ async setSkillStatus(source, name, status) {
+   const item = await invoke<SkillItem>('skill_set_status', { source, name, status })
+   set({ skills: get().skills.map(s => s.source === item.source && s.name === item.name ? item : s) })
+   return item
+ },
+
+ async setSkillAssignment(source, name, target, equipped) {
+   const item = await invoke<SkillItem>('skill_set_assignment', { source, name, target, equipped })
+   set({ skills: get().skills.map(s => s.source === item.source && s.name === item.name ? item : s) })
+   return item
+ },
+
+ async setSkillStatusBulk(items, status) {
+   const updated = await invoke<SkillItem[]>('skill_set_status_bulk', { items, status })
+   await get().loadSkills(true)
+   return updated
+ },
+
+ async setSkillAssignmentBulk(items, target, equipped) {
+   const updated = await invoke<SkillItem[]>('skill_set_assignment_bulk', { items, target, equipped })
+   await get().loadSkills(true)
+   return updated
+ },
+
+ async publishSkill(source, name, assignedAgents) {
+   const item = await invoke<SkillItem>('skill_publish', { source, name, assignedAgents })
+   set({ skills: get().skills.map(s => s.source === item.source && s.name === item.name ? item : s) })
+   return item
+ },
+
+ async rollbackSkillLatest(source, name) {
+   const item = await invoke<SkillItem>('skill_rollback_latest', { source, name })
+   set({ skills: get().skills.map(s => s.source === item.source && s.name === item.name ? item : s) })
+   return item
+ },
+
+ async deleteSkill(source, name) {
+   await invoke('skill_delete', { source, name })
+   set({ skills: get().skills.filter(s => !(s.source === source && s.name === name)) })
+ },
+
+  // ── MCP 库 ──
+
+  async loadMcpCatalog() {
+    const catalog = await invoke<McpCatalogEntry[]>('mcp_catalog_list')
+    set((state) => (jsonEqual(state.mcpCatalog, catalog) ? state : { mcpCatalog: catalog }))
+    return catalog
   },
 
-  async setSkillAssignment(source, name, target, equipped) {
-    const item = await invoke<SkillItem>('skill_set_assignment', { source, name, target, equipped })
-    await get().loadSkills(true)
-    return item
+  async upsertMcpEntry(entry) {
+    const saved = await invoke<McpCatalogEntry>('mcp_catalog_upsert', { entry })
+    set((state) => {
+      const exists = state.mcpCatalog.some((e) => e.name === saved.name)
+      const mcpCatalog = exists
+        ? state.mcpCatalog.map((e) => (e.name === saved.name ? saved : e))
+        : [...state.mcpCatalog, saved]
+      return { mcpCatalog }
+    })
+    return saved
   },
 
-  async rollbackSkillLatest(source, name) {
-    const item = await invoke<SkillItem>('skill_rollback_latest', { source, name })
-    await get().loadSkills(true)
-    return item
+  async deleteMcpEntry(name) {
+    await invoke('mcp_catalog_delete', { name })
+    set((state) => ({
+      mcpCatalog: state.mcpCatalog.filter((e) => e.name !== name),
+      mcpStatuses: state.mcpStatuses.filter((s) => s.name !== name),
+    }))
+  },
+
+  async equipMcp(name, agent) {
+    const saved = await invoke<McpCatalogEntry>('mcp_equip', { name, agent })
+    set((state) => ({ mcpCatalog: state.mcpCatalog.map((e) => (e.name === saved.name ? saved : e)) }))
+    await get().checkMcpStatuses()
+    return saved
+  },
+
+  async unequipMcp(name, agent) {
+    const saved = await invoke<McpCatalogEntry>('mcp_unequip', { name, agent })
+    set((state) => ({ mcpCatalog: state.mcpCatalog.map((e) => (e.name === saved.name ? saved : e)) }))
+    await get().checkMcpStatuses()
+    return saved
+  },
+
+  async syncMcpAgent(agent) {
+    await invoke('mcp_sync_agent', { agent })
+    await get().checkMcpStatuses()
+  },
+
+  async checkMcpStatuses() {
+    const statuses = await invoke<McpAgentStatus[]>('mcp_status_all')
+    set((state) => (jsonEqual(state.mcpStatuses, statuses) ? state : { mcpStatuses: statuses }))
+  },
+
+  async importMcpFromAgents() {
+    return invoke<McpImportCandidate[]>('mcp_import_from_agents')
   },
 
   async checkEngine() {

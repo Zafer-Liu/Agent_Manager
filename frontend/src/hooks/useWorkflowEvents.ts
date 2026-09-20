@@ -11,7 +11,7 @@ import { useWorkflowStore, type RunSummary, type RunStatus, type AcceptanceReque
  * - workflow-run-finished → 更新 Run 状态
  * - workflow-acceptance-requested → 阶段二：设置 pendingAcceptance
  *
- * 旧 workflow-done / workflow-step 事件 McpAgent.tsx 仍自己监听处理，
+ * 旧 workflow-done 事件仍由页面自行监听处理，
  * 这里只是额外把数据同步到 workflowStore 供 RunsHistory 页面使用。
  *
  * 在 App.tsx 顶层调用一次即可。

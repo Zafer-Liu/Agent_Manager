@@ -179,7 +179,7 @@ export interface MemoryMcpStatus {
   detail: string
 }
 
-export type MemoryMcpTarget = 'codex_cli' | 'claude_cli' | 'codex_desktop' | 'claude_desktop' | 'qoder' | 'workbuddy' | 'minimax' | 'kimi'
+export type MemoryMcpTarget = 'codex_cli' | 'claude_cli' | 'codex_desktop' | 'claude_desktop' | 'qoder' | 'workbuddy' | 'minimax' | 'kimi' | 'zcode'
 
 export interface IngestStatus {
   enabled: boolean
@@ -276,6 +276,8 @@ export interface TelemetryUsageAnalytics {
   input_tokens: number
   output_tokens: number
   cached_tokens: number
+  /** Tokens from estimated origins (optional: older backends omit it). */
+  estimated_tokens?: number
   records: TelemetryUsageRecord[]
   truncated_records: boolean
   buckets: TelemetryUsageBucket[]
@@ -340,6 +342,8 @@ export interface SkillItem {
   version: number
   status: 'draft' | 'published'
   assigned_agents: string[]
+  /** Skill 目录内打包发布的全部文件（相对路径，含 SKILL.md） */
+  files?: string[]
 }
 
 export interface SkillSyncPreview {
@@ -348,9 +352,75 @@ export interface SkillSyncPreview {
   update: SkillItem[]
   unchanged: SkillItem[]
   conflict: SkillItem[]
+  /** 已发布、应装备到该 target，但 target 本地无副本的 Skill */
+  missing: SkillItem[]
 }
 
 export interface SkillDocument {
   item: SkillItem
   content: string
+}
+
+/** 一份漂移对比文件：None 表示该侧不存在此文件或非 UTF-8 文本（二进制）。 */
+export interface SkillDriftFile {
+  path: string
+  shared_text: string | null
+  local_text: string | null
+}
+
+/** 已装备 Agent 在某个已发布 Skill 上的本地同步状态。 */
+export interface SkillDriftAgent {
+  agent: string
+  state: 'in_sync' | 'modified' | 'missing'
+  changed_files: number
+}
+
+/** 一个已发布 Skill 在全部已装备 Agent 上的漂移总览（「已发布」页仲裁数据）。 */
+export interface SkillPublishedDrift {
+  source: string
+  name: string
+  agents: SkillDriftAgent[]
+}
+
+/** 采纳 Agent 本地版本后，向其他 Agent 同步的结果。 */
+export interface SkillAdoptResult {
+  item: SkillItem
+  adopted_agent: string
+  /** 成功用新共享版本覆盖的 Agent（本地此前无修改）。 */
+  synced: string[]
+  /** 因自身本地副本也有修改而被跳过、未覆盖的 Agent。 */
+  skipped: string[]
+}
+
+// ── MCP 库 ───────────────────────────────────────────────────────────────────
+
+/** MCP 库的一个条目：跨 Agent 复用的 MCP 服务器定义（name 即服务器 id）。 */
+export interface McpCatalogEntry {
+  name: string
+  description: string
+  /** "stdio" | "sse" | "http" */
+  transport: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  url: string
+  headers: Record<string, string>
+  assigned_agents: string[]
+  created_at: string
+  updated_at: string
+}
+
+/** 库条目在某个已装备 Agent 上的安装状态。 */
+export interface McpAgentStatus {
+  name: string
+  agent: string
+  /** "installed" | "missing" | "differs" */
+  state: string
+}
+
+/** 「从 Agent 导入」在某个 Agent 配置里发现的候选服务器。 */
+export interface McpImportCandidate {
+  agent: string
+  entry: McpCatalogEntry
+  already_in_catalog: boolean
 }

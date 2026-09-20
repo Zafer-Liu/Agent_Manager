@@ -21,23 +21,23 @@ interface GithubRepoInfo {
 }
 
 interface RecommendedAgent {
-  name: string
+  nameKey: string
+  descKey: string
   url: string
-  description: string
   tags: string[]
 }
 
 const RECOMMENDED_AGENTS: RecommendedAgent[] = [
   {
-    name: '智析 · 数据分析 Agent',
+    nameKey: 'github.recommendedAgents.sageName',
+    descKey: 'github.recommendedAgents.sageDesc',
     url: 'https://github.com/Zafer-Liu/Data-Analysis-Agent',
-    description: '本地运行的 AI 数据分析助手，支持上传 CSV/Excel，用自然语言提问，自动生成图表与洞察报告。',
     tags: ['Data Analysis', 'Streamlit', 'Python'],
   },
   {
-    name: 'BrainBoost · AI 思维导图',
+    nameKey: 'github.recommendedAgents.brainboostName',
+    descKey: 'github.recommendedAgents.brainboostDesc',
     url: 'https://github.com/Zafer-Liu/BrainBoost',
-    description: '输入关键词，AI 自动生成思维导图与推演方案，支持语音输入、节点拖拽编辑、一键导出 Markdown / Word / PNG。',
     tags: ['Mind Map', 'React', 'TypeScript'],
   },
 ]
@@ -345,7 +345,7 @@ function TokenConfig() {
         {configured && (
           <span className="flex items-center gap-1 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] text-green-600 dark:bg-green-900/30 dark:text-green-400">
             <CheckCircle2 className="h-3 w-3" />
-            {t('github.tokenConfigured')}{fromEnv ? `（${t('github.tokenFromEnv')}）` : ''}
+            {t('github.tokenConfigured')}{fromEnv ? ` (${t('github.tokenFromEnv')})` : ''}
           </span>
         )}
         <span className="ml-auto text-gray-400">
@@ -406,6 +406,7 @@ function TokenConfig() {
 }
 
 function RecommendedCard({ agent, onSelect }: { agent: RecommendedAgent; onSelect: () => void }) {
+  const { t } = useTranslation()
   return (
     <button
       type="button"
@@ -414,8 +415,8 @@ function RecommendedCard({ agent, onSelect }: { agent: RecommendedAgent; onSelec
     >
       <GitFork className="mt-0.5 h-4 w-4 shrink-0 text-gray-400 group-hover:text-blue-500" />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-gray-800 dark:text-gray-200">{agent.name}</p>
-        <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400 line-clamp-2">{agent.description}</p>
+        <p className="text-sm font-medium text-gray-800 dark:text-gray-200">{t(agent.nameKey)}</p>
+        <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400 line-clamp-2">{t(agent.descKey)}</p>
         <div className="mt-1.5 flex flex-wrap gap-1">
           {agent.tags.map(t => (
             <span key={t} className="rounded-md bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-700 dark:text-gray-400">

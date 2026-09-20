@@ -135,10 +135,10 @@ function TunnelSection({ agents }: { agents: AgentState[] }) {
             <div className="text-sm text-amber-800 dark:text-amber-300">
               <p className="font-medium mb-1">{t('proxy.noCloudflared')}</p>
               <div className="space-y-1 font-mono text-xs">
-                <div><span className="text-amber-600 mr-2">Scoop：</span>
+                <div><span className="text-amber-600 mr-2">Scoop:</span>
                   <code className="rounded bg-amber-100 px-2 py-0.5 dark:bg-amber-900/40 select-all">scoop install cloudflared</code>
                 </div>
-                <div><span className="text-amber-600 mr-2">winget：</span>
+                <div><span className="text-amber-600 mr-2">winget:</span>
                   <code className="rounded bg-amber-100 px-2 py-0.5 dark:bg-amber-900/40 select-all">winget install Cloudflare.cloudflared</code>
                 </div>
               </div>

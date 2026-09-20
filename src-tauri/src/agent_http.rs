@@ -420,34 +420,52 @@ async fn route(
             )
         }
 
-        // ── 记忆注入：SessionStart hook 拉取共享上下文 ────────────────────
+        // ── 记忆注入：SessionStart / UserPromptSubmit hook 拉取共享上下文 ──
         // Claude 形态 harness（Qoder / Claude Code / WorkBuddy）只解析
         // hookSpecificOutput.additionalContext 的结构化 JSON stdout，纯文本
         // 会被当作 "no parsed output" 丢弃；端点直接返回协议格式，hook 命令
         // 保持 curl 透传。不依赖 MCP instructions，也不需要 Agent 主动调用工具。
+        // SessionStart 只注入 L2 近 30 天工作记忆；UserPromptSubmit
+        // 只注入 L3 长期记忆，每轮提问都执行。
         ("GET", p) if p == "/memory/context" || p.starts_with("/memory/context") => {
-            let source = p
-                .split_once('?')
-                .and_then(|(_, query)| {
-                    query
-                        .split('&')
-                        .find_map(|part| part.strip_prefix("source="))
-                })
+            let query = p.split_once('?').map(|(_, query)| query).unwrap_or("");
+            let source = query
+                .split('&')
+                .find_map(|part| part.strip_prefix("source="))
                 .filter(|source| matches!(*source, "claude" | "qoder" | "codex" | "workbuddy"))
                 .unwrap_or("unknown");
-            let context = crate::memory_mcp::shared_context_instructions();
-            // 与 MCP 调用同表审计：记忆注入摘要同时覆盖 Hook 启动注入与 MCP 检索，
-            // detail 保存完整注入正文，面板可逐字回放。
+            let event = query
+                .split('&')
+                .find_map(|part| part.strip_prefix("event="))
+                .filter(|event| matches!(*event, "SessionStart" | "UserPromptSubmit"))
+                .unwrap_or("SessionStart");
+            let context = if event == "UserPromptSubmit" {
+                crate::memory_mcp::hook_prompt_context()
+            } else {
+                crate::memory_mcp::hook_session_start_context()
+            };
+            // 与 MCP 调用同表审计：记忆注入摘要同时覆盖 Hook 启动注入、每轮
+            // 提问注入与 MCP 检索，detail 保存完整注入正文，面板可逐字回放。
             if let Some(store) = crate::telemetry_store::shared_store() {
-                let _ = store.try_record_mcp_access(
-                    crate::agent_sources::agent_label(source),
-                    "session_start_inject",
-                    &format!("会话启动注入 L3+L2 共享上下文（{} 字符）", context.chars().count()),
-                    Some(&context),
-                    true,
-                );
+                if event == "UserPromptSubmit" {
+                    let _ = store.try_record_mcp_access(
+                        crate::agent_sources::agent_label(source),
+                        "prompt_inject",
+                        &format!("每轮提问注入 L3 长期记忆（{} 字符）", context.chars().count()),
+                        Some(&context),
+                        true,
+                    );
+                } else {
+                    let _ = store.try_record_mcp_access(
+                        crate::agent_sources::agent_label(source),
+                        "session_start_inject",
+                        &format!("会话首次启动注入 L2 近 30 天工作记忆（{} 字符）", context.chars().count()),
+                        Some(&context),
+                        true,
+                    );
+                }
             }
-            ("200 OK", session_start_hook_body(source, context))
+            ("200 OK", hook_inject_body(source, event, context))
         }
 
         // ── 记忆沉淀 Agent Hook 回调 ──────────────────────────────────────
@@ -581,16 +599,16 @@ async fn route(
     }
 }
 
-/// SessionStart hook 的 stdout 响应体。Claude 形态 harness（Qoder / Claude
-/// Code / WorkBuddy）要求结构化 JSON，注入正文放在
-/// `hookSpecificOutput.additionalContext`；纯文本 stdout 会被丢弃（日志中的
-/// "winner=none (no parsed output)"）。Codex 的 hook 协议不同且未验证，
-/// 保持纯文本以免破坏其现有行为。
-fn session_start_hook_body(source: &str, context: String) -> String {
+/// Hook 注入的 stdout 响应体（SessionStart / UserPromptSubmit 同构）。Claude
+/// 形态 harness（Qoder / Claude Code / WorkBuddy）要求结构化 JSON，注入正文放
+/// 在 `hookSpecificOutput.additionalContext`，hookEventName 需与事件同名；纯文
+/// 本 stdout 会被丢弃（日志中的 "winner=none (no parsed output)"）。Codex 的
+/// hook 协议不同且未验证，保持纯文本以免破坏其现有行为。
+fn hook_inject_body(source: &str, event: &str, context: String) -> String {
     if matches!(source, "claude" | "qoder" | "workbuddy") {
         json!({
             "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
+                "hookEventName": event,
                 "additionalContext": context
             }
         })
@@ -737,12 +755,12 @@ pub fn list_agent_results() -> Vec<AgentResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::session_start_hook_body;
+    use super::hook_inject_body;
 
     #[test]
     fn claude_shape_sources_get_structured_hook_envelope() {
         for source in ["claude", "qoder", "workbuddy"] {
-            let body = session_start_hook_body(source, "记忆正文".to_string());
+            let body = hook_inject_body(source, "SessionStart", "记忆正文".to_string());
             let value: serde_json::Value =
                 serde_json::from_str(&body).expect("envelope must be valid JSON");
             assert_eq!(
@@ -757,16 +775,30 @@ mod tests {
     }
 
     #[test]
+    fn prompt_submit_envelope_names_its_own_event() {
+        let body = hook_inject_body("qoder", "UserPromptSubmit", "每轮注入正文".to_string());
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        assert_eq!(
+            value["hookSpecificOutput"]["additionalContext"],
+            "每轮注入正文"
+        );
+    }
+
+    #[test]
     fn codex_and_unknown_sources_keep_plain_text() {
         for source in ["codex", "unknown"] {
-            let body = session_start_hook_body(source, "plain body".to_string());
+            let body = hook_inject_body(source, "SessionStart", "plain body".to_string());
             assert_eq!(body, "plain body");
         }
     }
 
     #[test]
     fn envelope_escapes_special_characters() {
-        let body = session_start_hook_body("qoder", "line1\n\"quoted\"\t端".to_string());
+        let body = hook_inject_body("qoder", "SessionStart", "line1\n\"quoted\"\t端".to_string());
         let value: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             value["hookSpecificOutput"]["additionalContext"],

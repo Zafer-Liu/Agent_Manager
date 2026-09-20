@@ -6,7 +6,7 @@
 
 <p align="right"><a href="./README_EN.md">English</a></p>
 
-![版本](https://img.shields.io/badge/版本-v0.2.3-blue.svg)
+![版本](https://img.shields.io/badge/版本-v1.0.0%20Beta-blue.svg)
 ![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)
 [![Stars](https://img.shields.io/github/stars/Zafer-Liu/Agent_Manager?style=flat-square)](https://github.com/Zafer-Liu/Agent_Manager/stargazers)
 [![CI](https://img.shields.io/github/actions/workflow/status/Zafer-Liu/Agent_Manager/ci.yml?style=flat-square&label=CI)](https://github.com/Zafer-Liu/Agent_Manager/actions)
@@ -15,12 +15,11 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react)](https://react.dev)
 [![Rust](https://img.shields.io/badge/Rust-stable-CE422B?style=flat-square&logo=rust)](https://www.rust-lang.org)
 
-> 本地 AI Agent 的统一管理中心。  
+> 本地 AI Agent 的统一管理中心。
 > 添加 Agent 后，用户可在这里实现：
 >
-> - 一键启动 / 停止，实时查看日志
-> - 内嵌 Web UI 与交互式终端
-> - 用自然语言指挥所有 Agent
+> - 一键启动 / 停止，实时查看日志，内嵌 Web UI 与交互式终端
+> - 跨 Agent 分层记忆：所有 Agent 共享同一个大脑
 > - 一键生成临时公网分享链接
 
 <p align="center">
@@ -29,6 +28,7 @@
   <a href="#install">⚙️ 快速安装</a> ·
   <a href="#quickstart">🚀 快速上手</a> ·
   <a href="#llm-config">🤖 LLM 配置</a> ·
+  <a href="#memory">🧬 记忆中心</a> ·
   <a href="#share">🌐 分享 Agent</a> ·
   <a href="#faq">❓ FAQ</a>
 </p>
@@ -39,11 +39,10 @@
 <br>
 
 - [项目亮点](#features)
+- [推荐搭配 Agent](#recommended-agents)
 - [核心功能](#capabilities)
-  - [Dashboard 教室视图](#dashboard)
-  - [Manager Agent 自然语言指挥官](#manager)
   - [Agent 管理](#agents)
-  - [MCP Agent 工具对话](#mcp)
+  - [MCP 服务器中心](#mcp)
   - [代理发布与临时分享](#share)
   - [Port Manager 端口管理](#ports)
   - [记忆中心 跨 Agent 分层记忆](#memory)
@@ -65,14 +64,19 @@
 
 # ✨ 项目亮点
 
-**智管-Agent Manager** 是一个基于 Tauri 2 + React 19 的桌面应用，专门解决"本机跑了一堆 AI Agent，管理混乱"的问题。
+**智管-Agent Manager** 是一个基于 Tauri 2 + React 19 + Rust 的桌面应用，专门解决"本机跑了一堆 AI Agent，管理混乱"的问题。
 
 核心理念：**所有 Agent，一个窗口管到底。**
 
-- 不用开多个终端
-- 不用记各种启动命令
+<p align="center">
+  <img src="./Images/diagram-architecture.png" alt="智管-Agent Manager 系统架构" width="100%" />
+</p>
+
+- 不用开多个终端，不用记各种启动命令
 - 不用手动打开浏览器找端口
 - 用自然语言就能操控所有 Agent
+- 让所有编码 Agent 共享同一份分层记忆与 Skill 库
+- 开会时一键把 Agent 发布到公网演示
 
 ---
 <a id="recommended-agents"></a>
@@ -104,12 +108,7 @@
 | 查看运行状态       | 实时日志、PID、端口状态               |
 | 打开分析界面       | 内嵌 Web UI，无需切换浏览器           |
 | 团队临时演示       | 一键生成 Cloudflare Tunnel 公网链接 |
-| 多 Agent 协作   | 使用 Manager Agent 自然语言调度     |
-
-```text
-示例：
-帮我启动 Business Analytics Agent，然后打开它的界面
-```
+| 多 Agent 协作   | 可视化工作流编排 · 定时 / 外部触发     |
 
 👉 项目地址：[智能商业分析 Agent](https://github.com/Zafer-Liu/Data-Analysis-Agent)
 
@@ -120,63 +119,9 @@
 
 # 🧠 核心功能
 
-<a id="dashboard"></a>
-
-## 1️⃣ Dashboard — 教室视图
-
-所有 Agent 以可视化展示：**Manager Agent 在讲台**，其他 Agent 坐在学生座位上。
-
-![classroom](Images/classroom.png)
-
-一眼看清所有 Agent 的状态，悬停在 Agent 座位上，可直接：
-- 启动 / 停止
-- 查看详情
-- 打开 UI 界面
-
-点击讲台的 Manager Agent，直接跳转到自然语言指挥界面。
-
----
-
-## 2️⃣ Manager Agent — 自然语言指挥官
-
-用一句话控制所有 Agent，无需手动操作界面。
-
-![manager](Images/manager.png)
-
-```text
-帮我启动 Business Analytics Agent，然后打开它的界面
-```
-
-```text
-把 Mindmap 停掉，顺便告诉我它是干什么的
-```
-
-```text
-现在有哪些 Agent 在运行？
-```
-
-Manager Agent 会理解意图 → 自动调用工具 → 完成操作，并向你汇报结果。
-
-**支持的操作：**
-
-| 自然语言描述 | 实际行为 |
-|------------|---------|
-| 启动 / 停止某个 Agent | 调用 start/stop 接口 |
-| 打开某个 Agent 的界面 | 自动在标签栏打开 UI |
-| 打开某个 Agent 的终端 | 自动在标签栏打开 PTY 终端 |
-| 查看所有 Agent 状态 | 返回实时状态汇总表 |
-| 了解某个 Agent 的功能 | 读取该 Agent 目录下的 README |
-| 跳转到某个页面 | 自动导航 |
-
-**会话持久化：** 切换到其他页面再回来，对话历史不丢失。
-
-> 需要配置 LLM 提供商才能使用，详见 [LLM 配置说明](#llm-config)。
-
----
-
 <a id="agents"></a>
 
-## 3️⃣ Agent 管理
+## 1️⃣ Agent 管理
 
 ### 自动识别项目类型
 
@@ -198,33 +143,42 @@ Manager Agent 会理解意图 → 自动调用工具 → 完成操作，并向�
 - 支持一键全屏
 - 支持 WebSocket Token 自动填充（openclaw 类型 Agent）
 
-
 ---
 
 <a id="mcp"></a>
 
-## 4️⃣ MCP Agent — AI 工具对话
+## 2️⃣ MCP 服务器中心 — 统一管理与分发
 
-![mcp](Images/mcp.png)
+集中管理本机 MCP 服务器：既是**工作流可调用的运行时配置**，也是**分发到各 Agent 宿主的目录**。
 
-通过 MCP（Model Context Protocol）连接本地工具服务，与 AI 进行多轮工具调用对话。
-
-**MCP 服务器添加方式：**
+**本地服务器管理：**
 
 - **本地扫描**：自动检测 npm 全局安装的 MCP 包
 - **智能解析**：粘贴任意文本（官方文档、安装说明等），AI 自动提取配置
 - **手动添加**：填写 stdio / SSE 配置
+- 添加的服务器供[可视化工作流](#roadmap)直接调用
+
+**目录与分发：**
+
+- 常用 MCP 服务器集中保存为目录条目，按需一键安装到 Claude Code、Claude Desktop、Codex CLI、Codex Desktop、Qoder、WorkBuddy、MiniMax Code、Kimi、ZCode 等宿主
+- 从各 Agent 现有配置一键导入，安装状态实时可视（已安装 / 配置不一致）
 
 ---
 
 <a id="share"></a>
 
-## 5️⃣ 代理发布 — 临时分享与公网访问
+## 3️⃣ 代理发布 — 临时分享与公网访问
+
+无需固定 IP，无需域名，无需服务器，两条路径把本机 Agent 发布到公网：
+
+<p align="center">
+  <img src="./Images/diagram-share.png" alt="代理发布流程" width="100%" />
+</p>
 
 ### 🔗 临时分享（推荐 · 适合开会场景）
 ![agency](Images/Agency.png)
 
-无需固定 IP，无需域名，无需服务器。一键生成临时公网链接：
+一键生成临时公网链接：
 
 ```
 你的电脑 localhost:5001
@@ -268,7 +222,7 @@ brew install cloudflared
 
 <a id="ports"></a>
 
-## 6️⃣ Port Manager — 端口管理
+## 4️⃣ Port Manager — 端口管理
 ![port](Images/port.png)
 
 查看当前机器上所有正在监听的端口：
@@ -281,83 +235,67 @@ brew install cloudflared
 
 <a id="memory"></a>
 
-## 7️⃣ 记忆中心 — 跨 Agent 分层记忆
+## 5️⃣ 记忆中心 — 跨 Agent 分层记忆
 
 让所有 Agent 记住你的偏好、决策与当前进展。记忆中心从本机编码 Agent 的对话中自动提取记忆，分层管理、按需注入——**所有 Agent 共享同一个大脑**。
 
-### 🧬 三层记忆模型（L1–L3）
+<p align="center">
+  <img src="./Images/diagram-memory.png" alt="记忆中心分层流水线" width="100%" />
+</p>
+
+### 🧬 四层记忆模型（L0–L3）
 
 | 层级 | 名称 | 来源 | 作用 |
 |------|------|------|------|
-| L1 | 可检索记忆 | 会话完成后模型自动提取事实 / 决策 / 约束 / 偏好 | 语义检索，按需召回 |
-| L2 | 近 30 天工作记忆 | 一键压缩近 30 天 L1 证据 | 注入当前工作上下文 |
-| L3 | 长期 Profile | 基于已发布 L2 起草，人工确认后才注入 | 稳定的长期偏好与约束 |
+| L0 | 事件账本 | Hook 事件 / 本地转录扫描原文 | 审计源，整体从不注入 |
+| L1 | 可检索记忆 | 每次会话结束自动提取 1–3 条事实 / 决策 / 约束 / 偏好 | 语义 + 关键词按需召回 |
+| L2 | 近 30 天工作记忆 | 一键压缩近 30 天 L1 证据 | 会话启动时注入当前工作上下文 |
+| L3 | 长期 Profile | 基于 L2 起草，人工确认后才发布 | 每轮提问注入稳定的长期偏好与约束 |
 
 ### 📥 自动沉淀（Agent → 记忆）
 
-- 支持 Codex、Claude Code、Qoder、WorkBuddy、MiniMax Code、Kimi，Hook 采集或本地转录扫描两种方式
+- 支持 **Codex、Claude Code、Qoder、WorkBuddy、MiniMax Code、Kimi**，Hook 采集或本地转录扫描两种方式
 - 会话先落盘本地 SQLite 账本再异步提取——离线、模型未配置都不丢采集记录，可稍后手动重跑
-- 「待提取 / 已整理对话」面板可随时回看完整对话、查看提取进度与失败原因
+- 「待提取记忆」「已整理对话」面板可随时回看完整对话、查看提取进度与失败原因
+- L1 清洗与去重：本地 BGE 语义候选 + LLM 裁决，带可回滚检查点
 
 ### ✍️ 自定义记忆
 
 - 在「近 30 天工作记忆」或「长期 Profile」卡片下手写补充记忆，**两层相互独立**，各自展示、编辑、删除
 - 随整理与注入自动下发给 Agent；只有用户能删改，自动清洗不会碰它们
 
-### 🧹 记忆清洗与去重
-
-- 本地语义候选分块生成并实时显示进度，后台裁决预算自适应，大量记忆也能完整跑完
-- 清洗前保留回滚检查点，重复条目删除安全可控
-
 ### 💉 记忆注入（记忆 → Agent，双通道）
 
 | 通道 | 机制 | 适用场景 |
 |------|------|----------|
-| 会话启动注入 | SessionStart 自动拉取 L3 + L2 记忆，无需工具调用 | 支持 Hook 的 Agent 开局即带上下文 |
+| Hook 自动注入 | SessionStart 仅注入 L2 近 30 天记忆；UserPromptSubmit 每轮仅注入 L3 长期记忆 | 开局获取工作背景，后续轮次持续遵循长期偏好 |
 | 共享记忆 MCP | Agent 按需调用 `recall_memory` 语义检索 | 只取任务相关记忆，控制上下文体积 |
 
-### 📊 Token 用量与 Skill 共享
+**一键接入：** 记忆中心可为 **Claude Code、Claude Desktop、Codex CLI、Codex Desktop、Qoder、WorkBuddy、MiniMax Code、Kimi、ZCode** 九个宿主一键安装 / 卸载共享记忆 MCP，并为 Claude Code、Codex、Qoder、WorkBuddy 四个支持 Hook 的 Agent 管理采集与注入 Hook；数据目录支持按设备自定义。
 
-- 聚合各 Agent 本机转录的真实输入 / 输出 / 缓存用量，口径与供应商计费对齐
-- 扫描各 Agent 的 `SKILL.md` 汇入共享 Skill 库，按内容哈希预览新增 / 更新 / 冲突后确认同步
+### ☁️ 云保险库 — 跨设备同步（可选）
 
-> 各 Agent 接入方式与遥测端点格式见下文「跨 Agent 记忆、用量与 Skill（实验性）」一节。
+- 同步范围：L2 / L3 已发布文档 + 用户自定义记忆，多台设备共享同一份大脑
+- **AES-256-GCM 端到端加密**：密钥派生自同步密码、不落盘，服务端只存密文、对内容零理解
+- CAS 冲突检测、增量拉取、墓碑删除；本地 SQLite 永远权威，云端不可达不影响注入
+- 服务端单文件部署，开源在 [`vault/`](vault/README.md)：支持 Docker / Railway / 香橙派 + Tailscale 自建
+
+### 📊 Token 用量与共享 Skill 库
+
+- **用量统计**：聚合各 Agent 本机转录的真实输入 / 输出 / 缓存用量，口径与供应商计费对齐
+- **Skill 库**：扫描各 Agent 的 `SKILL.md` 汇入共享库，按内容哈希预览新增 / 更新 / 冲突后确认同步；「发布 + 装备」一步完成，支持批量操作与各 Agent 版本漂移检测
+
+> 外部系统接入与遥测端点格式见[遥测与外部接入](#telemetry)。
 
 ---
 
 <a id="install"></a>
 
-# 🧠 跨 Agent 记忆、用量与 Skill（实验性）
-
-Memory Center 以本地 SQLite 作为事件账本：Hook 事件会先落盘，再异步抽取为记忆，因此记忆服务离线不会丢失采集记录。
-
-- **Codex、Claude Code、Qoder**：可在 Memory Center 分别安装/卸载本机 Hook；端口和鉴权跟随「外部触发」配置。
-- **WorkBuddy**：不写入其 Claude Code 配置，避免重复采集；可通过标准遥测端点提交已聚合的会话/用量数据。
-- **Token**：Codex、Claude、WorkBuddy 从本机转录读取真实用量；Qoder 当前转录未提供供应商 usage，因此显示明确标记的本地估算。所有 Agent 的零散 Hook 事件只保留审计记录，不会重复累计；适配器可用 `session_usage` 以真实最终值覆盖估算。
-- **自定义记忆**：在「近 30 天工作记忆」或「长期 Profile」卡片下手写补充记忆（两层相互独立），随整理与注入自动下发给 Agent；只有用户能编辑或删除，自动清洗不会碰它们。
-- **记忆清洗与去重**：本地语义候选分块生成并实时显示进度，后台裁决预算自适应，大量记忆也能完整跑完。
-- **Skill**：扫描各 Agent 的 `SKILL.md`，复制到共享库后按内容哈希预览新增/更新/冲突，再由用户确认同步。
-
-标准遥测端点：`POST http://127.0.0.1:<hook-port>/telemetry/events/{codex|workbuddy|claude|qoder}`。
-
-```json
-{
-  "session_id": "stable-session-id",
-  "event": "session_usage",
-  "cwd": "D:/Github-repo/example",
-  "usage": { "input_tokens": 120, "output_tokens": 48, "cached_tokens": 60 },
-  "usage_scope": "session"
-}
-```
-
-`input_tokens` 必须是该会话完整输入总量，`cached_tokens` 仅作缓存命中明细展示（不要再加到 `input_tokens` 或 Token 总量）。同一 `source + session_id` 后续重报会覆盖先前值，而非叠加。
-
 # ⚙️ 安装方式
 
 ### 下载预构建安装包（推荐）
 
-从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/releases) 下载最新版本：
-
+从 [Releases](https://github.com/Zafer-Liu/Agent_Manager/releases) 下载最新版本（当前提供 Windows x64 安装包，macOS 支持即将到来）。
 
 双击安装包，按提示安装即可。
 
@@ -395,7 +333,7 @@ npm run build
 ## 第一步：添加 Agent
 
 1. 侧边栏点击 **Agents** → 右上角 **＋ New Agent**
-2. 点击 📁 选择 Agent 的项目目录
+2. 点击 📁 选择 Agent 的项目目录（或切换到「从 GitHub 安装」直接拉取仓库）
 3. 应用自动识别项目类型，填写启动命令
 4. 填写名称，确认端口号（有 Web UI 的 Agent 需要）→ **保存**
 5. 点击 ▶ 启动
@@ -405,12 +343,11 @@ npm run build
 - 有 Web UI 的 Agent（Streamlit / Flask 等）：点击 **Open UI** → 在应用内嵌标签页打开
 - TUI 类 Agent（Claude Code 等）：点击 **Open Terminal** → 在应用内嵌终端打开
 
-## 第三步：使用 Manager Agent（可选）
+## 第三步：开启记忆中心（可选）
 
-1. 在 **MCP Agent → LLM 设置** 中添加 LLM 提供商（见[LLM 配置说明](#llm-config)）
-2. 点击侧边栏 **Manager**
-3. 选择 LLM 提供商
-4. 用自然语言发送指令
+1. 在 **设置 → LLM 与记忆提取** 中确认记忆提取模型（可选 Ollama 本地模型）
+2. 打开 **记忆中心** → 在「自动沉淀」中为 Codex / Claude Code 等安装 Hook
+3. 正常使用各 Agent，会话记忆自动沉淀；在「近 30 天工作记忆」「长期 Profile」卡片一键生成并注入
 
 ## 第四步：开会时分享 Agent（可选）
 
@@ -424,7 +361,7 @@ npm run build
 
 # 🤖 LLM 配置说明
 
-Manager Agent 和 MCP Agent 都需要 LLM 驱动。在 **MCP Agent → LLM 设置** 中添加：
+MCP 分发与记忆提取都依赖 LLM。在 **设置 → LLM 与记忆提取** 中添加：
 
 | 字段 | 说明 | 示例 |
 |------|------|------|
@@ -486,8 +423,38 @@ LLM 设置页内置 **Ollama 本地模型** 模块：
 | Agent 配置 | `%APPDATA%\agent-manager\agents.json` | `~/Library/Application Support/agent-manager/agents.json` |
 | LLM 提供商 | `%APPDATA%\agent-manager\llm_config.json` | 同左 |
 | 代理 / 用户配置 | `%APPDATA%\agent-manager\proxy.json` | 同左 |
+| 记忆与遥测数据库 | `%APPDATA%\agent-manager\telemetry.sqlite3` | 同左 |
+| Agent 数据源目录覆盖 | `%APPDATA%\agent-manager\agent_source_paths.json` | 同左 |
 | 生成的 Caddyfile | `%APPDATA%\agent-manager\Caddyfile` | 同左 |
 | MCP 服务器配置 | `%APPDATA%\Claude\claude_desktop_config.json` | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+
+「设置」页支持一键**导出 / 导入配置备份**，方便迁移与灾难恢复。
+
+---
+
+<a id="telemetry"></a>
+
+# 🔌 遥测与外部接入（实验性）
+
+记忆流水线以本地 SQLite 作为事件账本：Hook 事件先落盘，再异步抽取为记忆，因此记忆服务离线不会丢失采集记录。
+
+- **Codex、Claude Code、Qoder**：可在记忆中心分别安装 / 卸载本机 Hook；端口和鉴权跟随「外部触发」配置
+- **WorkBuddy**：不写入其 Claude Code 配置，避免重复采集；可通过标准遥测端点提交已聚合的会话 / 用量数据
+- **Token 口径**：Codex、Claude、WorkBuddy 从本机转录读取真实用量；Qoder、MiniMax Code、Kimi 当前转录未提供完整供应商 usage 的部分，显示明确标记的本地估算。所有 Agent 的零散 Hook 事件只保留审计记录，不会重复累计；适配器可用 `session_usage` 以真实最终值覆盖估算
+
+标准遥测端点：`POST http://127.0.0.1:<hook-port>/telemetry/events/{codex|workbuddy|claude|qoder}`。
+
+```json
+{
+  "session_id": "stable-session-id",
+  "event": "session_usage",
+  "cwd": "D:/Github-repo/example",
+  "usage": { "input_tokens": 120, "output_tokens": 48, "cached_tokens": 60 },
+  "usage_scope": "session"
+}
+```
+
+`input_tokens` 必须是该会话完整输入总量，`cached_tokens` 仅作缓存命中明细展示（不要再加到 `input_tokens` 或 Token 总量）。同一 `source + session_id` 后续重报会覆盖先前值，而非叠加。
 
 ---
 
@@ -495,27 +462,46 @@ LLM 设置页内置 **Ollama 本地模型** 模块：
 
 # 🗺️ 版本更新
 
-> **当前版本 `v0.3.0`** · 2026 年 7 月 12 日
+> **当前版本 `v1.0.0 Beta`**
+
+## v1.0.0 Beta 主要更新
+
+**🧬 记忆中心 — 跨 Agent 分层记忆（本版本核心）**
+
+- ✅ **L0–L3 四层记忆模型**：事件账本 → 可检索记忆 → 近 30 天工作记忆 → 长期 Profile（人工发布闸门，草案可编辑）
+- ✅ **自动沉淀**：支持 Codex、Claude Code、Qoder、WorkBuddy、MiniMax Code、Kimi，Hook 采集 + 本地转录扫描双通道；SQLite 账本先落盘，离线不丢记录
+- ✅ **双通道注入**：SessionStart 注入 L2、UserPromptSubmit 每轮注入 L3；共享记忆 MCP `recall_memory` 按需语义检索
+- ✅ **共享记忆 MCP 一键接入九大宿主**：Claude Code / Claude Desktop / Codex CLI / Codex Desktop / Qoder / WorkBuddy / MiniMax Code / Kimi / ZCode
+- ✅ **记忆清洗与去重**：本地 BGE 语义候选分块生成 + LLM 裁决预算自适应，回滚检查点保证删除安全
+- ✅ **独立管理面板**：待提取记忆、已整理对话、记忆注入（双向视图 + 审计摘要回放）
+- ✅ **云保险库**：L2 / L3 与自定义记忆跨设备同步，AES-256-GCM 端到端加密，自部署服务端（[vault/](vault/README.md)，支持 Docker / Railway / 香橙派）
+- ✅ **共享 Skill 库**：扫描各 Agent `SKILL.md`，「发布 + 装备」一步完成，批量操作 + 版本漂移检测
+- ✅ **Token 用量统计**：从本机转录读取真实输入 / 输出 / 缓存用量，口径与供应商计费对齐
+
+**⚙️ 管理与体验**
+
+- ✅ **Ollama 本地模型接入**：自动列出已拉取模型，一键接入为自定义提供商或记忆提取模型
+- ✅ **MCP 服务器中心**：MCP 服务器目录统一管理与多宿主一键分发
+- ✅ **配置导入导出备份**：一键迁移与恢复
+- ✅ **从 GitHub 安装 Agent**：填入仓库地址自动拉取并填充配置
+
+📖 [查看完整 Changelog](https://github.com/Zafer-Liu/Agent_Manager/releases)
+
+---
 
 ## v0.3.0 主要更新
 
-**阶段四：外部协作能力（P0-P2 全部完成）**
+**阶段四：外部协作能力**
 
 - ✅ **本地 Hook Server**：默认 `127.0.0.1:9420`，外部系统通过 HTTP 推任务进 Agent Manager，端口和 auth_token 可配置
-- ✅ **agent_task 节点**：工作流可调度本地/远程子 Agent（不限于 MCP Server），oneshot channel 挂起等待结果
+- ✅ **agent_task 节点**：工作流可调度本地/远程子 Agent，oneshot channel 挂起等待结果
 - ✅ **Callback 出站通知**：Run 终态时回调外部 URL，指数退避重试 3 次
-- ✅ **Fan-out 并行执行**：支持 static/by_field/llm_split 拆分策略，`join_all` 并行执行子任务
+- ✅ **Fan-out 并行执行**：static / by_field / llm_split 拆分策略，`join_all` 并行执行子任务
 - ✅ **DispatchStrategy 调度策略**：Fixed / Failover / CapabilityMatch / Random 四种策略
 - ✅ **定时触发（cron）**：自建 5 字段 cron 解析器，后台线程每分钟检查模板 schedule 字段
 - ✅ **McpTransport Http 变体**：支持远程 MCP Server（Streamable HTTP transport）
-- ✅ **前端 SVG DAG 画布**：从线性列表升级为 SVG 绘制的 DAG 画布，支持拖拽定位和工具栏
-- ✅ **ExternalTriggers 设置页**：Hook Server 状态显示、端口/Token 配置、curl 示例、重启功能
-- ✅ **运行历史来源列**：区分手动/外部/返工/定时触发，彩色标签
-- ✅ **Cloudflare Tunnel 隧道条目**：ProxyManager 动态获取 Hook 端口传入隧道配置
-- ✅ **工作流验收面板**：Acceptance/Rework 闭环，对话流内嵌验收卡片
-- ✅ **Sweeper 自愈巡检**：后台 30s interval 检测 Step 超时并标记 failed
-- ✅ **FailureTrace 诊断链路**：MCP stderr ring buffer + 失败原因分类 + 重试历史
-- ✅ **Metrics 事件源**：append-only JSONL 事件源 + 前端四卡片本地聚合
+- ✅ **前端 SVG DAG 画布**：支持拖拽定位和工具栏
+- ✅ **ExternalTriggers 设置页**、运行历史来源列、工作流验收面板、Sweeper 自愈巡检、FailureTrace 诊断链路、Metrics 事件源
 
 📖 [查看完整 Changelog](https://github.com/Zafer-Liu/Agent_Manager/releases)
 
@@ -523,21 +509,11 @@ LLM 设置页内置 **Ollama 本地模型** 模块：
 
 ## v0.2.3 主要更新
 
-**新功能：**
-
-- ✅ **可视化工作流**：拖拽组合 MCP 工具、LLM 与完整 MCP Agent 节点，支持流式步骤反馈
-- ✅ **MCP Agent 增强**：对话中选择并启用多个 MCP Server，工具调用过程可折叠查看
-- ✅ **MCP 智能配置**：支持本地目录扫描、JSON/README/命令文本 AI 解析及 stdio/SSE 配置
-- ✅ **中英文界面**：新增完整 i18n 与语言切换，覆盖主要页面和操作提示
-- ✅ **配置持久化**：记住已选 LLM、启用的 MCP Server 和工作流选择
-- ✅ **持续集成**：Push、Pull Request 和正式发布前自动执行前端检查与 Rust 测试
-
-**修复：**
-
-- 修复“用 AI 解析”失败后界面看起来无响应的问题，并显示真实 API 错误
-- 修复中文 README 截断可能触发字符串边界异常的问题
-- 修复工作流 MCP Agent 节点的异步运行时冲突和上下文传递问题
-- 修复工作流展开内容仍被截断、删除后列表刷新竞态等问题
+- ✅ 可视化工作流：拖拽组合 MCP 工具、LLM 与完整 MCP Agent 节点，支持流式步骤反馈
+- ✅ MCP Agent 增强：对话中启用多个 MCP Server，工具调用过程可折叠查看
+- ✅ MCP 智能配置：本地目录扫描、JSON / README / 命令文本 AI 解析及 stdio / SSE 配置
+- ✅ 中英文界面：完整 i18n 与语言切换
+- ✅ 持续集成：Push、Pull Request 和正式发布前自动执行前端检查与 Rust 测试
 
 📖 [查看完整 Changelog](https://github.com/Zafer-Liu/Agent_Manager/releases)
 
@@ -548,30 +524,33 @@ LLM 设置页内置 **Ollama 本地模型** 模块：
 # ❓ FAQ
 
 <details>
-<summary><b>🤖 Manager Agent 相关</b></summary>
+<summary><b>🧬 记忆中心相关</b></summary>
 
 <br>
 
 <details>
-<summary><b>Manager Agent 没有反应 / 提示未选择提供商？</b></summary>
+<summary><b>会话一直没有被提取成记忆？</b></summary>
 
-1. 前往 **MCP Agent → LLM 设置**，添加 LLM 提供商
-2. 点击"测试连接"，确认绿色通过
-3. 回到 Manager 页面，在顶部下拉框选择该提供商
+按顺序检查：
 
-</details>
-
-<details>
-<summary><b>Manager Agent 说"找不到 Agent"？</b></summary>
-
-LLM 使用的是 Agent 的名称，确认你说的名称和 Agent 配置中的名称一致（支持模糊匹配，不区分大小写，也支持用下划线替代空格）。
+1. 记忆提取依赖 LLM：确认 **设置 → LLM 与记忆提取** 中至少有一个测试通过的提供商（或已接入 Ollama 本地模型）
+2. 打开 **记忆中心 → 待提取记忆** 面板，查看会话是否在队列中、失败原因是什么
+3. 确认对应 Agent 的 Hook 已安装（采集方式显示「Hook 已安装」），或其转录目录配置正确（本地转录扫描型 Agent 依赖目录探测）
+4. 失败的会话可在面板中手动重跑
 
 </details>
 
 <details>
-<summary><b>切换页面后 Manager Agent 对话历史消失了？</b></summary>
+<summary><b>L3 长期 Profile 修改后没生效？</b></summary>
 
-这是 v0.2.0 已修复的问题。Manager Agent 组件始终在后台保持挂载，只是通过 CSS 隐藏。如果仍然消失，请确认使用的是 v0.2.0 版本。
+L3 采用「草案 → 人工发布」闸门：由 L2 起草的草案必须点击 **确认发布** 才会注入；已发布的 L3 也可以直接编辑，保存后立即生效。若通过 MCP 检索不到新内容，确认宿主的共享记忆 MCP 处于已连接状态。
+
+</details>
+
+<details>
+<summary><b>云保险库同步冲突了怎么办？</b></summary>
+
+本地 SQLite 永远是权威数据，云端不可达不影响注入。同步冲突时应用会弹出对话框，由你选择保留哪一侧版本；服务端只存 AES-256-GCM 密文，无法读取或篡改内容。
 
 </details>
 

@@ -215,7 +215,7 @@ function StepCard({ step }: { step: StepInstance }) {
   const { t } = useTranslation()
   const statusLabel = t(`workflow.nodeState.${step.status}`, step.status)
   const kindLabel = step.kind
-    ? t(`mcpAgent.nodeKind${step.kind.charAt(0).toUpperCase()}${step.kind.slice(1)}`, step.kind)
+    ? t(`workflow.builder.nodeKind${step.kind.charAt(0).toUpperCase()}${step.kind.slice(1)}`, step.kind)
     : ''
   return (
     <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 bg-white dark:bg-gray-900">

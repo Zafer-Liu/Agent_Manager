@@ -1,11 +1,14 @@
 mod agent;
 mod agent_http;
+mod backup;
+mod cloud_sync;
 mod agent_sources;
 mod commands;
 mod github;
 mod llm;
 mod mcp;
 mod mcp_agent;
+mod mcp_registry;
 mod memory_backend;
 mod memory_ingest;
 mod memory_mcp;
@@ -27,7 +30,6 @@ use commands::*;
 use github::*;
 use llm::*;
 use mcp::*;
-use mcp_agent::*;
 use memory_backend::*;
 use memory_ingest::*;
 use memory_mcp::*;
@@ -35,7 +37,7 @@ use ports::*;
 use proxy::*;
 use pty::*;
 use skill_registry::*;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use telemetry_store::*;
 use ui_window::*;
 use updater::*;
@@ -94,17 +96,23 @@ pub fn run() {
             telemetry_store::init_shared(telemetry);
             // Populate local indexes after the window can paint.  These jobs
             // are idempotent and write their result to SQLite, so opening a
-            // dashboard never needs to re-walk agent directories.
-            tauri::async_runtime::spawn_blocking(|| {
-                let _ = skill_registry::skill_list();
+            // memory page never needs to re-walk agent directories.
+            let startup_handle = _app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let _ = skill_registry::skill_list_impl();
                 let _ = memory_ingest::telemetry_backfill_conversations();
                 if let Some(store) = telemetry_store::shared_store() {
                     let _ = store.refresh_transcript_usage();
                 }
+                // The startup rebuild races the frontend's first read; ping
+                // the frontend so an open usage page re-queries the ledger.
+                let _ = startup_handle.emit("telemetry-updated", ());
             });
             let ingest2 = ingest.clone();
             // 静默会话节流巡检
             memory_ingest::start_idle_flusher(shared, ingest2);
+            // 云端记忆库定时同步（每分钟检查设置，无需重启）
+            cloud_sync::start_cloud_sync_scheduler();
 
             Ok(())
         })
@@ -137,10 +145,6 @@ pub fn run() {
             ollama_config_get,
             ollama_config_set,
             test_ollama_connection,
-            // MCP Agent
-            run_mcp_agent,
-            chat_with_mcp,
-            manager_chat,
             // Workflow
             list_workflows,
             save_workflow,
@@ -251,8 +255,34 @@ pub fn run() {
             skill_sync_apply,
             skill_set_status,
             skill_set_assignment,
-            skill_rollback_latest,
-        ])
+            skill_set_status_bulk,
+            skill_set_assignment_bulk,
+            skill_publish,
+           skill_rollback_latest,
+           skill_delete,
+            skill_drift_detail,
+            skill_published_drift,
+            skill_adopt_local,
+            skill_sync_apply_one,
+            // MCP registry (MCP 库)
+            mcp_registry::mcp_catalog_list,
+            mcp_registry::mcp_catalog_upsert,
+            mcp_registry::mcp_catalog_delete,
+            mcp_registry::mcp_equip,
+            mcp_registry::mcp_unequip,
+            mcp_registry::mcp_status_all,
+            mcp_registry::mcp_import_from_agents,
+            mcp_registry::mcp_sync_agent,
+            // Backup & restore
+            backup::config_export,
+            backup::config_import,
+            // Cloud Memory Vault
+            cloud_sync::cloud_vault_get_settings,
+            cloud_sync::cloud_vault_save_settings,
+            cloud_sync::cloud_vault_test_connection,
+            cloud_sync::cloud_vault_sync,
+            cloud_sync::cloud_vault_status,
+       ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

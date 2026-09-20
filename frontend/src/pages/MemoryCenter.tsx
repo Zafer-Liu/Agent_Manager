@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
@@ -8,10 +8,12 @@ import {
   ChevronRight, Plus,
 } from 'lucide-react'
 import { useMemoryStore } from '../store/memoryStore'
-import type { ConsolidationResult, MemoryImportResult, MemoryItem, MemoryLayerDocument } from '../types/memory'
+import type { ConsolidationResult, MemoryImportance, MemoryImportResult, MemoryItem, MemoryLayerDocument } from '../types/memory'
 import { normalizeL2Document } from '../lib/thinking'
 import { MemoryMarkdown } from '../components/MemoryMarkdown'
+import { CloudVaultCard } from '../components/CloudVaultCard'
 import { sourceLabel } from '../components/ConversationDialog'
+import { intlLocale } from '../i18n'
 
 function localTime(value: string) {
   // Rust serializes UTC timestamps with nanosecond precision. Normalise to
@@ -19,7 +21,7 @@ function localTime(value: string) {
   // not fall back to exposing the raw RFC3339 value.
   const normalized = value.trim().replace(/(\.\d{3})\d+(?=(Z|[+-]\d{2}:\d{2})$)/, '$1')
   const date = new Date(normalized)
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', {
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(intlLocale(), {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   }).format(date)
 }
@@ -37,9 +39,43 @@ function isInvalidL3Draft(content: string) {
     || normalized.includes('[truncated]')
 }
 
+function errorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) return error.message.trim()
+  if (typeof error === 'string' && error.trim()) return error.trim()
+  if (error && typeof error === 'object') {
+    for (const key of ['message', 'error', 'detail'] as const) {
+      const value = (error as Record<string, unknown>)[key]
+      if (typeof value === 'string' && value.trim()) return value.trim()
+    }
+    try {
+      return JSON.stringify(error)
+    } catch {
+      // Fall through to the generic representation below.
+    }
+  }
+  return String(error)
+}
+
+function InlineActionError({ text }: { text: string }) {
+  return (
+    <div role="alert" aria-live="assertive" className="mt-2 whitespace-pre-wrap break-words rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs leading-5 text-red-800 dark:border-red-900/70 dark:bg-red-950/30 dark:text-red-200">
+      {text}
+    </div>
+  )
+}
+
+function InlineActionSuccess({ text }: { text: string }) {
+  return (
+    <div role="status" aria-live="polite" className="mt-2 whitespace-pre-wrap break-words rounded-md border border-green-200 bg-green-50 px-2.5 py-2 text-xs leading-5 text-green-800 dark:border-green-900/70 dark:bg-green-950/30 dark:text-green-200">
+      {text}
+    </div>
+  )
+}
+
 function LayerWindow({ document }: { document: MemoryLayerDocument }) {
+  const { t } = useTranslation()
   if (!document.window_start || !document.window_end) return null
-  return <span className="text-gray-400">整理范围 · {localTime(document.window_start)} 至 {localTime(document.window_end)}</span>
+  return <span className="text-gray-400">{t('memory.layerWindowRange', { start: localTime(document.window_start), end: localTime(document.window_end) })}</span>
 }
 
 /** 文档内容限高：不超过限高时完整展示、不渲染按钮；超出时折叠到限高并显示
@@ -50,6 +86,7 @@ const DOCUMENT_COLLAPSED_MAX_HEIGHT_PX = 320
 // 轮询、store 10s 遥测轮询）中保持不变，跳过文档子树的重复 diff 与
 // Markdown 重解析，消除滑动到 L2/L3 卡片时的卡顿。
 const CollapsibleDocumentContent = memo(function CollapsibleDocumentContent({ content, contentId, accent }: { content: string; contentId: string; accent: 'sky' | 'violet' }) {
+  const { t } = useTranslation()
   const ref = useRef<HTMLDivElement | null>(null)
   const [open, setOpen] = useState(false)
   const [overflows, setOverflows] = useState(false)
@@ -73,13 +110,52 @@ const CollapsibleDocumentContent = memo(function CollapsibleDocumentContent({ co
     </div>
     {overflows && (
       <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-controls={contentId} className={`mt-2 inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition ${buttonClass}`}>
-        {open ? '收起完整内容' : '查看完整内容'}{open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        {open ? t('memory.collapseFull') : t('memory.viewFull')}{open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
       </button>
     )}
   </>)
 })
 
-export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOpenInjection }: { onOpenUsage?: () => void; onOpenPending?: () => void; onOpenOrganized?: () => void; onOpenInjection?: () => void }) {
+/** L1 列表行。memo + 稳定回调隔离：无关 store 更新（agent 轮询等）不再
+ *  重渲染最多 200 张卡片；content-visibility 让滚出视口的行跳过布局绘制。 */
+const MemoryCard = memo(function MemoryCard({ memory: m, ranking, onPin, onEdit, onDelete }: {
+  memory: MemoryItem
+  ranking: MemoryImportance
+  onPin: (memoryId: string, pinned: boolean) => void
+  onEdit: (item: MemoryItem) => void
+  onDelete: (item: MemoryItem) => void
+}) {
+  const { t } = useTranslation()
+  const level = ranking?.score == null ? null : ranking.score >= 70 ? 'high' : ranking.score >= 40 ? 'medium' : 'low'
+  return (
+    <div className="rounded-md bg-gray-50 dark:bg-gray-700/50 border border-gray-200 dark:border-gray-600 px-3 py-2 [content-visibility:auto] [contain-intrinsic-size:auto_64px]">
+      <div className="flex items-start gap-2">
+        <MemoryMarkdown content={m.memory} className="flex-1 break-words" />
+        <div className="flex shrink-0 gap-1">
+          <button onClick={() => { void onPin(m.id, !ranking?.pinned) }} className={`p-1 rounded hover:bg-amber-100 dark:hover:bg-amber-900/40 ${ranking?.pinned ? 'text-amber-500' : 'text-gray-500 dark:text-gray-400'}`} title={ranking?.pinned ? t('memory.importanceUnpin') : t('memory.importancePin')}>
+            <Star size={13} className={ranking?.pinned ? 'fill-current' : ''} />
+          </button>
+          <button onClick={() => onEdit(m)} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-500 dark:text-gray-400" title={t('common.edit')}>
+            <Pencil size={13} />
+          </button>
+          <button onClick={() => onDelete(m)} className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-gray-500 dark:text-gray-400 hover:text-red-500" title={t('common.delete')}>
+            <Trash2 size={13} />
+          </button>
+        </div>
+      </div>
+      <div className="mt-0.5 flex flex-wrap items-center gap-2">
+        {m.user_defined && <span className="text-xs px-1.5 rounded bg-violet-600/15 font-medium text-violet-700 dark:text-violet-300" title={t('memory.userDefinedPlaceholder')}>{t('memory.userDefinedBadge')}</span>}
+        {m.memory_type && <span className="text-xs px-1.5 rounded bg-violet-500/10 text-violet-600 dark:text-violet-400">{m.memory_type}</span>}
+        {m.durability && <span className={`text-xs px-1.5 rounded ${m.durability === 'long_term' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : m.durability === 'short_term' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-200'}`}>{t(`memory.durability${m.durability === 'long_term' ? 'LongTerm' : m.durability === 'short_term' ? 'ShortTerm' : 'Session'}`)}</span>}
+        {level && <span className={`text-xs px-1.5 rounded ${level === 'high' ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300' : level === 'medium' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-200'}`}>{t(`memory.importance${level[0].toUpperCase()}${level.slice(1)}`, { score: ranking.score })}</span>}
+        {ranking && <span className="text-xs text-gray-400">{t('memory.importanceEvidence', { sessions: ranking.supporting_sessions, agents: ranking.supporting_agents, recalls: ranking.recall_count })}</span>}
+        {(m.event_time || m.last_update_at) && <span className="text-xs text-gray-400" title={m.event_time ? t('memory.eventTimeTitle') : t('memory.memoryOrganizeTime')}>{localTime(m.event_time || m.last_update_at || '')}</span>}
+      </div>
+    </div>
+  )
+})
+
+export const MemoryCenter = memo(function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOpenInjection, active = true }: { onOpenUsage?: () => void; onOpenPending?: () => void; onOpenOrganized?: () => void; onOpenInjection?: () => void; active?: boolean }) {
   const { t } = useTranslation()
   const {
     engineOnline, memories, importance, loading, lastSearchResults, lastSearchQuery, memoryCacheReady, localMemoryStats,
@@ -107,6 +183,8 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
   const [consolidationOpen, setConsolidationOpen] = useState(false)
   const [consolidationProgress, setConsolidationProgress] = useState<string | null>(null)
   const [consolidatingL2, setConsolidatingL2] = useState(false)
+  const [l2ConsolidationError, setL2ConsolidationError] = useState<string | null>(null)
+  const [l2ConsolidationSuccess, setL2ConsolidationSuccess] = useState<string | null>(null)
   const [draftingL3, setDraftingL3] = useState(false)
   const [l3DraftError, setL3DraftError] = useState<string | null>(null)
   const [publishingL3, setPublishingL3] = useState<string | null>(null)
@@ -119,6 +197,8 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
   const [userMemoryContent, setUserMemoryContent] = useState('')
   const [userMemoryType, setUserMemoryType] = useState('fact')
   const [addingUserMemory, setAddingUserMemory] = useState(false)
+  const [userMemoryErrors, setUserMemoryErrors] = useState<Partial<Record<'l2' | 'l3', string>>>({})
+  const [userMemorySuccesses, setUserMemorySuccesses] = useState<Partial<Record<'l2' | 'l3', string>>>({})
   // 草案编辑：只存在组件状态里，不单独持久化；发布时随发布落盘，
   // 离开页面即丢弃。
   const [editingL3Id, setEditingL3Id] = useState<string | null>(null)
@@ -154,23 +234,61 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
   useEffect(() => {
     let unlisten: (() => void) | undefined
     void listen<{ detail?: string }>('memory-consolidation-progress', (event) => {
-      setConsolidationProgress(event.payload.detail ?? '正在裁决语义候选')
+      setConsolidationProgress(event.payload.detail ?? t('memory.consolidateJudging'))
     }).then((dispose) => { unlisten = dispose }).catch(() => {})
     return () => unlisten?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
+    // 页面隐藏（keep-mounted）时暂停轮询；重新进入先刷一次再起定时器。
+    if (!active) return
+    void checkIngest()
+    void checkTelemetry()
     const timer = window.setInterval(() => {
       void checkIngest()
       void checkTelemetry()
     }, 10_000)
     return () => window.clearInterval(timer)
-  }, [checkIngest, checkTelemetry])
+  }, [checkIngest, checkTelemetry, active])
 
-  function flash(kind: 'ok' | 'err', text: string) {
+  const flash = useCallback((kind: 'ok' | 'err', text: string) => {
     setNotice({ kind, text })
     setTimeout(() => setNotice(null), 3500)
-  }
+  }, [])
+
+  // 以下 useCallback 是 hook，必须位于 `if (booting)` 提前 return 之前；
+  // 否则 booting 前后 hook 数量不一致，React 会卸载整树（白屏）。
+  const openEdit = useCallback((item: MemoryItem) => {
+    setEditing(item)
+    setEditContent(item.memory)
+  }, [])
+
+  const handleDelete = useCallback((item: MemoryItem) => {
+    setDeleteTarget(item)
+  }, [])
+
+  const handleRefreshImportance = useCallback(async () => {
+    if (refreshingImportance) return
+    setRefreshingImportance(true)
+    try {
+      const result = await refreshImportance()
+      flash('ok', result.message)
+    } catch (error) {
+      flash('err', `${t('common.failed')}: ${String(error)}`)
+    } finally {
+      setRefreshingImportance(false)
+    }
+  }, [refreshingImportance, refreshImportance, flash, t])
+
+  const handlePinMemory = useCallback(async (memoryId: string, pinned: boolean) => {
+    try {
+      await setMemoryPinned(memoryId, pinned)
+      await handleRefreshImportance()
+    } catch (error) {
+      flash('err', `${t('common.failed')}: ${String(error)}`)
+    }
+  }, [setMemoryPinned, handleRefreshImportance, flash, t])
 
   async function handleStop() {
     await stopEngine()
@@ -180,7 +298,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
   if (booting) {
     return <div className="flex h-full min-h-0 items-center justify-center bg-gray-50 px-6 dark:bg-gray-950" role="status" aria-live="polite">
       <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-        <div className="flex items-center gap-3 text-gray-800 dark:text-gray-100"><span className="rounded-xl bg-violet-500/10 p-2.5 text-violet-600 dark:text-violet-400"><Loader2 className="animate-spin motion-reduce:animate-none" size={21} /></span><div><p className="text-sm font-semibold">正在打开记忆中心</p><p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">读取本地记忆账本与会话状态…</p></div></div>
+        <div className="flex items-center gap-3 text-gray-800 dark:text-gray-100"><span className="rounded-xl bg-violet-500/10 p-2.5 text-violet-600 dark:text-violet-400"><Loader2 className="animate-spin motion-reduce:animate-none" size={21} /></span><div><p className="text-sm font-semibold">{t('memory.booting')}</p><p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{t('memory.bootingHint')}</p></div></div>
         <div className="mt-5 space-y-2.5" aria-hidden="true"><div className="h-3 w-4/5 animate-pulse rounded bg-gray-100 dark:bg-gray-800" /><div className="h-3 w-full animate-pulse rounded bg-gray-100 dark:bg-gray-800" /><div className="h-3 w-3/5 animate-pulse rounded bg-gray-100 dark:bg-gray-800" /></div>
       </div>
     </div>
@@ -211,11 +329,18 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
 
   async function handleL2Consolidation() {
     if (consolidatingL2) return
+    setL2ConsolidationError(null)
+    setL2ConsolidationSuccess(null)
     setConsolidatingL2(true)
     try {
       const result = await consolidateShortTermMemory()
-      flash('ok', result.message)
-    } catch (error) { flash('err', `${t('common.failed')}: ${String(error)}`) } finally { setConsolidatingL2(false) }
+      setL2ConsolidationSuccess(result.message)
+      flash('ok', t('memory.l2ConsolidationSucceeded', { message: result.message }))
+    } catch (error) {
+      const message = errorMessage(error)
+      setL2ConsolidationError(message)
+      flash('err', t('memory.l2ConsolidationFailed', { error: message }))
+    } finally { setConsolidatingL2(false) }
   }
 
   // L2 编辑保存：直接覆盖当前发布版，下一次注入与 L3 草案立刻生效。
@@ -226,7 +351,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
       await updatePublishedMemoryDocument(document.id, editingL2Content)
       setEditingL2(false)
       setEditingL2Content('')
-      flash('ok', '工作记忆已更新，下次注入与 L3 草案将使用新内容')
+      flash('ok', t('memory.l2SaveToast'))
     } catch (error) { flash('err', `${t('common.failed')}: ${String(error)}`) } finally { setSavingL2(false) }
   }
 
@@ -235,7 +360,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
   async function handleL3SavePublished(document: MemoryLayerDocument) {
     if (publishingL3 || !editingL3Content.trim()) return
     if (isInvalidL3Draft(editingL3Content)) {
-      flash('err', '编辑后的内容不符合 L3 发布格式，无法保存；请调整后再试。')
+      flash('err', t('memory.l3InvalidSave'))
       return
     }
     setPublishingL3(document.id)
@@ -243,7 +368,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
       await updatePublishedMemoryDocument(document.id, editingL3Content)
       setEditingL3Id(null)
       setEditingL3Content('')
-      flash('ok', '长期 Profile 已更新，新的 Agent 初始化会使用该内容')
+      flash('ok', t('memory.l3UpdatedToast'))
     } catch (error) { flash('err', `${t('common.failed')}: ${String(error)}`) } finally { setPublishingL3(null) }
   }
 
@@ -265,7 +390,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
     const edited = editingL3Id === document.id ? editingL3Content : null
     const effectiveContent = edited ?? document.content
     if (isInvalidL3Draft(effectiveContent)) {
-      flash('err', '该历史草案不符合发布标准，无法发布；请重新创建。')
+      flash('err', t('memory.l3InvalidPublish'))
       return
     }
     if (publishingL3) return
@@ -275,7 +400,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
       await publishLongTermProfile(document.id, edited?.trim() || undefined)
       setEditingL3Id(null)
       setEditingL3Content('')
-      flash('ok', '长期 Profile 已发布；新的 Agent 初始化会使用该版本')
+      flash('ok', t('memory.l3PublishedToast'))
     } catch (error) { flash('err', `${t('common.failed')}: ${String(error)}`) } finally { setPublishingL3(null) }
   }
 
@@ -286,7 +411,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
     try {
       await deleteLongTermProfileDraft(document.id)
       setL3DeleteTarget(null)
-      flash('ok', '草案已删除')
+      flash('ok', t('memory.l3DraftDeleted'))
     } catch (error) { flash('err', `${t('common.failed')}: ${String(error)}`) } finally { setDeletingL3(null) }
   }
 
@@ -300,7 +425,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
     try {
       const result = await resetL1ForReextraction()
       setResetL1ConfirmOpen(false)
-      flash('ok', `已清空 ${result.cleared_l1} 条会话记忆和记忆派生文档 ${result.cleared_derived_documents} 份；${result.requeued_conversations} 个完整会话已待重新整理`)
+      flash('ok', t('memory.l1ResetToast', { clearedL1: result.cleared_l1, clearedDerived: result.cleared_derived_documents, requeued: result.requeued_conversations }))
     } catch (error) { flash('err', `${t('common.failed')}: ${String(error)}`) } finally { setResettingL1(false) }
   }
 
@@ -308,13 +433,13 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
     setOrganizingConversations(true)
     try {
       const result = await organizeConversations()
-      flash(result.failed ? 'err' : 'ok', `整理完成：成功 ${result.succeeded}，失败 ${result.failed}${result.failure_reasons[0] ? `；${result.failure_reasons[0]}` : ''}`)
+      flash(result.failed ? 'err' : 'ok', t('memory.organizeDoneToast', { succeeded: result.succeeded, failed: result.failed, reason: result.failure_reasons[0] ? t('memory.organizeDoneReason', { reason: result.failure_reasons[0] }) : '' }))
     } catch (error) { flash('err', `${t('common.failed')}: ${String(error)}`) } finally { setOrganizingConversations(false) }
   }
 
   async function handleImportMemoryFolder() {
     if (importingMemories) return
-    const selected = await open({ directory: true, multiple: false, title: '选择包含 Agent 记忆或会话导出的文件夹' })
+    const selected = await open({ directory: true, multiple: false, title: t('memory.importDialogTitle') })
     if (!selected || Array.isArray(selected)) return
     setImportingMemories(true)
     setMemoryImportResult(null)
@@ -325,11 +450,6 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
     } catch (error) {
       flash('err', `${t('common.failed')}: ${String(error)}`)
     } finally { setImportingMemories(false) }
-  }
-
-  function openEdit(item: MemoryItem) {
-    setEditing(item)
-    setEditContent(item.memory)
   }
 
   async function handleSaveEdit() {
@@ -343,10 +463,6 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
     }
   }
 
-  async function handleDelete(item: MemoryItem) {
-    setDeleteTarget(item)
-  }
-
   const userMemoryTypeOptions = [
     { value: 'fact', label: t('memory.userDefinedTypeFact') },
     { value: 'decision', label: t('memory.userDefinedTypeDecision') },
@@ -358,14 +474,21 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
   async function handleAddUserMemory(scope: 'l2' | 'l3') {
     const content = userMemoryContent.trim()
     if (!content || addingUserMemory) return
+    setUserMemoryErrors((previous) => ({ ...previous, [scope]: undefined }))
+    setUserMemorySuccesses((previous) => ({ ...previous, [scope]: undefined }))
     setAddingUserMemory(true)
     try {
       await addUserMemory(content, userMemoryType, scope)
       setUserMemoryContent('')
-      setUserMemoryOpen(false)
-      flash('ok', t('memory.userDefinedAdded'))
+      if (scope === 'l2') setL2UserMemoryOpen(false)
+      else setUserMemoryOpen(false)
+      const message = t(scope === 'l2' ? 'memory.workMemoryAdded' : 'memory.longTermMemoryAdded')
+      setUserMemorySuccesses((previous) => ({ ...previous, [scope]: message }))
+      flash('ok', message)
     } catch (e) {
-      flash('err', `${t('common.failed')}: ${String(e)}`)
+      const message = errorMessage(e)
+      setUserMemoryErrors((previous) => ({ ...previous, [scope]: message }))
+      flash('err', t(scope === 'l2' ? 'memory.workMemoryAddFailed' : 'memory.longTermMemoryAddFailed', { error: message }))
     } finally { setAddingUserMemory(false) }
   }
 
@@ -385,10 +508,10 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
     if (consolidating) return
     setConsolidating(true)
     setConsolidationResult(null)
-    setConsolidationProgress('正在准备本地语义候选')
+    setConsolidationProgress(t('memory.consolidatePreparing'))
     try {
       const result = await dreaming((processed, total) => {
-        setConsolidationProgress(`正在本地生成语义候选 ${processed}/${total}`)
+        setConsolidationProgress(t('memory.consolidateGenerating', { processed, total }))
       })
       await listMemories()
       const text = result.message || t('memory.dreamDone')
@@ -401,28 +524,6 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
     } finally {
       setConsolidating(false)
       setConsolidationProgress(null)
-    }
-  }
-
-  async function handleRefreshImportance() {
-    if (refreshingImportance) return
-    setRefreshingImportance(true)
-    try {
-      const result = await refreshImportance()
-      flash('ok', result.message)
-    } catch (error) {
-      flash('err', `${t('common.failed')}: ${String(error)}`)
-    } finally {
-      setRefreshingImportance(false)
-    }
-  }
-
-  async function handlePinMemory(memoryId: string, pinned: boolean) {
-    try {
-      await setMemoryPinned(memoryId, pinned)
-      await handleRefreshImportance()
-    } catch (error) {
-      flash('err', `${t('common.failed')}: ${String(error)}`)
     }
   }
 
@@ -459,11 +560,11 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
   const activeSourceNames = (telemetryLiveStatus?.active_sources ?? []).map(sourceLabel)
   const liveRunText = telemetryLiveStatus?.active_sessions
     ? activeSourceNames.length === 0
-      ? `正在处理 ${telemetryLiveStatus.active_sessions} 个会话`
+      ? t('memory.liveRunActive', { count: telemetryLiveStatus.active_sessions })
       : telemetryLiveStatus.active_sessions === 1 && activeSourceNames.length === 1
-        ? `正在处理 ${activeSourceNames[0]} 的对话`
-        : `正在处理 ${telemetryLiveStatus.active_sessions} 个会话：${activeSourceNames.join('、')}`
-    : `监听就绪 · 已捕获 ${telemetryLiveStatus?.captured_sessions ?? 0} 个会话`
+        ? t('memory.liveRunSingle', { name: activeSourceNames[0] })
+        : t('memory.liveRunMulti', { count: telemetryLiveStatus.active_sessions, names: activeSourceNames.join(t('memory.liveRunJoiner')) })
+    : t('memory.liveRunIdle', { count: telemetryLiveStatus?.captured_sessions ?? 0 })
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-4">
@@ -482,10 +583,10 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
               {notice.text}
             </span>
           )}
-          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${telemetryLiveStatus?.active_sessions ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`} title="实时运行状态"><span className={`h-1.5 w-1.5 rounded-full ${telemetryLiveStatus?.active_sessions ? 'animate-pulse bg-sky-500 motion-reduce:animate-none' : 'bg-gray-400'}`} />实时运行：{liveRunText}</span>
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/35 px-2.5 py-1 text-xs text-emerald-700 dark:text-emerald-300" title="记忆库状态"><Database size={13} />记忆库：本地可用</span>
-          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${telemetryLiveStatus?.pending_memory_sessions ? 'bg-violet-500/10 text-violet-700 dark:text-violet-300' : telemetryLiveStatus?.retrying_memory_sessions || telemetryLiveStatus?.failed_memory_sessions || telemetryLiveStatus?.failed_transcript_scans ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'bg-gray-100 text-gray-600 dark:text-gray-300'}`} title="记忆同步状态：仅在你点击整理会话后才会调用记忆模型"><Brain size={13} />记忆同步：{telemetryLiveStatus?.pending_memory_sessions ? `待整理 ${telemetryLiveStatus.pending_memory_sessions}` : telemetryLiveStatus?.failed_memory_sessions ? `失败 ${telemetryLiveStatus.failed_memory_sessions}` : telemetryLiveStatus?.retrying_memory_sessions ? `待重试 ${telemetryLiveStatus.retrying_memory_sessions}` : telemetryLiveStatus?.failed_transcript_scans ? `文件失败 ${telemetryLiveStatus.failed_transcript_scans}` : '已同步'}</span>
-          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${connectedMcpCount > 0 ? 'bg-violet-500/10 text-violet-700 dark:text-violet-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`} title="记忆注入状态"><PlugZap size={13} />记忆注入：{mcpStatusLoaded ? (connectedMcpCount ? `已连接 ${connectedMcpCount} 个 Agent` : '未连接 Agent') : '检测中'}</span>
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${telemetryLiveStatus?.active_sessions ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`} title={t('memory.memoryStatusTitle')}><span className={`h-1.5 w-1.5 rounded-full ${telemetryLiveStatus?.active_sessions ? 'animate-pulse bg-sky-500 motion-reduce:animate-none' : 'bg-gray-400'}`} />{t('memory.liveRunLabel')}{liveRunText}</span>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/35 px-2.5 py-1 text-xs text-emerald-700 dark:text-emerald-300" title={t('memory.memoryStatusTitle')}><Database size={13} />{t('memory.memoryStatusLocal')}</span>
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${telemetryLiveStatus?.pending_memory_sessions ? 'bg-violet-500/10 text-violet-700 dark:text-violet-300' : telemetryLiveStatus?.retrying_memory_sessions || telemetryLiveStatus?.failed_memory_sessions || telemetryLiveStatus?.failed_transcript_scans ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'bg-gray-100 text-gray-600 dark:text-gray-300'}`} title={t('memory.syncStatusTitle')}><Brain size={13} />{t('memory.syncLabel')}{telemetryLiveStatus?.pending_memory_sessions ? t('memory.syncPending', { count: telemetryLiveStatus.pending_memory_sessions }) : telemetryLiveStatus?.failed_memory_sessions ? t('memory.syncFailed', { count: telemetryLiveStatus.failed_memory_sessions }) : telemetryLiveStatus?.retrying_memory_sessions ? t('memory.syncRetrying', { count: telemetryLiveStatus.retrying_memory_sessions }) : telemetryLiveStatus?.failed_transcript_scans ? t('memory.syncScanFailed', { count: telemetryLiveStatus.failed_transcript_scans }) : t('memory.syncDone')}</span>
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${connectedMcpCount > 0 ? 'bg-violet-500/10 text-violet-700 dark:text-violet-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`} title={t('memory.injectStatusTitle')}><PlugZap size={13} />{t('memory.injectLabel')}{mcpStatusLoaded ? (connectedMcpCount ? t('memory.injectConnected', { count: connectedMcpCount }) : t('memory.injectDisconnected')) : t('memory.injectChecking')}</span>
           {engineState === 'online' && (
               <button
                 onClick={handleStop}
@@ -499,31 +600,28 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
 
       {telemetrySummary && (
         <section className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          <button type="button" onClick={onOpenUsage} className="group rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition hover:border-blue-300 hover:bg-blue-50/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-700 dark:bg-gray-800 dark:hover:border-blue-500/60 dark:hover:bg-blue-500/10">
-            <div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">Token 用量</p><ChevronRight size={14} className="text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500 dark:text-gray-600 dark:group-hover:text-blue-300" /></div><p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{telemetrySummary.total_tokens.toLocaleString()}</p><p className="mt-0.5 text-[11px] text-gray-400">输入 {telemetrySummary.input_tokens.toLocaleString()} · 输出 {telemetrySummary.output_tokens.toLocaleString()}</p>
+          <button type="button" onClick={onOpenUsage} className="group rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition hover:border-violet-300 hover:bg-violet-50/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-gray-700 dark:bg-gray-800 dark:hover:border-violet-500/60 dark:hover:bg-violet-500/10">
+            <div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">{t('memory.overviewTokenUsage')}</p><ChevronRight size={14} className="text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-violet-500 dark:text-gray-600 dark:group-hover:text-violet-300" /></div><p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{telemetrySummary.total_tokens.toLocaleString()}</p><p className="mt-0.5 text-[11px] text-gray-400">{t('memory.overviewTokenSub', { input: telemetrySummary.input_tokens.toLocaleString(), output: telemetrySummary.output_tokens.toLocaleString() })}</p>
           </button>
-          <button type="button" onClick={onOpenOrganized} className="group rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition hover:border-emerald-300 hover:bg-emerald-50/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 dark:border-gray-700 dark:bg-gray-800 dark:hover:border-emerald-500/60 dark:hover:bg-emerald-500/10">
-            <div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">已整理对话</p><ChevronRight size={14} className="text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-emerald-500 dark:text-gray-600 dark:group-hover:text-emerald-300" /></div><p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{telemetryLiveStatus?.organized_memory_conversations ?? 0}</p><p className="mt-0.5 text-[11px] text-gray-400">完整对话 {telemetryLiveStatus?.completed_conversations ?? 0}</p>
+          <button type="button" onClick={onOpenOrganized} className="group rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition hover:border-violet-300 hover:bg-violet-50/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-gray-700 dark:bg-gray-800 dark:hover:border-violet-500/60 dark:hover:bg-violet-500/10">
+            <div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">{t('memory.overviewOrganized')}</p><ChevronRight size={14} className="text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-violet-500 dark:text-gray-600 dark:group-hover:text-violet-300" /></div><p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{telemetryLiveStatus?.organized_memory_conversations ?? 0}</p><p className="mt-0.5 text-[11px] text-gray-400">{t('memory.overviewOrganizedSub', { count: telemetryLiveStatus?.completed_conversations ?? 0 })}</p>
           </button>
           <button type="button" onClick={onOpenPending} className="group rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition hover:border-violet-300 hover:bg-violet-50/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-gray-700 dark:bg-gray-800 dark:hover:border-violet-500/60 dark:hover:bg-violet-500/10">
-            <div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">待提取记忆</p><ChevronRight size={14} className="text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-violet-500 dark:text-gray-600 dark:group-hover:text-violet-300" /></div><p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{(telemetryLiveStatus?.pending_memory_sessions ?? 0) + (telemetryLiveStatus?.retrying_memory_sessions ?? 0)}</p><p className="mt-0.5 text-[11px] text-gray-400">{telemetryLiveStatus?.retrying_memory_sessions ? `待重试 ${telemetryLiveStatus.retrying_memory_sessions}` : '点击查看待整理会话'}</p>
+            <div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">{t('memory.overviewPending')}</p><ChevronRight size={14} className="text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-violet-500 dark:text-gray-600 dark:group-hover:text-violet-300" /></div><p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{(telemetryLiveStatus?.pending_memory_sessions ?? 0) + (telemetryLiveStatus?.retrying_memory_sessions ?? 0)}</p><p className="mt-0.5 text-[11px] text-gray-400">{telemetryLiveStatus?.retrying_memory_sessions ? t('memory.overviewPendingRetry', { count: telemetryLiveStatus.retrying_memory_sessions }) : t('memory.overviewPendingClick')}</p>
           </button>
           <button type="button" onClick={onOpenInjection} className="group rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition hover:border-violet-300 hover:bg-violet-50/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-gray-700 dark:bg-gray-800 dark:hover:border-violet-500/60 dark:hover:bg-violet-500/10">
-            <div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">记忆注入</p><ChevronRight size={14} className="text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-violet-500 dark:text-gray-600 dark:group-hover:text-violet-300" /></div><p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{connectedMcpCount} 个 Agent</p><p className="mt-0.5 text-[11px] text-gray-400">{mcpStatusLoaded ? (connectedMcpCount ? '共享记忆已连接' : '尚未连接 Agent') : '正在检测连接'}</p>
+            <div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">{t('memory.overviewInjection')}</p><ChevronRight size={14} className="text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-violet-500 dark:text-gray-600 dark:group-hover:text-violet-300" /></div><p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{t('memory.overviewAgentCount', { count: connectedMcpCount })}</p><p className="mt-0.5 text-[11px] text-gray-400">{mcpStatusLoaded ? (connectedMcpCount ? t('memory.overviewInjectionConnected') : t('memory.overviewInjectionDisconnected')) : t('memory.overviewInjectionChecking')}</p>
           </button>
         </section>
       )}
       {!telemetrySummary && (
         <section className="grid grid-cols-2 sm:grid-cols-4 gap-2" aria-live="polite">
-          {['Token 用量', '已整理对话', '待提取记忆', '记忆注入'].map((label) => {
-            const handler = label === 'Token 用量' ? onOpenUsage : label === '待提取记忆' ? onOpenPending : label === '已整理对话' ? onOpenOrganized : onOpenInjection
-            const tone = label === 'Token 用量' ? 'hover:border-blue-300 hover:bg-blue-50/40 focus-visible:ring-blue-500 dark:hover:border-blue-500/60 dark:hover:bg-blue-500/10'
-              : label === '已整理对话' ? 'hover:border-emerald-300 hover:bg-emerald-50/40 focus-visible:ring-emerald-500 dark:hover:border-emerald-500/60 dark:hover:bg-emerald-500/10'
-              : 'hover:border-violet-300 hover:bg-violet-50/40 focus-visible:ring-violet-500 dark:hover:border-violet-500/60 dark:hover:bg-violet-500/10'
-            const arrowTone = label === 'Token 用量' ? 'group-hover:text-blue-500 dark:group-hover:text-blue-300'
-              : label === '已整理对话' ? 'group-hover:text-emerald-500 dark:group-hover:text-emerald-300'
-              : 'group-hover:text-violet-500 dark:group-hover:text-violet-300'
-            return <button key={label} type="button" onClick={handler} className={`group rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition focus:outline-none focus-visible:ring-2 dark:border-gray-700 dark:bg-gray-800 ${tone}`}><div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">{label}</p><ChevronRight size={14} className={`text-gray-300 transition group-hover:translate-x-0.5 dark:text-gray-600 ${arrowTone}`} /></div><p className="mt-1 inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400"><Loader2 className="animate-spin motion-reduce:animate-none" size={13} />正在读取本地账本…</p></button>
+          {[t('memory.overviewTokenUsage'), t('memory.overviewOrganized'), t('memory.overviewPending'), t('memory.overviewInjection')].map((label) => {
+            const handler = label === t('memory.overviewTokenUsage') ? onOpenUsage : label === t('memory.overviewPending') ? onOpenPending : label === t('memory.overviewOrganized') ? onOpenOrganized : onOpenInjection
+            // 四个入口悬停色统一为待提取记忆的 violet。
+            const tone = 'hover:border-violet-300 hover:bg-violet-50/40 focus-visible:ring-violet-500 dark:hover:border-violet-500/60 dark:hover:bg-violet-500/10'
+            const arrowTone = 'group-hover:text-violet-500 dark:group-hover:text-violet-300'
+            return <button key={label} type="button" onClick={handler} className={`group rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition focus:outline-none focus-visible:ring-2 dark:border-gray-700 dark:bg-gray-800 ${tone}`}><div className="flex items-center justify-between gap-2"><p className="text-xs text-gray-400">{label}</p><ChevronRight size={14} className={`text-gray-300 transition group-hover:translate-x-0.5 dark:text-gray-600 ${arrowTone}`} /></div><p className="mt-1 inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400"><Loader2 className="animate-spin motion-reduce:animate-none" size={13} />{t('memory.overviewLoading')}</p></button>
           })}
         </section>
       )}
@@ -532,7 +630,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
       <section className="order-10 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 space-y-3">
         <div className="flex items-center gap-2">
           <Webhook size={15} className="text-violet-600 dark:text-violet-400" />
-          <div className="min-w-0 flex-1"><h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">{t('memory.ingestTitle')}</h2><p className="mt-0.5 text-xs text-gray-400">{t('memory.ingestHint')}Hook 连接、会话启动注入与数据目录请前往<button type="button" onClick={onOpenInjection} className="mx-0.5 inline-flex items-center gap-0.5 font-medium text-violet-600 hover:underline dark:text-violet-300">记忆注入面板<ChevronRight size={12} /></button>管理。</p></div>
+          <div className="min-w-0 flex-1"><h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">{t('memory.ingestTitle')}</h2><p className="mt-0.5 text-xs text-gray-400">{t('memory.ingestHint')}{t('memory.ingestPanelLinkBefore')}<button type="button" onClick={onOpenInjection} className="mx-0.5 inline-flex items-center gap-0.5 font-medium text-violet-600 hover:underline dark:text-violet-300">{t('memory.ingestPanelLinkText')}<ChevronRight size={12} /></button>。</p></div>
           <div className="flex shrink-0 items-center gap-2">
             {ingestStatus?.enabled
               ? <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400"><CheckCircle2 size={12} />{t('memory.ingestOn')}</span>
@@ -544,7 +642,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
             >
               <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${ingestStatus?.enabled ? 'left-4.5' : 'left-0.5'}`} style={{ left: ingestStatus?.enabled ? '18px' : '2px' }} />
             </button>
-            <button type="button" onClick={() => setIngestOpen((open) => !open)} aria-expanded={ingestOpen} className="inline-flex items-center rounded-md p-1 text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700" title={ingestOpen ? '收起' : '展开'}>{ingestOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</button>
+            <button type="button" onClick={() => setIngestOpen((open) => !open)} aria-expanded={ingestOpen} className="inline-flex items-center rounded-md p-1 text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700" title={ingestOpen ? t('memory.ingestCollapse') : t('memory.ingestExpand')}>{ingestOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</button>
           </div>
         </div>
 
@@ -564,9 +662,9 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
 
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 dark:border-gray-700 dark:bg-gray-900/40">
           <FolderOpen size={14} className="text-violet-600 dark:text-violet-400" />
-          <div className="min-w-0 flex-1"><p className="text-xs font-medium text-gray-700 dark:text-gray-200">导入其他 Agent 记忆</p><p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">选择导出的会话或记忆文件夹；调用记忆模型整理后写入下方的可检索记忆。</p></div>
-          <button onClick={() => { void handleImportMemoryFolder() }} disabled={importingMemories || !ingestStatus?.model_ready} className="inline-flex items-center gap-1.5 rounded-md border border-violet-200 bg-white px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-500/30 dark:bg-gray-800 dark:text-violet-300 dark:hover:bg-violet-500/10">{importingMemories ? <Loader2 size={13} className="animate-spin" /> : <FolderOpen size={13} />}{importingMemories ? '正在识别并提取' : '选择文件夹导入'}</button>
-          {memoryImportResult && <p className="basis-full text-[11px] text-green-700 dark:text-green-300" role="status">已扫描 {memoryImportResult.scanned_files} 个文件 · 识别 {memoryImportResult.recognized_files} 个文本文件 · 写入 {memoryImportResult.imported_memories} 条记忆{memoryImportResult.skipped_files > 0 ? ` · 跳过 ${memoryImportResult.skipped_files} 个` : ''}</p>}
+          <div className="min-w-0 flex-1"><p className="text-xs font-medium text-gray-700 dark:text-gray-200">{t('memory.importMemoryTitle')}</p><p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{t('memory.importMemoryHint')}</p></div>
+          <button onClick={() => { void handleImportMemoryFolder() }} disabled={importingMemories || !ingestStatus?.model_ready} className="inline-flex items-center gap-1.5 rounded-md border border-violet-200 bg-white px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-500/30 dark:bg-gray-800 dark:text-violet-300 dark:hover:bg-violet-500/10">{importingMemories ? <Loader2 size={13} className="animate-spin" /> : <FolderOpen size={13} />}{importingMemories ? t('memory.importMemoryWorking') : t('memory.importMemoryButton')}</button>
+          {memoryImportResult && <p className="basis-full text-[11px] text-green-700 dark:text-green-300" role="status">{t('memory.importResult', { scanned: memoryImportResult.scanned_files, recognized: memoryImportResult.recognized_files, imported: memoryImportResult.imported_memories, skipped: memoryImportResult.skipped_files > 0 ? t('memory.importResultSkipped', { count: memoryImportResult.skipped_files }) : '' })}</p>}
         </div>
 
         {ingestStatus && ingestStatus.buffered_sessions > 0 && (
@@ -600,7 +698,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
             <h3 className="text-xs font-semibold text-gray-700 dark:text-gray-200">{t('memory.recordsTitle')}</h3>
             <span className="text-xs text-gray-500 dark:text-gray-400">{t('memory.recordsHint')}</span>
             <button type="button" onClick={() => setRecordsOpen((open) => !open)} aria-expanded={recordsOpen} className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
-              {recordsOpen ? '收起' : '查看记录'}{recordsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              {recordsOpen ? t('memory.ingestCollapse') : t('memory.recordsView')}{recordsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </button>
             <button onClick={() => { void handleRefresh() }} disabled={refreshing} className="inline-flex items-center gap-1 rounded-md border border-gray-300 px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:cursor-wait disabled:opacity-60 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700">
               <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />{refreshing ? t('memory.refreshing') : t('common.refresh')}
@@ -646,9 +744,11 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
         <article className="flex flex-col rounded-xl border border-sky-200 bg-sky-50/40 p-4 dark:border-sky-900/70 dark:bg-sky-950/20">
           <div className="flex items-start gap-2">
             <div className="mt-0.5 rounded-md bg-sky-500/10 p-1.5 text-sky-600 dark:text-sky-300"><FileText size={14} /></div>
-            <div className="min-w-0 flex-1 min-h-[62px]"><h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">近 30 天工作记忆</h2><p className="mt-0.5 text-xs leading-5 text-gray-500 dark:text-gray-400 line-clamp-2" title="手动从近期会话记忆分批压缩。保留来源 id，不会把全部记忆注入上下文。">手动从近期会话记忆分批压缩。保留来源 id，不会把全部记忆注入上下文。</p></div>
-            <button onClick={() => { void handleL2Consolidation() }} disabled={consolidatingL2} className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-sky-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50">{consolidatingL2 ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}{consolidatingL2 ? '正在分批巩固' : '生成'}</button>
+            <div className="min-w-0 flex-1 min-h-[62px]"><h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{t('memory.l2Title')}</h2><p className="mt-0.5 text-xs leading-5 text-gray-500 dark:text-gray-400 line-clamp-2" title={t('memory.l2Hint')}>{t('memory.l2Hint')}</p></div>
+            <button onClick={() => { void handleL2Consolidation() }} disabled={consolidatingL2} className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-sky-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50">{consolidatingL2 ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}{consolidatingL2 ? t('memory.l2Generating') : t('memory.l2Generate')}</button>
           </div>
+          {l2ConsolidationError && <InlineActionError text={t('memory.l2ConsolidationFailed', { error: l2ConsolidationError })} />}
+          {l2ConsolidationSuccess && <InlineActionSuccess text={t('memory.l2ConsolidationSucceeded', { message: l2ConsolidationSuccess })} />}
           {/* 用户自定义添加：与右侧 L3 卡片同位置（操作按钮底下），共用同一份
               表单内容与提交状态；写入的条目会在 L2 巩固时强制并入证据。 */}
           <div className="mt-3 rounded-md border border-sky-200 bg-white/70 px-3 py-2.5 dark:border-sky-900/70 dark:bg-gray-900/30">
@@ -693,6 +793,8 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
               </div>
             )}
           </div>
+          {userMemoryErrors.l2 && <InlineActionError text={t('memory.workMemoryAddFailed', { error: userMemoryErrors.l2 })} />}
+          {userMemorySuccesses.l2 && <InlineActionSuccess text={userMemorySuccesses.l2} />}
           {l2Documents.find((document) => document.state === 'published') ? (() => {
             const document = l2Documents.find((item) => item.state === 'published')!
             const content = normalizeL2Document(document.content)
@@ -706,10 +808,10 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
                   降低滚动成本。 */}
               <div className="min-w-0 flex-1 rounded-md bg-white/70 px-2.5 py-2 dark:bg-gray-900/30 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                  <span className="text-green-600 dark:text-green-300">已发布</span>
-                  <span className="min-w-0 text-gray-500 dark:text-gray-400">{document.source_count} 条来源 · 约 {document.token_estimate} tokens · {localTime(document.created_at)}</span>
+                  <span className="text-green-600 dark:text-green-300">{t('memory.l2Published')}</span>
+                  <span className="min-w-0 text-gray-500 dark:text-gray-400">{t('memory.l2SourceLine', { count: document.source_count, tokens: document.token_estimate, time: localTime(document.created_at) })}</span>
                   <LayerWindow document={document} />
-                  <button type="button" onClick={() => { setEditingL2(true); setEditingL2Content(content) }} disabled={savingL2 || consolidatingL2} className="ml-auto inline-flex shrink-0 items-center gap-1 rounded border border-gray-300 px-2 py-0.5 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"><Pencil size={12} />编辑</button>
+                  <button type="button" onClick={() => { setEditingL2(true); setEditingL2Content(content) }} disabled={savingL2 || consolidatingL2} className="ml-auto inline-flex shrink-0 items-center gap-1 rounded border border-gray-300 px-2 py-0.5 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"><Pencil size={12} />{t('memory.l2Edit')}</button>
                 </div>
               {editingL2 ? (
                 <div className="mt-2 space-y-1.5">
@@ -720,25 +822,25 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
                     className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2.5 py-2 font-mono text-xs leading-5 text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-sky-500"
                   />
                   <div className="flex items-center gap-2">
-                    <button type="button" onClick={() => { void handleL2Save(document) }} disabled={savingL2 || !editingL2Content.trim()} className="inline-flex items-center gap-1 rounded border border-sky-300 px-2 py-0.5 text-xs font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-50 dark:border-sky-700 dark:text-sky-200">{savingL2 ? <Loader2 size={12} className="animate-spin" /> : null}{savingL2 ? '保存中' : '保存'}</button>
-                    <button type="button" onClick={() => { setEditingL2(false); setEditingL2Content('') }} disabled={savingL2} className="rounded border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700">取消</button>
-                    <p className="text-xs text-gray-400 dark:text-gray-500">保存即覆盖当前发布版，立刻用于注入与 L3 草案。</p>
+                    <button type="button" onClick={() => { void handleL2Save(document) }} disabled={savingL2 || !editingL2Content.trim()} className="inline-flex items-center gap-1 rounded border border-sky-300 px-2 py-0.5 text-xs font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-50 dark:border-sky-700 dark:text-sky-200">{savingL2 ? <Loader2 size={12} className="animate-spin" /> : null}{savingL2 ? t('memory.l3Saving') : t('memory.l3Save')}</button>
+                    <button type="button" onClick={() => { setEditingL2(false); setEditingL2Content('') }} disabled={savingL2} className="rounded border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700">{t('memory.l3Cancel')}</button>
+                    <p className="text-xs text-gray-400 dark:text-gray-500">{t('memory.l2SaveOverwriteHint')}</p>
                   </div>
                 </div>
               ) : (<>
-                {repairedLegacyContent && <p className="mt-2 rounded-md border border-sky-200 bg-sky-100/60 px-2.5 py-2 text-xs leading-5 text-sky-800 dark:border-sky-900/70 dark:bg-sky-950/30 dark:text-sky-200">已自动隐藏旧文档中的模型执行分析，仅显示可用的最终记忆正文。</p>}
-                {hasAnalysisPreamble && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-200">这份文档含有模型的执行分析开头，并非理想的最终记忆格式。请重新生成。</p>}
+                {repairedLegacyContent && <p className="mt-2 rounded-md border border-sky-200 bg-sky-100/60 px-2.5 py-2 text-xs leading-5 text-sky-800 dark:border-sky-900/70 dark:bg-sky-950/30 dark:text-sky-200">{t('memory.l2LegacyHidden')}</p>}
+                {hasAnalysisPreamble && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-200">{t('memory.l2PreambleWarn')}</p>}
                 <CollapsibleDocumentContent content={content} contentId="l2-published-content" accent="sky" />
               </>)}
               </div>
             </div>
-          })() : (<><p className="mt-3 text-xs text-gray-500 dark:text-gray-400">尚未生成。先完成会话整理后手动生成。</p><UserMemoryList accent="sky" scope="l2" /></>)}
+          })() : (<><p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{t('memory.l2Empty')}</p><UserMemoryList accent="sky" scope="l2" /></>)}
         </article>
         <article className="flex flex-col rounded-xl border border-violet-200 bg-violet-50/40 p-4 dark:border-violet-900/70 dark:bg-violet-950/20">
           <div className="flex items-start gap-2">
             <div className="mt-0.5 rounded-md bg-violet-500/10 p-1.5 text-violet-600 dark:text-violet-300"><Brain size={14} /></div>
-            <div className="min-w-0 flex-1 min-h-[62px]"><h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">长期 Profile</h2><p className="mt-0.5 text-xs leading-5 text-gray-500 dark:text-gray-400 line-clamp-2" title="基于已发布的工作记忆与筛选后的长期会话记忆创建草案。人工发布前不会进入 MCP 初始化上下文；手动添加的自定义记忆则始终随整理一起注入。">基于已发布的工作记忆与筛选后的长期会话记忆创建草案。人工发布前不会进入 MCP 初始化上下文；手动添加的自定义记忆则始终随整理一起注入。</p></div>
-            <button onClick={() => { void handleL3Draft() }} disabled={draftingL3 || !l2Documents.some((document) => document.state === 'published')} className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-violet-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50">{draftingL3 ? <Loader2 size={13} className="animate-spin" /> : <Pencil size={13} />}{draftingL3 ? '正在起草' : '创建草案'}</button>
+            <div className="min-w-0 flex-1 min-h-[62px]"><h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{t('memory.l3Title')}</h2><p className="mt-0.5 text-xs leading-5 text-gray-500 dark:text-gray-400 line-clamp-2" title={t('memory.l3Hint')}>{t('memory.l3Hint')}</p></div>
+            <button onClick={() => { void handleL3Draft() }} disabled={draftingL3 || !l2Documents.some((document) => document.state === 'published')} className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-violet-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50">{draftingL3 ? <Loader2 size={13} className="animate-spin" /> : <Pencil size={13} />}{draftingL3 ? t('memory.l3Drafting') : t('memory.l3CreateDraft')}</button>
           </div>
           {/* 用户自定义添加：放在「创建草案」底下。写入 user_defined 长期
               记忆，自动整理不会删改，并随 L2/L3 整理与注入一起下发给 Agent。 */}
@@ -784,15 +886,17 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
               </div>
             )}
           </div>
-          {l3DraftError && <div role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs leading-5 text-red-800 dark:border-red-900/70 dark:bg-red-950/30 dark:text-red-200"><span className="font-medium">创建草案失败：</span>{l3DraftError}</div>}
-          {visibleL3Documents.length || invalidL3Drafts.length ? <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain border-t border-violet-200/70 pt-3 dark:border-violet-900/70"><UserMemoryList accent="violet" scope="l3" />{visibleL3Documents.slice(0, 2).map((document) => {
-            return <div key={document.id} className="min-w-0 rounded-md bg-white/70 px-2.5 py-2 dark:bg-gray-900/30 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
+          {userMemoryErrors.l3 && <InlineActionError text={t('memory.longTermMemoryAddFailed', { error: userMemoryErrors.l3 })} />}
+          {userMemorySuccesses.l3 && <InlineActionSuccess text={userMemorySuccesses.l3} />}
+         {l3DraftError && <div role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs leading-5 text-red-800 dark:border-red-900/70 dark:bg-red-950/30 dark:text-red-200"><span className="font-medium">{t('memory.l3DraftFailedTitle')}</span>{l3DraftError}</div>}
+        {visibleL3Documents.length || invalidL3Drafts.length ? <div className="mt-3 min-h-0 flex-1 space-y-2 border-t border-violet-200/70 pt-3 dark:border-violet-900/70"><UserMemoryList accent="violet" scope="l3" />{visibleL3Documents.slice(0, 2).map((document) => {
+          return <div key={document.id} className="min-w-0 rounded-md bg-white/70 px-2.5 py-2 dark:bg-gray-900/30 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                <span className={document.state === 'published' ? 'text-green-600 dark:text-green-300' : document.state === 'archived' ? 'text-gray-500 dark:text-gray-400' : 'text-amber-700 dark:text-amber-300'}>{document.state === 'published' ? '已发布' : document.state === 'archived' ? '历史归档版' : '草案待确认'}</span>
-                <span className="min-w-0 text-gray-500 dark:text-gray-400">{document.source_count} 份来源 · 约 {document.token_estimate} tokens</span>
-                {document.state === 'draft' && <div className="ml-auto flex shrink-0 items-center gap-1"><button type="button" onClick={() => { setEditingL3Id(document.id); setEditingL3Content(document.content) }} disabled={publishingL3 === document.id || deletingL3 === document.id} className="inline-flex items-center gap-1 rounded border border-gray-300 px-2 py-0.5 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"><Pencil size={12} />编辑</button><button onClick={() => { void handleL3Publish(document) }} disabled={publishingL3 === document.id || deletingL3 === document.id} className="rounded border border-violet-300 px-2 py-0.5 font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50 dark:border-violet-700 dark:text-violet-200">{publishingL3 === document.id ? '发布中' : '确认发布'}</button><button type="button" onClick={() => setL3DeleteTarget(document)} disabled={publishingL3 === document.id || deletingL3 === document.id} className="inline-flex items-center gap-1 rounded border border-red-200 px-2 py-0.5 font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/30"><Trash2 size={12} />删除草案</button></div>}
-                {document.state === 'published' && <div className="ml-auto flex shrink-0 items-center gap-1"><button type="button" onClick={() => { setEditingL3Id(document.id); setEditingL3Content(document.content) }} disabled={publishingL3 === document.id} className="inline-flex items-center gap-1 rounded border border-gray-300 px-2 py-0.5 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"><Pencil size={12} />编辑</button></div>}
-                {document.state === 'archived' && <div className="ml-auto flex shrink-0 items-center gap-1"><button type="button" onClick={() => setL3DeleteTarget(document)} disabled={deletingL3 === document.id} className="inline-flex items-center gap-1 rounded border border-red-200 px-2 py-0.5 font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/30"><Trash2 size={12} />删除归档版</button></div>}
+                <span className={document.state === 'published' ? 'text-green-600 dark:text-green-300' : document.state === 'archived' ? 'text-gray-500 dark:text-gray-400' : 'text-amber-700 dark:text-amber-300'}>{document.state === 'published' ? t('memory.l3Published') : document.state === 'archived' ? t('memory.l3Archived') : t('memory.l3Draft')}</span>
+                <span className="min-w-0 text-gray-500 dark:text-gray-400">{t('memory.l3SourceLine', { count: document.source_count, tokens: document.token_estimate })}</span>
+                {document.state === 'draft' && <div className="ml-auto flex shrink-0 items-center gap-1"><button type="button" onClick={() => { setEditingL3Id(document.id); setEditingL3Content(document.content) }} disabled={publishingL3 === document.id || deletingL3 === document.id} className="inline-flex items-center gap-1 rounded border border-gray-300 px-2 py-0.5 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"><Pencil size={12} />{t('memory.l2Edit')}</button><button onClick={() => { void handleL3Publish(document) }} disabled={publishingL3 === document.id || deletingL3 === document.id} className="rounded border border-violet-300 px-2 py-0.5 font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50 dark:border-violet-700 dark:text-violet-200">{publishingL3 === document.id ? t('memory.l3Publishing') : t('memory.l3ConfirmPublish')}</button><button type="button" onClick={() => setL3DeleteTarget(document)} disabled={publishingL3 === document.id || deletingL3 === document.id} className="inline-flex items-center gap-1 rounded border border-red-200 px-2 py-0.5 font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/30"><Trash2 size={12} />{t('memory.l3DeleteDraft')}</button></div>}
+                {document.state === 'published' && <div className="ml-auto flex shrink-0 items-center gap-1"><button type="button" onClick={() => { setEditingL3Id(document.id); setEditingL3Content(document.content) }} disabled={publishingL3 === document.id} className="inline-flex items-center gap-1 rounded border border-gray-300 px-2 py-0.5 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"><Pencil size={12} />{t('memory.l2Edit')}</button></div>}
+                {document.state === 'archived' && <div className="ml-auto flex shrink-0 items-center gap-1"><button type="button" onClick={() => setL3DeleteTarget(document)} disabled={deletingL3 === document.id} className="inline-flex items-center gap-1 rounded border border-red-200 px-2 py-0.5 font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/30"><Trash2 size={12} />{t('memory.l3DeleteArchived')}</button></div>}
               </div>
               {editingL3Id === document.id ? (
                 <div className="mt-2 space-y-1.5">
@@ -804,10 +908,10 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
                   />
                   <div className="flex items-center gap-2">
                     {document.state === 'published' ? (
-                      <button type="button" onClick={() => { void handleL3SavePublished(document) }} disabled={publishingL3 === document.id || !editingL3Content.trim()} className="inline-flex items-center gap-1 rounded border border-violet-300 px-2 py-0.5 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50 dark:border-violet-700 dark:text-violet-200">{publishingL3 === document.id ? <Loader2 size={12} className="animate-spin" /> : null}{publishingL3 === document.id ? '保存中' : '保存'}</button>
+                      <button type="button" onClick={() => { void handleL3SavePublished(document) }} disabled={publishingL3 === document.id || !editingL3Content.trim()} className="inline-flex items-center gap-1 rounded border border-violet-300 px-2 py-0.5 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50 dark:border-violet-700 dark:text-violet-200">{publishingL3 === document.id ? <Loader2 size={12} className="animate-spin" /> : null}{publishingL3 === document.id ? t('memory.l3Saving') : t('memory.l3Save')}</button>
                     ) : null}
-                    <button type="button" onClick={() => { setEditingL3Id(null); setEditingL3Content('') }} disabled={publishingL3 === document.id} className="rounded border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700">{document.state === 'published' ? '取消' : '取消编辑'}</button>
-                    <p className="text-xs text-gray-400 dark:text-gray-500">{document.state === 'published' ? '保存即覆盖当前发布版，立刻用于注入，并作为下一次创建草案的重要输入。' : '编辑不单独保存：确认发布即按编辑后内容发布，离开页面则丢弃。'}</p>
+                    <button type="button" onClick={() => { setEditingL3Id(null); setEditingL3Content('') }} disabled={publishingL3 === document.id} className="rounded border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700">{document.state === 'published' ? t('memory.l3Cancel') : t('memory.l3CancelEdit')}</button>
+                    <p className="text-xs text-gray-400 dark:text-gray-500">{document.state === 'published' ? t('memory.l3PublishedEditHint') : t('memory.l3DraftEditHint')}</p>
                   </div>
                 </div>
               ) : (
@@ -816,9 +920,12 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
                 <CollapsibleDocumentContent content={document.content} contentId={`l3-document-${document.id}`} accent="violet" />
               )}
             </div>
-          })}{invalidL3Drafts.map((document) => <div key={document.id} className="rounded-md border border-amber-200 bg-amber-50/80 px-2.5 py-2 text-xs dark:border-amber-900/70 dark:bg-amber-950/25"><div className="flex flex-wrap items-center gap-x-2 gap-y-1"><span className="font-medium text-amber-800 dark:text-amber-200">历史无效草案</span><span className="text-amber-700/80 dark:text-amber-300/80">{document.source_count} 份 L2/L1 来源 · 不可发布</span><button type="button" onClick={() => setL3DeleteTarget(document)} disabled={deletingL3 === document.id} className="ml-auto inline-flex shrink-0 items-center gap-1 rounded border border-red-200 bg-white/70 px-2 py-0.5 font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:bg-gray-900/40 dark:text-red-300 dark:hover:bg-red-950/30"><Trash2 size={12} />{deletingL3 === document.id ? '删除中' : '删除草案'}</button></div><p className="mt-1.5 leading-5 text-amber-800 dark:text-amber-200">内容未展示，因其不符合 L3 发布格式。可直接删除后重新创建草案。</p></div>)}</div> : (<><p className="mt-3 text-xs text-gray-500 dark:text-gray-400">尚无可发布的 L3 草案。请点击“创建草案”重新生成。</p><UserMemoryList accent="violet" scope="l3" /></>)}
+          })}{invalidL3Drafts.map((document) => <div key={document.id} className="rounded-md border border-amber-200 bg-amber-50/80 px-2.5 py-2 text-xs dark:border-amber-900/70 dark:bg-amber-950/25"><div className="flex flex-wrap items-center gap-x-2 gap-y-1"><span className="font-medium text-amber-800 dark:text-amber-200">{t('memory.l3InvalidDraftBadge')}</span><span className="text-amber-700/80 dark:text-amber-300/80">{t('memory.l3InvalidDraftSource', { count: document.source_count })}</span><button type="button" onClick={() => setL3DeleteTarget(document)} disabled={deletingL3 === document.id} className="ml-auto inline-flex shrink-0 items-center gap-1 rounded border border-red-200 bg-white/70 px-2 py-0.5 font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:bg-gray-900/40 dark:text-red-300 dark:hover:bg-red-950/30"><Trash2 size={12} />{deletingL3 === document.id ? t('memory.l3DraftInvalidDeleting') : t('memory.l3DraftInvalidDelete')}</button></div><p className="mt-1.5 leading-5 text-amber-800 dark:text-amber-200">{t('memory.l3InvalidDraftHint')}</p></div>)}</div> : (<><p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{t('memory.l3Empty')}</p><UserMemoryList accent="violet" scope="l3" /></>)}
         </article>
       </section>
+
+      {/* 云端记忆库：跨设备同步 L2/L3 发布版 */}
+      <CloudVaultCard onSynced={() => { void loadMemoryLayers(); void listMemories(true) }} />
 
       {/* 可检索记忆（L1） */}
       <section className="order-20 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 space-y-3">
@@ -844,10 +951,10 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
               onClick={requestResetL1}
               disabled={resettingL1}
               className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2 py-1 font-medium text-red-700 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/30"
-              title="清空派生记忆并按当前提取规则重新整理原始会话"
+              title={t('memory.l1ResetTitle')}
             >
               {resettingL1 ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-              {resettingL1 ? '正在重置' : '重新整理'}
+              {resettingL1 ? t('memory.l1Resetting') : t('memory.l1Reset')}
             </button>
             <button
               onClick={() => { void handleRefresh() }}
@@ -918,36 +1025,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
         ) : (
           <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1">
             {memories.map((m) => (
-              <div key={m.id} className="rounded-md bg-gray-50 dark:bg-gray-700/50 border border-gray-200 dark:border-gray-600 px-3 py-2">
-                {(() => {
-                  const ranking = importance[m.id]
-                  const level = ranking?.score == null ? null : ranking.score >= 70 ? 'high' : ranking.score >= 40 ? 'medium' : 'low'
-                  return <>
-                <div className="flex items-start gap-2">
-                  <MemoryMarkdown content={m.memory} className="flex-1 break-words" />
-                  <div className="flex shrink-0 gap-1">
-                    <button onClick={() => { void handlePinMemory(m.id, !ranking?.pinned) }} className={`p-1 rounded hover:bg-amber-100 dark:hover:bg-amber-900/40 ${ranking?.pinned ? 'text-amber-500' : 'text-gray-500 dark:text-gray-400'}`} title={ranking?.pinned ? t('memory.importanceUnpin') : t('memory.importancePin')}>
-                      <Star size={13} className={ranking?.pinned ? 'fill-current' : ''} />
-                    </button>
-                    <button onClick={() => openEdit(m)} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-500 dark:text-gray-400" title={t('common.edit')}>
-                      <Pencil size={13} />
-                    </button>
-                    <button onClick={() => handleDelete(m)} className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-gray-500 dark:text-gray-400 hover:text-red-500" title={t('common.delete')}>
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                </div>
-                <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                  {m.user_defined && <span className="text-xs px-1.5 rounded bg-violet-600/15 font-medium text-violet-700 dark:text-violet-300" title={t('memory.userDefinedPlaceholder')}>{t('memory.userDefinedBadge')}</span>}
-                  {m.memory_type && <span className="text-xs px-1.5 rounded bg-violet-500/10 text-violet-600 dark:text-violet-400">{m.memory_type}</span>}
-                  {m.durability && <span className={`text-xs px-1.5 rounded ${m.durability === 'long_term' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : m.durability === 'short_term' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-200'}`}>{t(`memory.durability${m.durability === 'long_term' ? 'LongTerm' : m.durability === 'short_term' ? 'ShortTerm' : 'Session'}`)}</span>}
-                  {level && <span className={`text-xs px-1.5 rounded ${level === 'high' ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300' : level === 'medium' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-200'}`}>{t(`memory.importance${level[0].toUpperCase()}${level.slice(1)}`, { score: ranking.score })}</span>}
-                  {ranking && <span className="text-xs text-gray-400">{t('memory.importanceEvidence', { sessions: ranking.supporting_sessions, agents: ranking.supporting_agents, recalls: ranking.recall_count })}</span>}
-                  {(m.event_time || m.last_update_at) && <span className="text-xs text-gray-400" title={m.event_time ? '会话发生时间' : '记忆整理时间'}>{localTime(m.event_time || m.last_update_at || '')}</span>}
-                </div>
-                  </>
-                })()}
-              </div>
+              <MemoryCard key={m.id} memory={m} ranking={importance[m.id]} onPin={handlePinMemory} onEdit={openEdit} onDelete={handleDelete} />
             ))}
           </div>
         )}
@@ -956,10 +1034,10 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
         <div className="border-t border-gray-100 pt-3 dark:border-gray-700">
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex-1">
-            <h3 className="text-xs font-semibold text-gray-700 dark:text-gray-200">记忆清洗与去重</h3>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">仅审阅可检索记忆中的语义重复项并安全合并；不会生成新的工作记忆或修改长期 Profile。执行前会创建可恢复检查点。</p>
+            <h3 className="text-xs font-semibold text-gray-700 dark:text-gray-200">{t('memory.consolidateTitle')}</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{t('memory.consolidateHint')}</p>
             </div>
-            <button type="button" onClick={() => setConsolidationOpen((open) => !open)} aria-expanded={consolidationOpen} className="inline-flex items-center gap-1 rounded-md border border-gray-300 px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700">{consolidationOpen ? '收起' : '查看'}{consolidationOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
+            <button type="button" onClick={() => setConsolidationOpen((open) => !open)} aria-expanded={consolidationOpen} className="inline-flex items-center gap-1 rounded-md border border-gray-300 px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700">{consolidationOpen ? t('memory.ingestCollapse') : t('memory.consolidateView')}{consolidationOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
             {consolidationOpen &&
             <button
             onClick={handleDreaming}
@@ -967,7 +1045,7 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-sm font-medium"
             >
             {consolidating ? <Loader2 size={15} className="animate-spin" /> : <MoonStar size={15} />}
-            {consolidating ? '正在清洗' : '开始清洗'}
+            {consolidating ? t('memory.consolidateWorking') : t('memory.consolidateStart')}
             </button>
             }
           </div>
@@ -1010,13 +1088,13 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
           <div className="w-full max-w-sm space-y-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center gap-2">
               <Trash2 size={18} className="text-red-500" />
-              <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{l3DeleteTarget.state === 'archived' ? '删除历史归档版？' : '删除草案？'}</h3>
+              <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{l3DeleteTarget.state === 'archived' ? t('memory.l3DeleteArchivedTitle') : t('memory.l3DeleteTitle')}</h3>
             </div>
-            <p className="text-sm leading-6 text-gray-600 dark:text-gray-300">此操作会删除该未发布{ l3DeleteTarget.state === 'archived' ? '归档版' : '草案'}及其来源关联，已发布的 Profile 不会受影响。</p>
-            <p className="text-xs text-gray-500 dark:text-gray-400">{l3DeleteTarget.source_count} 份来源 · 约 {l3DeleteTarget.token_estimate} tokens</p>
+            <p className="text-sm leading-6 text-gray-600 dark:text-gray-300">{t('memory.l3DeleteHint', { kind: l3DeleteTarget.state === 'archived' ? t('memory.l3Archived').toLowerCase() : t('memory.l3Draft').toLowerCase() })}</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">{t('memory.l3SourceLine', { count: l3DeleteTarget.source_count, tokens: l3DeleteTarget.token_estimate })}</p>
             <div className="flex justify-end gap-2">
               <button onClick={() => setL3DeleteTarget(null)} disabled={Boolean(deletingL3)} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700">{t('common.cancel')}</button>
-              <button onClick={() => { void confirmL3DraftDelete() }} disabled={Boolean(deletingL3)} className="inline-flex items-center gap-1 rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50">{deletingL3 ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}{deletingL3 ? '正在删除' : '删除草案'}</button>
+              <button onClick={() => { void confirmL3DraftDelete() }} disabled={Boolean(deletingL3)} className="inline-flex items-center gap-1 rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50">{deletingL3 ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}{deletingL3 ? t('memory.l3Deleting') : t('memory.l3DeleteDraft')}</button>
             </div>
           </div>
         </div>
@@ -1026,10 +1104,10 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
       {resetL1ConfirmOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !resettingL1 && setResetL1ConfirmOpen(false)}>
           <div className="w-full max-w-md space-y-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800" onClick={(event) => event.stopPropagation()}>
-            <div className="flex items-center gap-2"><RefreshCw size={18} className="text-violet-600 dark:text-violet-300" /><h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">重新提取会话记忆？</h3></div>
-            <p className="text-sm leading-6 text-gray-600 dark:text-gray-300">将清空现有会话记忆及其派生文档，再把完整原始会话放回整理队列。原始对话、用量、Skill 与你手动添加的自定义记忆不会删除。</p>
-            <p className="text-xs leading-5 text-violet-700 dark:text-violet-300">重新提取后，每条记忆会显示“仅本会话 / 短期 / 长期”标签；长期 Profile 仅使用长期记忆。</p>
-            <div className="flex justify-end gap-2"><button onClick={() => setResetL1ConfirmOpen(false)} disabled={resettingL1} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700">{t('common.cancel')}</button><button onClick={() => { void confirmResetL1() }} disabled={resettingL1} className="inline-flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">{resettingL1 ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}{resettingL1 ? '正在重置' : '开始重跑'}</button></div>
+            <div className="flex items-center gap-2"><RefreshCw size={18} className="text-violet-600 dark:text-violet-300" /><h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{t('memory.l1ResetConfirmTitle')}</h3></div>
+            <p className="text-sm leading-6 text-gray-600 dark:text-gray-300">{t('memory.l1ResetConfirmDesc')}</p>
+            <p className="text-xs leading-5 text-violet-700 dark:text-violet-300">{t('memory.l1ResetConfirmHint')}</p>
+            <div className="flex justify-end gap-2"><button onClick={() => setResetL1ConfirmOpen(false)} disabled={resettingL1} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700">{t('common.cancel')}</button><button onClick={() => { void confirmResetL1() }} disabled={resettingL1} className="inline-flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">{resettingL1 ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}{resettingL1 ? t('memory.l1Resetting') : t('memory.l1ResetRun')}</button></div>
           </div>
         </div>
       )}
@@ -1056,13 +1134,14 @@ export function MemoryCenter({ onOpenUsage, onOpenPending, onOpenOrganized, onOp
       )}
     </div>
   )
-}
+})
 
 // 用户自定义记忆列表：L2 工作记忆与 L3 长期 Profile 卡片各自只显示
 // 归属本层的 user_defined 条目（id 前缀 local-user-l2: / local-user-l3:，
 // 旧版 local-user: 归入 l3），支持内联编辑与删除；复用 store 的
 // updateMemory/deleteMemory，保存/删除后自动刷新列表。
 function UserMemoryList({ accent, scope }: { accent: 'sky' | 'violet'; scope: 'l2' | 'l3' }) {
+  const { t } = useTranslation()
   const { memories, updateMemory, deleteMemory } = useMemoryStore()
   const customMemories = useMemo(() => memories.filter((memory) => {
     if (!memory.user_defined) return false
@@ -1100,7 +1179,7 @@ function UserMemoryList({ accent, scope }: { accent: 'sky' | 'violet'; scope: 'l
   }
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('确定删除这条自定义记忆吗？删除后无法恢复。')) return
+    if (!window.confirm(t('memory.customMemoryDeleteConfirm'))) return
     setDeletingId(id)
     setError(null)
     try {
@@ -1114,7 +1193,7 @@ function UserMemoryList({ accent, scope }: { accent: 'sky' | 'violet'; scope: 'l
 
   return (
     <div className="mt-3 space-y-1.5">
-      <p className={`text-xs font-medium ${accentText}`}>自定义记忆 · {customMemories.length} 条</p>
+      <p className={`text-xs font-medium ${accentText}`}>{t('memory.customMemoryList', { count: customMemories.length })}</p>
       {error && <p className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700 dark:border-red-900/70 dark:bg-red-950/30 dark:text-red-300">{error}</p>}
       {customMemories.map((memory) => (
         <div key={memory.id} className="rounded-md border border-gray-200 bg-white/70 px-2.5 py-2 dark:border-gray-700 dark:bg-gray-900/30">
@@ -1129,9 +1208,9 @@ function UserMemoryList({ accent, scope }: { accent: 'sky' | 'violet'; scope: 'l
               <div className="flex items-center gap-2">
                 <button type="button" onClick={() => { void handleSave(memory.id) }} disabled={savingId === memory.id || !editContent.trim()} className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs font-medium disabled:opacity-50 ${accentSave}`}>
                   {savingId === memory.id ? <Loader2 size={12} className="animate-spin" /> : null}
-                  {savingId === memory.id ? '保存中' : '保存'}
+                  {savingId === memory.id ? t('memory.customMemorySaving') : t('memory.l3Save')}
                 </button>
-                <button type="button" onClick={() => { setEditingId(null); setEditContent('') }} disabled={savingId === memory.id} className="rounded border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700">取消</button>
+                <button type="button" onClick={() => { setEditingId(null); setEditContent('') }} disabled={savingId === memory.id} className="rounded border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700">{t('memory.l3Cancel')}</button>
               </div>
             </div>
           ) : (
@@ -1139,8 +1218,8 @@ function UserMemoryList({ accent, scope }: { accent: 'sky' | 'violet'; scope: 'l
               <span className="mt-0.5 shrink-0 rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300">{memory.memory_type ?? 'fact'}</span>
               <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm text-gray-800 dark:text-gray-100">{memory.memory}</p>
               <div className="flex shrink-0 items-center gap-1">
-                <button type="button" onClick={() => { setEditingId(memory.id); setEditContent(memory.memory) }} disabled={deletingId === memory.id} className="inline-flex items-center gap-1 rounded border border-gray-300 px-1.5 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"><Pencil size={11} />编辑</button>
-                <button type="button" onClick={() => { void handleDelete(memory.id) }} disabled={deletingId === memory.id} className="inline-flex items-center gap-1 rounded border border-red-200 px-1.5 py-0.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/30">{deletingId === memory.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}删除</button>
+                <button type="button" onClick={() => { setEditingId(memory.id); setEditContent(memory.memory) }} disabled={deletingId === memory.id} className="inline-flex items-center gap-1 rounded border border-gray-300 px-1.5 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"><Pencil size={11} />{t('memory.l2Edit')}</button>
+                <button type="button" onClick={() => { void handleDelete(memory.id) }} disabled={deletingId === memory.id} className="inline-flex items-center gap-1 rounded border border-red-200 px-1.5 py-0.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/30">{deletingId === memory.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}{t('memory.customMemoryDelete')}</button>
               </div>
             </div>
           )}

@@ -9,6 +9,8 @@ src-tauri/gen/
 src-tauri/.tauri/
 # Cargo.lock 应保留（二进制应用），如需忽略请取消下一行注释
 # Cargo.lock
+# 云端 Vault 服务的构建产物
+vault/target/
 
 # ---------- Build artifacts ----------
 *.log

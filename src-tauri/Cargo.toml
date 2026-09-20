@@ -1,6 +1,6 @@
 [package]
 name = "agent-manager"
-version = "1.0.0-beta"
+version = "1.0.0"
 description = "A local agent management tool"
 authors = ["you"]
 edition = "2021"
@@ -23,6 +23,7 @@ tauri-plugin-http = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -32,8 +33,10 @@ futures-util = "0.3"
 portable-pty = "0.9"
 aes-gcm = "0.10"
 sha2 = "0.10"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 tiktoken-rs = "0.12"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tempfile = "3"
 
 [profile.release]
 panic = "abort"

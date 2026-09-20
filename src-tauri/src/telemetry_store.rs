@@ -5,7 +5,8 @@
 //! particular memory backend.
 
 use crate::thinking::strip_thinking_blocks;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use tauri::Emitter;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -26,7 +27,7 @@ pub fn shared_store() -> Option<Arc<TelemetryStore>> {
 
 #[derive(Clone)]
 pub struct TelemetryStore {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -131,6 +132,9 @@ pub struct TelemetryUsageAnalytics {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cached_tokens: i64,
+    /// Tokens contributed by rows whose origin starts with `estimated` —
+    /// transparent local estimates, not provider counters.
+    pub estimated_tokens: i64,
     pub records: Vec<TelemetryUsageRecord>,
     pub truncated_records: bool,
     pub buckets: Vec<TelemetryUsageBucket>,
@@ -314,6 +318,18 @@ pub struct LocalMemoryStats {
 /// Complete native row retained in a consolidation checkpoint.  Keeping the
 /// source metadata means a rollback restores the exact L1 library rather than
 /// recreating synthetic memories detached from their original conversation.
+/// 云端记忆库（Token 用量）同步：每台设备只上报「天 × 来源」的总量统计，
+/// 不上传播逐条账本。远端统计落到 usage_remote_totals，只参与总量/趋势展示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageDayAggregate {
+    pub day: String,
+    pub source: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: i64,
+    pub record_count: i64,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LocalMemorySnapshot {
     pub id: String,
@@ -471,20 +487,9 @@ impl TelemetryStore {
                tool_name TEXT NOT NULL,
                summary TEXT NOT NULL,
                detail TEXT,
-               success INTEGER NOT NULL DEFAULT 1
-             );
-             -- 对话整理记录（沉淀活动日志）与对话接收记录一样持久化，
-             -- 应用重启后仍可回看；只保留最近 200 条防止无限增长。
-             CREATE TABLE IF NOT EXISTS ingest_logs (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               occurred_at TEXT NOT NULL,
-               display_time TEXT NOT NULL,
-               agent_id TEXT NOT NULL,
-               kind TEXT NOT NULL,
-               state TEXT NOT NULL,
-               detail TEXT NOT NULL
-             );
-             -- Application-owned configuration is kept with the durable
+              success INTEGER NOT NULL DEFAULT 1
+            );
+            -- Application-owned configuration is kept with the durable
              -- memory/telemetry ledger.  Values stay JSON so settings can
              -- evolve without a schema migration for every UI field.
              CREATE TABLE IF NOT EXISTS app_settings (
@@ -526,6 +531,24 @@ impl TelemetryStore {
                source_layer TEXT NOT NULL CHECK(source_layer IN ('l1', 'l2')),
                source_id TEXT NOT NULL,
                PRIMARY KEY(document_id, source_layer, source_id)
+             );
+             -- 云端记忆库同步水位：本地发布/编辑后置 dirty，同步成功回填对齐。
+             CREATE TABLE IF NOT EXISTS cloud_sync_meta (
+               object_key TEXT PRIMARY KEY,
+               revision INTEGER NOT NULL DEFAULT 0,
+               content_hash TEXT,
+               sync_state TEXT NOT NULL DEFAULT 'clean',
+               updated_at TEXT
+             );
+             CREATE TABLE IF NOT EXISTS usage_remote_totals (
+               device TEXT NOT NULL,
+               day TEXT NOT NULL,
+               source TEXT NOT NULL,
+               input_tokens INTEGER NOT NULL DEFAULT 0,
+               output_tokens INTEGER NOT NULL DEFAULT 0,
+               cached_tokens INTEGER NOT NULL DEFAULT 0,
+               record_count INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (device, day, source)
              );",
         )
         .map_err(|e| e.to_string())?;
@@ -583,6 +606,19 @@ impl TelemetryStore {
             [],
         )
         .map_err(|error| error.to_string())?;
+        // Historical rows mixed `Z`, `+00:00` and nanosecond-precision
+        // suffixes; lexical SQL comparisons need one canonical UTC format.
+        // The non-NULL guard skips (idempotently) rows SQLite cannot parse.
+        let _ = conn.execute_batch(
+            "UPDATE usage_records
+                SET occurred_at = strftime('%Y-%m-%dT%H:%M:%fZ', occurred_at)
+              WHERE strftime('%Y-%m-%dT%H:%M:%fZ', occurred_at) IS NOT NULL
+                AND occurred_at != strftime('%Y-%m-%dT%H:%M:%fZ', occurred_at);
+             UPDATE session_token_usage
+                SET refreshed_at = strftime('%Y-%m-%dT%H:%M:%fZ', refreshed_at)
+              WHERE strftime('%Y-%m-%dT%H:%M:%fZ', refreshed_at) IS NOT NULL
+                AND refreshed_at != strftime('%Y-%m-%dT%H:%M:%fZ', refreshed_at);",
+        );
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -918,6 +954,39 @@ impl TelemetryStore {
         ).map_err(|e| e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(true)
+    }
+
+    /// 该会话是否已由其他来源录入原生转录。ZCode 的 Claude 引擎会把会话
+    /// 镜像到 ~/.claude/projects（同一 UUID 文件名），双份扫描若都记账会
+    /// 重复对话与用量；扫描侧据此跳过后到的镜像副本。
+    pub fn native_session_recorded_by_other_source(
+        &self,
+        source: &str,
+        session_id: &str,
+    ) -> Result<bool, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        for other in crate::agent_sources::AGENT_SOURCE_IDS {
+            if other == source {
+                continue;
+            }
+            let event_key = format!("native:{other}:{session_id}:TranscriptSync");
+            let exists = conn
+                .query_row(
+                    "SELECT 1 FROM agent_events WHERE event_key = ?1",
+                    [&event_key],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .is_some();
+            if exists {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn unannotated_stop_payloads(&self, limit: u32) -> Result<Vec<(String, Value)>, String> {
@@ -1292,7 +1361,14 @@ impl TelemetryStore {
         let mut statement = conn
             .prepare(
                 "SELECT id, memory, memory_type, durability, user_defined, updated_at, event_time FROM local_memory_items
-              ORDER BY updated_at DESC LIMIT ?1",
+                  WHERE user_defined = 1
+                     OR id IN (
+                        SELECT id FROM local_memory_items
+                         WHERE user_defined = 0
+                         ORDER BY updated_at DESC
+                         LIMIT ?1
+                     )
+                 ORDER BY user_defined DESC, updated_at DESC",
             )
             .map_err(|e| e.to_string())?;
         let rows = statement
@@ -1573,6 +1649,7 @@ impl TelemetryStore {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         if state == "published" {
             tx.execute("UPDATE memory_layer_documents SET state = 'archived' WHERE layer = ?1 AND scope = 'global' AND state = 'published'", [layer]).map_err(|e| e.to_string())?;
+            mark_cloud_sync_dirty_tx(&tx, layer, &now);
         }
         tx.execute(
             "INSERT INTO memory_layer_documents
@@ -1644,6 +1721,7 @@ impl TelemetryStore {
             }),
         ).map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO profile_summaries (profile_id, content, source_workspace_count, updated_at) VALUES ('local-user', ?1, ?2, ?3) ON CONFLICT(profile_id) DO UPDATE SET content=excluded.content, source_workspace_count=excluded.source_workspace_count, updated_at=excluded.updated_at", params![document.content, document.source_count, now]).map_err(|e| e.to_string())?;
+        mark_cloud_sync_dirty_tx(&tx, &layer, &now);
         tx.commit().map_err(|e| e.to_string())?;
         Ok(document)
     }
@@ -1660,12 +1738,12 @@ impl TelemetryStore {
         if content.trim().is_empty() {
             return Err("记忆内容不能为空".into());
         }
-        let token_estimate = estimate_transcript_tokens(&content);
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| "telemetry store lock poisoned".to_string())?;
-        let updated = conn
+       let token_estimate = estimate_transcript_tokens(&content);
+        let conn = self
+           .conn
+           .lock()
+           .map_err(|_| "telemetry store lock poisoned".to_string())?;
+       let updated = conn
             .execute(
                 "UPDATE memory_layer_documents SET content = ?1, token_estimate = ?2 WHERE id = ?3 AND state = 'published'",
                 params![content, token_estimate, id],
@@ -1674,12 +1752,139 @@ impl TelemetryStore {
         if updated == 0 {
             return Err("未找到可编辑的已发布记忆文档".into());
         }
+        // 已发布正文被人工编辑 → 云端同步水位置 dirty（同一连接内直接落库，避免重入锁）。
+        let now = chrono::Utc::now().to_rfc3339();
+        let layer: String = conn
+            .query_row("SELECT layer FROM memory_layer_documents WHERE id = ?1", [id], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let _ = conn.execute(
+            "INSERT INTO cloud_sync_meta (object_key, revision, content_hash, sync_state, updated_at)
+             VALUES (?1, 0, NULL, 'dirty', ?2)
+             ON CONFLICT(object_key) DO UPDATE SET sync_state = 'dirty', updated_at = ?2",
+            params![format!("{layer}:published"), now],
+        );
         conn.query_row(
             "SELECT id, layer, scope, content, state, token_estimate, source_count, window_start, window_end, created_at, published_at
                FROM memory_layer_documents WHERE id = ?1", [id], |row| Ok(MemoryLayerDocument {
                 id: row.get(0)?, layer: row.get(1)?, scope: row.get(2)?, content: row.get(3)?, state: row.get(4)?, token_estimate: row.get(5)?, source_count: row.get(6)?, window_start: row.get(7)?, window_end: row.get(8)?, created_at: row.get(9)?, published_at: row.get(10)?,
             }),
         ).map_err(|e| e.to_string())
+    }
+
+    /// 云端记忆库：列出全部同步水位行（object_key, revision, content_hash, sync_state, updated_at）。
+    pub fn cloud_sync_meta_rows(
+        &self,
+    ) -> Result<Vec<(String, i64, Option<String>, String, Option<String>)>, String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT object_key, revision, content_hash, sync_state, updated_at FROM cloud_sync_meta")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    /// 云端记忆库：按 id 查找用户自定义 L1（远端落地前的本地比对）。
+    pub fn find_user_defined_l1(
+        &self,
+        id: &str,
+    ) -> Result<Option<LocalMemorySnapshot>, String> {
+        self.user_defined_l1_memories()
+            .map(|items| items.into_iter().find(|item| item.id == id))
+    }
+
+    /// 云端记忆库：读取某对象 key 的同步水位行。
+    pub fn cloud_sync_meta_row(
+        &self,
+        object_key: &str,
+    ) -> Result<Option<(i64, Option<String>, String, Option<String>)>, String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.query_row(
+            "SELECT revision, content_hash, sync_state, updated_at FROM cloud_sync_meta WHERE object_key = ?1",
+            [object_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// 云端记忆库：同步成功后回填水位（置 clean 或 conflict）。
+    pub fn cloud_sync_meta_set(
+        &self,
+        object_key: &str,
+        revision: i64,
+        content_hash: Option<&str>,
+        sync_state: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cloud_sync_meta (object_key, revision, content_hash, sync_state, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(object_key) DO UPDATE SET revision = ?2, content_hash = ?3, sync_state = ?4, updated_at = ?5",
+            params![object_key, revision, content_hash, sync_state, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 云端记忆库：本地最高对齐修订号，作为增量拉取水位线。
+    pub fn cloud_sync_max_revision(&self) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.query_row("SELECT COALESCE(MAX(revision), 0) FROM cloud_sync_meta", [], |r| r.get(0))
+            .map_err(|e| e.to_string())
+    }
+
+    /// 云端拉取落地：写入某层的发布版正文。本地已有发布版则覆盖；
+    /// 没有则新建一条 published 文档（新设备首次拉取）。
+    /// 与本地发布走同一语义：token_estimate 重算，L3 同步镜像 profile_summaries。
+    pub fn upsert_published_layer_content(&self, layer: &str, content: &str) -> Result<(), String> {
+        let content = strip_thinking_blocks(content);
+        if content.trim().is_empty() {
+            return Err("拉取到的记忆内容为空".into());
+        }
+        let token_estimate = estimate_transcript_tokens(&content);
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let existing_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM memory_layer_documents WHERE layer = ?1 AND state = 'published' ORDER BY published_at DESC LIMIT 1",
+                [layer],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        match existing_id {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE memory_layer_documents SET content = ?1, token_estimate = ?2 WHERE id = ?3",
+                    params![content, token_estimate, id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO memory_layer_documents (id, layer, scope, content, state, token_estimate, source_count, created_at, published_at)
+                     VALUES (?1, ?2, 'global', ?3, 'published', ?4, 0, ?5, ?5)",
+                    params![format!("cloud-sync-{layer}"), layer, content, token_estimate, now],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        if layer == "l3" {
+            tx.execute(
+                "INSERT INTO profile_summaries (profile_id, content, source_workspace_count, updated_at) VALUES ('local-user', ?1, 0, ?2)
+                 ON CONFLICT(profile_id) DO UPDATE SET content=excluded.content, source_workspace_count=excluded.source_workspace_count, updated_at=excluded.updated_at",
+                params![content, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Remove an un-published L3 document: drafts plus archived historical
@@ -1913,6 +2118,136 @@ impl TelemetryStore {
             .map_err(|e| e.to_string())
     }
 
+    /// 云端记忆库：按 id upsert 一条远端拉回的用户自定义 L1。
+    /// 保持 user_defined=1 与 long_term 语义，与 add_user_defined_l1_memory
+    /// 同一字段布局；id 来自源设备，本地已存在则仅更新内容与时间戳。
+    pub fn upsert_synced_l1_memory(
+        &self,
+        id: &str,
+        memory: &str,
+        memory_type: &str,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        let memory_type = normalize_l1_memory_type(memory_type);
+        if memory.trim().is_empty() {
+            return Err("拉取到的自定义记忆内容为空".into());
+        }
+        let source_event_key = format!("user-defined:{id}");
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.execute(
+            "INSERT INTO local_memory_items
+                (id, source_event_key, ordinal, memory, memory_type, durability, source, session_id, user_defined, event_time, created_at, updated_at)
+             VALUES (?1, ?2, 0, ?3, ?4, 'long_term', 'user', ?5, 1, ?6, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET memory = ?3, memory_type = ?4, updated_at = ?7",
+            params![id, source_event_key, memory.trim(), memory_type, format!("user-defined:{}", user_defined_memory_scope(id)), updated_at, updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 云端记忆库：墓碑落地——删除本地对应的用户自定义 L1。
+    /// 仅 user_defined=1 条目可被远端删除传播，其余（自动提取/导入）不动。
+    pub fn delete_synced_l1_memory(&self, id: &str) -> Result<bool, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM local_memory_items WHERE id = ?1 AND user_defined = 1",
+                [id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(deleted > 0)
+    }
+
+    /// 云端记忆库：删除某对象 key 的本地水位行（本地删除已推成墓碑后清理）。
+    pub fn cloud_sync_meta_delete(&self, object_key: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.execute("DELETE FROM cloud_sync_meta WHERE object_key = ?1", [object_key])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 云端记忆库（Token 用量）：导出本机「天 × 来源」总量统计。
+    /// 口径与用量分析页一致（usage_records 为主，无明细的会话用会话总量兜底），
+    /// 按本地时区分天。
+    pub fn usage_day_aggregates(&self) -> Result<Vec<UsageDayAggregate>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "WITH feed AS (
+                   SELECT occurred_at, source, input_tokens, output_tokens, cached_tokens FROM usage_records
+                   UNION ALL
+                   SELECT usage.refreshed_at, usage.source, usage.input_tokens, usage.output_tokens, usage.cached_tokens
+                     FROM session_token_usage usage
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM usage_records record
+                       WHERE record.source = usage.source AND record.session_id = usage.session_id
+                    )
+                 )
+                 SELECT strftime('%Y-%m-%d', occurred_at, 'localtime'), source,
+                        COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cached_tokens), 0), COUNT(*)
+                   FROM feed GROUP BY 1, 2 ORDER BY 1, 2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(UsageDayAggregate {
+                    day: row.get(0)?,
+                    source: row.get(1)?,
+                    input_tokens: row.get(2)?,
+                    output_tokens: row.get(3)?,
+                    cached_tokens: row.get(4)?,
+                    record_count: row.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    /// 云端记忆库（Token 用量）：整设备覆盖式落地远端总量统计。
+    /// 返回写入的行数。occurred_at 用当天正午，保证日期过滤与按天分桶稳定。
+    pub fn replace_remote_usage_totals(
+        &self,
+        device: &str,
+        rows: &[UsageDayAggregate],
+    ) -> Result<u64, String> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM usage_remote_totals WHERE device = ?1", [device])
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            tx.execute(
+                "INSERT OR REPLACE INTO usage_remote_totals
+                    (device, day, source, input_tokens, output_tokens, cached_tokens, record_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    device,
+                    row.day,
+                    row.source,
+                    row.input_tokens,
+                    row.output_tokens,
+                    row.cached_tokens,
+                    row.record_count
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(rows.len() as u64)
+    }
+
     fn search_conversations(
         &self,
         query: &str,
@@ -2126,66 +2461,8 @@ impl TelemetryStore {
             })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())
-    }
-
-    /// 持久化一条对话整理记录（沉淀活动日志）。失败静默降级：日志不阻断提取。
-    pub fn record_ingest_log(
-        &self,
-        display_time: &str,
-        agent_id: &str,
-        kind: &str,
-        state: &str,
-        detail: &str,
-    ) {
-        let Ok(conn) = self.conn.lock() else { return };
-        let _ = conn.execute(
-            "INSERT INTO ingest_logs (occurred_at, display_time, agent_id, kind, state, detail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                chrono::Utc::now().to_rfc3339(),
-                display_time,
-                truncate_chars(agent_id, 80),
-                truncate_chars(kind, 20),
-                truncate_chars(state, 20),
-                truncate_chars(detail, 2_000),
-            ],
-        );
-        let _ = conn.execute(
-            "DELETE FROM ingest_logs WHERE id NOT IN (SELECT id FROM ingest_logs ORDER BY id DESC LIMIT 200)",
-            [],
-        );
-    }
-
-    /// 最近对话整理记录，新的在前。返回 (display_time, agent_id, kind, state, detail)。
-    pub fn recent_ingest_logs(
-        &self,
-        limit: u32,
-    ) -> Result<Vec<(String, String, String, String, String)>, String> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| "telemetry store lock poisoned".to_string())?;
-        let mut statement = conn
-            .prepare(
-                "SELECT display_time, agent_id, kind, state, detail
-                   FROM ingest_logs ORDER BY id DESC LIMIT ?1",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = statement
-            .query_map([limit.min(200)], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())
-    }
+           .map_err(|e| e.to_string())
+   }
 
     pub fn importance_evidence(
         &self,
@@ -2260,6 +2537,9 @@ impl TelemetryStore {
             .lock()
             .map_err(|_| "telemetry store lock poisoned".to_string())?
             .query_row(
+                // Totals come from the same detail-first feed as the usage
+                // dashboard, so the Memory Center panel and the analytics
+                // page can never show different numbers for one ledger.
                 "WITH sessions AS (
                    SELECT DISTINCT source, session_id FROM agent_events WHERE session_id != 'unknown'
                    UNION
@@ -2267,16 +2547,32 @@ impl TelemetryStore {
                  ), usage AS (
                    SELECT source, session_id, input_tokens, output_tokens, cached_tokens, origin, refreshed_at
                      FROM session_token_usage
+                 ), feed AS (
+                   SELECT input_tokens, output_tokens, cached_tokens FROM usage_records
+                   UNION ALL
+                   SELECT usage.input_tokens, usage.output_tokens, usage.cached_tokens
+                     FROM session_token_usage usage
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM usage_records record
+                       WHERE record.source = usage.source AND record.session_id = usage.session_id
+                    )
+                   UNION ALL
+                   SELECT input_tokens, output_tokens, cached_tokens FROM usage_remote_totals
+                 ), feed_totals AS (
+                   SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                          COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                          COALESCE(SUM(cached_tokens), 0) AS cached_tokens
+                     FROM feed
                  )
                  SELECT
                    (SELECT COUNT(*) FROM agent_events),
                    (SELECT COUNT(*) FROM sessions),
-                   COALESCE(SUM(usage.input_tokens), 0),
-                   COALESCE(SUM(usage.output_tokens), 0),
-                   COALESCE(SUM(usage.cached_tokens), 0),
+                   (SELECT input_tokens FROM feed_totals),
+                   (SELECT output_tokens FROM feed_totals),
+                   (SELECT cached_tokens FROM feed_totals),
                    COUNT(usage.session_id),
-                   COALESCE(SUM(CASE WHEN usage.origin = 'estimated_transcript' THEN 1 ELSE 0 END), 0),
-                   (SELECT MAX(refreshed_at) FROM usage)
+                   COALESCE(SUM(CASE WHEN usage.origin LIKE 'estimated%' THEN 1 ELSE 0 END), 0),
+                   (SELECT MAX(refreshed_at) FROM session_token_usage)
                  FROM sessions
                  LEFT JOIN usage ON usage.source = sessions.source AND usage.session_id = sessions.session_id",
                 [],
@@ -2364,8 +2660,32 @@ impl TelemetryStore {
                     .get(&(source.clone(), session_id.clone()))
                     .cloned()
             });
-            let usage =
-                path.as_deref()
+            // The transcript was rotated away by its host Agent, but the
+            // ledger already holds a transcript-derived projection.  Keep the
+            // last known data: never overwrite it with a coarser estimate
+            // and never wipe its per-response detail.
+            if path.is_none() && self.has_durable_transcript_usage(&source, &session_id) {
+                unavailable_sessions += 1;
+                continue;
+            }
+            // CCSwitch's key insight is that display aggregates must be
+            // built from idempotent request/response observations, not
+            // from hook callbacks.  Session total and per-response detail
+            // come from the SAME parse of the same file — the total is the
+            // sum of the detail — so the two projections can never drift
+            // apart when one of the two readers half-fails.
+            let records = path
+                .as_deref()
+                .map(|path| read_transcript_usage_records(&source, &session_id, path))
+                .unwrap_or_default();
+            let (usage, origin) = if !records.is_empty() {
+                (
+                    summarize_usage_records(&records),
+                    transcript_usage_origin(&source),
+                )
+            } else {
+                match path
+                    .as_deref()
                     .and_then(|path| match source.as_str() {
                         "codex" => read_codex_transcript_usage(path)
                             .map(|usage| (usage, "native_transcript")),
@@ -2391,25 +2711,21 @@ impl TelemetryStore {
                     .or_else(|| {
                         self.estimate_usage_from_event_payload(&source, &session_id)
                             .map(|usage| (usage, "estimated_event_payload"))
-                    });
-            if let Some((usage, origin)) = usage {
-                // CCSwitch's key insight is that display aggregates must be
-                // built from idempotent request/response observations, not
-                // from hook callbacks.  Persist the available native detail;
-                // sources without provider usage fields keep a session-level
-                // fallback with explicit estimated provenance.
-                let records = path
-                    .as_deref()
-                    .map(|path| read_transcript_usage_records(&source, &session_id, path))
-                    .unwrap_or_default();
-                updates.push((source, session_id, usage, origin, records));
-            } else {
-                unavailable_sessions += 1;
-            }
+                    }) {
+                    Some((usage, origin)) => (usage, origin),
+                    None => {
+                        unavailable_sessions += 1;
+                        continue;
+                    }
+                }
+            };
+            updates.push((source, session_id, usage, origin, records));
         }
 
         if !updates.is_empty() {
-            let now = chrono::Utc::now().to_rfc3339();
+            // Canonical millisecond UTC keeps lexical SQL comparisons aligned
+            // with the ISO bounds the frontend sends.
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             let mut conn = self
                 .conn
                 .lock()
@@ -2431,7 +2747,8 @@ impl TelemetryStore {
                     )
                     .map_err(|e| e.to_string())?;
                 for record in records {
-                    let occurred_at = record.occurred_at.as_deref().unwrap_or(&now);
+                    let occurred_at = normalize_occurred_at(record.occurred_at.as_deref())
+                        .unwrap_or_else(|| now.clone());
                     transaction.execute(
                         "INSERT OR REPLACE INTO usage_records
                          (record_id, source, session_id, occurred_at, model, record_kind, input_tokens, output_tokens, cached_tokens, origin)
@@ -2463,7 +2780,7 @@ impl TelemetryStore {
             "SELECT event.source, event.session_id, event.payload_json FROM agent_events event
                LEFT JOIN session_token_usage usage
                  ON usage.source = event.source AND usage.session_id = event.session_id
-              WHERE event.source IN ('codex', 'claude', 'qoder', 'workbuddy', 'minimax', 'kimi') AND event.session_id != 'unknown'
+              WHERE event.source IN ('codex', 'claude', 'qoder', 'workbuddy', 'minimax', 'kimi', 'copilot') AND event.session_id != 'unknown'
                 -- Historical sessions are already durable.  Revisit only a
                 -- new Hook receipt (or a session with no previous result).
                 AND (usage.refreshed_at IS NULL OR event.occurred_at > usage.refreshed_at)
@@ -2508,7 +2825,10 @@ impl TelemetryStore {
     fn transcript_changed_since_usage(&self, source: &str, session_id: &str, path: &Path) -> bool {
         let modified = match std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
             Ok(value) => chrono::DateTime::<chrono::Utc>::from(value),
-            Err(_) => return true,
+            // A vanished transcript is not a change.  Report false so the
+            // session is not rescanned (and its durable projection not
+            // overwritten) on every single boot.
+            Err(_) => return false,
         };
         let refreshed: Option<String> = self.conn.lock().ok().and_then(|conn| {
             conn.query_row(
@@ -2520,6 +2840,28 @@ impl TelemetryStore {
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
             .map(|value| modified > value.with_timezone(&chrono::Utc))
             .unwrap_or(true)
+    }
+
+    /// True when the ledger already holds a transcript-derived projection
+    /// for this session (native counters or a transcript estimate).  Such
+    /// rows outlive the transcript file; coarser estimates must never
+    /// overwrite them once the file is rotated away by its host Agent.
+    fn has_durable_transcript_usage(&self, source: &str, session_id: &str) -> bool {
+        self.conn
+            .lock()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM session_token_usage
+                      WHERE source = ?1 AND session_id = ?2
+                        AND origin IN ('native_transcript', 'estimated_transcript')",
+                    params![source, session_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok()
+            })
+            .map(|count| count > 0)
+            .unwrap_or(false)
     }
 
     /// Last-resort local estimate when an Agent only supplied Hook receipts.
@@ -2669,8 +3011,8 @@ impl TelemetryStore {
                  UNION ALL
                  SELECT 'session-total:' || usage.source || ':' || usage.session_id,
                         usage.source, usage.session_id,
-                        COALESCE((SELECT MAX(event.occurred_at) FROM agent_events event
-                                   WHERE event.source = usage.source AND event.session_id = usage.session_id), usage.refreshed_at),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', COALESCE((SELECT MAX(event.occurred_at) FROM agent_events event
+                                   WHERE event.source = usage.source AND event.session_id = usage.session_id), usage.refreshed_at)),
                         NULL, 'session_total', usage.input_tokens, usage.output_tokens,
                         usage.cached_tokens, usage.origin
                    FROM session_token_usage usage
@@ -2724,8 +3066,8 @@ impl TelemetryStore {
               UNION ALL
               SELECT 'session-total:' || usage.source || ':' || usage.session_id,
                      usage.source, usage.session_id,
-                     COALESCE((SELECT MAX(event.occurred_at) FROM agent_events event
-                               WHERE event.source = usage.source AND event.session_id = usage.session_id), usage.refreshed_at),
+                     strftime('%Y-%m-%dT%H:%M:%fZ', COALESCE((SELECT MAX(event.occurred_at) FROM agent_events event
+                               WHERE event.source = usage.source AND event.session_id = usage.session_id), usage.refreshed_at)),
                      NULL, 'session_total', usage.input_tokens, usage.output_tokens,
                      usage.cached_tokens, usage.origin
                 FROM session_token_usage usage
@@ -2733,14 +3075,20 @@ impl TelemetryStore {
                  SELECT 1 FROM usage_records record
                   WHERE record.source = usage.source AND record.session_id = usage.session_id
                )
+              UNION ALL
+              -- 其他设备经云端记忆库同步来的总量统计（无逐条明细）。
+              SELECT 'remote:' || device || ':' || day || ':' || source,
+                     source, device, day || 'T12:00:00',
+                     NULL, 'remote_total', input_tokens, output_tokens, cached_tokens, 'remote'
+                FROM usage_remote_totals
             ) ";
         const FILTER: &str = " WHERE (?1 IS NULL OR occurred_at >= ?1)
                                    AND (?2 IS NULL OR occurred_at < ?2)
                                    AND (?3 IS NULL OR source = ?3) ";
-        let totals_sql = format!("{FEED} SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached_tokens), 0) FROM usage_feed {FILTER}");
-        let (record_count, input_tokens, output_tokens, cached_tokens): (i64, i64, i64, i64) = conn
+        let totals_sql = format!("{FEED} SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(CASE WHEN origin LIKE 'estimated%' THEN input_tokens + output_tokens ELSE 0 END), 0) FROM usage_feed {FILTER}");
+        let (record_count, input_tokens, output_tokens, cached_tokens, estimated_tokens): (i64, i64, i64, i64, i64) = conn
             .query_row(&totals_sql, params![start_at, end_at, source], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
             })
             .map_err(|e| e.to_string())?;
 
@@ -2800,12 +3148,22 @@ impl TelemetryStore {
             input_tokens,
             output_tokens,
             cached_tokens,
+            estimated_tokens,
             truncated_records: record_count > records.len() as i64,
             records,
             buckets,
             sources,
         })
     }
+}
+
+fn mark_cloud_sync_dirty_tx(tx: &Transaction, layer: &str, now: &str) {
+    let _ = tx.execute(
+        "INSERT INTO cloud_sync_meta (object_key, revision, content_hash, sync_state, updated_at)
+         VALUES (?1, 0, NULL, 'dirty', ?2)
+         ON CONFLICT(object_key) DO UPDATE SET sync_state = 'dirty', updated_at = ?2",
+        params![format!("{layer}:published"), now],
+    );
 }
 
 fn add_column_if_missing(conn: &Connection, column: &str, declaration: &str) -> Result<(), String> {
@@ -3243,25 +3601,72 @@ fn scan_transcript_tree(
     }
 }
 
-fn transcript_usage(value: &Value) -> Option<TranscriptUsage> {
-    let input_tokens = get_i64(value, &["input_tokens", "prompt_tokens"]);
-    let output_tokens = get_i64(value, &["output_tokens", "completion_tokens"]);
-    if input_tokens.is_none() && output_tokens.is_none() {
+/// Codex 的 `total_token_usage` / `last_token_usage` 里 `input_tokens` 不含
+/// 缓存，缓存读取/写入单独成字段。为与 Claude/MiniMax/Kimi 统一「输入=真实
+/// 输入上下文」口径，把 cache_read + cache_creation 并入 input，缓存命中仍
+/// 单独保留为 cache_read 子集，供「缓存命中率」展示。这样 `cached <= input`
+/// 恒成立，命中率始终落在 [0, 100%]。
+fn codex_usage(value: &Value) -> Option<TranscriptUsage> {
+    let input = get_i64(value, &["input_tokens"]);
+    let output = get_i64(value, &["output_tokens"]);
+    if input.is_none() && output.is_none() {
         return None;
     }
+    let cache_read = get_i64(value, &["cache_read_input_tokens", "cached_input_tokens"])
+        .unwrap_or(0);
+    let cache_write = get_i64(value, &["cache_creation_input_tokens"]).unwrap_or(0);
     Some(TranscriptUsage {
-        input_tokens: input_tokens.unwrap_or(0),
-        output_tokens: output_tokens.unwrap_or(0),
-        cached_tokens: get_i64(
-            value,
-            &[
-                "cached_input_tokens",
-                "cache_read_input_tokens",
-                "cached_tokens",
-            ],
-        )
-        .unwrap_or(0),
+        input_tokens: input.unwrap_or(0) + cache_read + cache_write,
+        output_tokens: output.unwrap_or(0),
+        cached_tokens: cache_read,
     })
+}
+
+/// WorkBuddy 把 usage 嵌在转录行的 `message.usage`（蛇形，Chat Completions）
+/// 或 `providerData.usage`（驼峰，Responses API），而不是顶层 `usage`。其
+/// `input_tokens` 不含缓存，缓存读取单独在 `cache_read_input_tokens`；按
+/// Claude 口径把 cache_read 并入 input，缓存命中单独保留，`cached <= input`
+/// 恒成立。优先用 message.usage 的蛇形字段，缺失时回退 providerData.usage。
+fn workbuddy_usage(entry: &Value) -> Option<TranscriptUsage> {
+    let snake = entry
+        .get("message")
+        .and_then(|message| message.get("usage"));
+    if let Some(usage) = snake {
+        let input = get_i64(usage, &["input_tokens", "prompt_tokens"]);
+        let output = get_i64(usage, &["output_tokens", "completion_tokens"]);
+        if input.is_some() || output.is_some() {
+            let cache_read =
+                get_i64(usage, &["cache_read_input_tokens", "cached_tokens"]).unwrap_or(0);
+            return Some(TranscriptUsage {
+                input_tokens: input.unwrap_or(0) + cache_read,
+                output_tokens: output.unwrap_or(0),
+                cached_tokens: cache_read,
+            });
+        }
+    }
+    // Responses API 回退：providerData.usage 的驼峰字段，缓存命中藏在
+    // inputTokensDetails[0].cached_tokens。
+    let camel = entry
+        .get("providerData")
+        .and_then(|provider| provider.get("usage"));
+    if let Some(usage) = camel {
+        let input = get_i64(usage, &["inputTokens"]);
+        let output = get_i64(usage, &["outputTokens"]);
+        if input.is_some() || output.is_some() {
+            let cache_read = usage
+                .get("inputTokensDetails")
+                .and_then(Value::as_array)
+                .and_then(|details| details.first())
+                .and_then(|detail| get_i64(detail, &["cached_tokens"]))
+                .unwrap_or(0);
+            return Some(TranscriptUsage {
+                input_tokens: input.unwrap_or(0) + cache_read,
+                output_tokens: output.unwrap_or(0),
+                cached_tokens: cache_read,
+            });
+        }
+    }
+    None
 }
 
 fn usage_record_id(source: &str, session_id: &str, kind: &str, identity: &str) -> String {
@@ -3270,6 +3675,49 @@ fn usage_record_id(source: &str, session_id: &str, kind: &str, identity: &str) -
         "{source}:v1:{session_id}:{kind}:{}",
         hex(&digest)[..20].to_string()
     )
+}
+
+/// Sum the per-response detail into the session total.  Deriving one
+/// projection from the other guarantees the dashboard feed (detail-first)
+/// and the session-level fallback can never disagree for the same session.
+fn summarize_usage_records(records: &[TranscriptUsageRecord]) -> TranscriptUsage {
+    records.iter().fold(
+        TranscriptUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+        },
+        |mut total, record| {
+            total.input_tokens += record.input_tokens;
+            total.output_tokens += record.output_tokens;
+            total.cached_tokens += record.cached_tokens;
+            total
+        },
+    )
+}
+
+/// Provenance of a transcript-derived session total: native provider
+/// counters, or — for Qoder, whose transcripts carry none — a transparent
+/// transcript estimate.
+fn transcript_usage_origin(source: &str) -> &'static str {
+    if source == "qoder" {
+        "estimated_transcript"
+    } else {
+        "native_transcript"
+    }
+}
+
+/// Parse any supported RFC3339 transcript timestamp and emit the canonical
+/// millisecond-UTC form used across the usage ledger, so lexical SQL
+/// comparisons and the frontend's ISO bounds stay consistent.
+fn normalize_occurred_at(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 /// Reconstruct per-response observations for every local agent format that
@@ -3330,8 +3778,8 @@ fn read_codex_usage_records(session_id: &str, path: &Path) -> Vec<TranscriptUsag
         let Some(info) = payload.get("info") else {
             continue;
         };
-        let total = info.get("total_token_usage").and_then(transcript_usage);
-        let last = info.get("last_token_usage").and_then(transcript_usage);
+        let total = info.get("total_token_usage").and_then(codex_usage);
+        let last = info.get("last_token_usage").and_then(codex_usage);
         let (delta, identity) = if let Some(total) = total {
             let previous = high_water.unwrap_or(TranscriptUsage {
                 input_tokens: 0,
@@ -3393,7 +3841,7 @@ fn read_codex_usage_records(session_id: &str, path: &Path) -> Vec<TranscriptUsag
             model: current_model.clone(),
             input_tokens: delta.input_tokens,
             output_tokens: delta.output_tokens,
-            cached_tokens: delta.cached_tokens.min(delta.input_tokens),
+            cached_tokens: delta.cached_tokens,
         });
     }
     records
@@ -3452,25 +3900,30 @@ fn read_workbuddy_usage_records(session_id: &str, path: &Path) -> Vec<Transcript
         .map_while(Result::ok)
         .filter_map(|line| {
             let entry = serde_json::from_str::<Value>(&line).ok()?;
-            let usage = entry.get("usage")?;
+            let usage = workbuddy_usage(&entry)?;
             let identity = entry
                 .get("id")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .unwrap_or_else(|| serde_json::to_string(usage).unwrap_or_default());
+                .unwrap_or_else(|| line.clone());
             if !seen.insert(identity.clone()) {
                 return None;
             }
-            let tokens = transcript_usage(usage)?;
-            ((tokens.input_tokens > 0 || tokens.output_tokens > 0) as bool).then_some(
+            ((usage.input_tokens > 0 || usage.output_tokens > 0) as bool).then_some(
                 TranscriptUsageRecord {
                     record_id: usage_record_id("workbuddy", session_id, "record", &identity),
                     occurred_at: get_str(&entry, &["timestamp", "occurred_at", "time"])
                         .map(str::to_string),
-                    model: get_str(&entry, &["model", "model_name"]).map(str::to_string),
-                    input_tokens: tokens.input_tokens,
-                    output_tokens: tokens.output_tokens,
-                    cached_tokens: tokens.cached_tokens.min(tokens.input_tokens),
+                    model: get_str(&entry, &["model", "model_name"])
+                        .or_else(|| {
+                            entry
+                                .get("providerData")
+                                .and_then(|provider| get_str(provider, &["requestModelName", "model"]))
+                        })
+                        .map(str::to_string),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cached_tokens: usage.cached_tokens,
                 },
             )
         })
@@ -3727,18 +4180,10 @@ fn read_codex_transcript_usage(path: &Path) -> Option<TranscriptUsage> {
         if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
-        let usage = payload
+        let candidate = payload
             .get("info")
-            .and_then(|info| info.get("total_token_usage"))?;
-        let input = get_i64(usage, &["input_tokens"])?;
-        let output = get_i64(usage, &["output_tokens"])?;
-        let cached =
-            get_i64(usage, &["cached_input_tokens", "cache_read_input_tokens"]).unwrap_or(0);
-        let candidate = TranscriptUsage {
-            input_tokens: input,
-            output_tokens: output,
-            cached_tokens: cached,
-        };
+            .and_then(|info| info.get("total_token_usage"))
+            .and_then(codex_usage)?;
         if latest
             .map(|previous| {
                 candidate.input_tokens + candidate.output_tokens
@@ -3800,9 +4245,11 @@ fn read_claude_transcript_usage(path: &Path) -> Option<TranscriptUsage> {
 }
 
 /// WorkBuddy keeps every model response in its native project JSONL. Usage is
-/// attached to the root record (including tool calls), so the record `id` is
-/// the deduplication boundary. Unlike Claude, its `input_tokens` already
-/// includes cache reads; cache remains a display-only subset.
+/// nested under `message.usage` (snake_case, Chat Completions) or
+/// `providerData.usage` (camelCase, Responses API), never at the top level, and
+/// the record `id` is the deduplication boundary. Like Claude, `input_tokens`
+/// excludes cache reads, so cache_read is merged into the displayed input total
+/// while remaining a display-only subset.
 fn read_workbuddy_transcript_usage(path: &Path) -> Option<TranscriptUsage> {
     let file = std::fs::File::open(path).ok()?;
     let mut ids = HashSet::new();
@@ -3815,21 +4262,20 @@ fn read_workbuddy_transcript_usage(path: &Path) -> Option<TranscriptUsage> {
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let Some(usage) = entry.get("usage") else {
+        let Some(usage) = workbuddy_usage(&entry) else {
             continue;
         };
         let record_id = entry
             .get("id")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| serde_json::to_string(usage).unwrap_or_default());
+            .unwrap_or_else(|| line.clone());
         if !ids.insert(record_id) {
             continue;
         }
-        total.input_tokens += get_i64(usage, &["input_tokens", "prompt_tokens"]).unwrap_or(0);
-        total.output_tokens += get_i64(usage, &["output_tokens", "completion_tokens"]).unwrap_or(0);
-        total.cached_tokens +=
-            get_i64(usage, &["cache_read_input_tokens", "cached_tokens"]).unwrap_or(0);
+        total.input_tokens += usage.input_tokens;
+        total.output_tokens += usage.output_tokens;
+        total.cached_tokens += usage.cached_tokens;
     }
     (total.input_tokens > 0 || total.output_tokens > 0).then_some(total)
 }
@@ -3958,7 +4404,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 #[tauri::command]
-pub fn telemetry_summary(
+pub async fn telemetry_summary(
     state: tauri::State<'_, TelemetryStore>,
 ) -> Result<TelemetrySummary, String> {
     state.summary()
@@ -3966,20 +4412,25 @@ pub fn telemetry_summary(
 
 #[tauri::command]
 pub fn telemetry_refresh_usage(
+    app: tauri::AppHandle,
     state: tauri::State<'_, TelemetryStore>,
 ) -> Result<TelemetryUsageRefresh, String> {
-    state.refresh_transcript_usage()
+    let result = state.refresh_transcript_usage();
+    // Notify open dashboards even when the scan reports failures: the
+    // ledger may still have been partially refreshed.
+    let _ = app.emit("telemetry-updated", ());
+    result
 }
 
 #[tauri::command]
-pub fn telemetry_live_status(
+pub async fn telemetry_live_status(
     state: tauri::State<'_, TelemetryStore>,
 ) -> Result<TelemetryLiveStatus, String> {
     state.live_status()
 }
 
 #[tauri::command]
-pub fn telemetry_recent_events(
+pub async fn telemetry_recent_events(
     state: tauri::State<'_, TelemetryStore>,
     limit: Option<u32>,
 ) -> Result<Vec<TelemetryEvent>, String> {
@@ -3987,7 +4438,7 @@ pub fn telemetry_recent_events(
 }
 
 #[tauri::command]
-pub fn telemetry_usage_records(
+pub async fn telemetry_usage_records(
     state: tauri::State<'_, TelemetryStore>,
     limit: Option<u32>,
 ) -> Result<Vec<TelemetryUsageRecord>, String> {
@@ -3995,7 +4446,7 @@ pub fn telemetry_usage_records(
 }
 
 #[tauri::command]
-pub fn telemetry_usage_analytics(
+pub async fn telemetry_usage_analytics(
     state: tauri::State<'_, TelemetryStore>,
     start_at: Option<String>,
     end_at: Option<String>,
@@ -4015,7 +4466,7 @@ pub fn telemetry_usage_analytics(
 }
 
 #[tauri::command]
-pub fn telemetry_search_conversations(
+pub async fn telemetry_search_conversations(
     state: tauri::State<'_, TelemetryStore>,
     query: String,
     limit: Option<u32>,
@@ -4034,6 +4485,52 @@ pub fn memory_mcp_access_logs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_memory_list_keeps_all_custom_items_outside_the_recent_limit() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE local_memory_items (
+                id TEXT PRIMARY KEY,
+                memory TEXT NOT NULL,
+                memory_type TEXT NOT NULL,
+                durability TEXT NOT NULL,
+                user_defined INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                event_time TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_memory_items VALUES (?1, ?2, 'fact', 'long_term', 1, ?3, ?3)",
+            params!["local-user-l3:old", "older custom memory", "2020-01-01T00:00:00Z"],
+        )
+        .unwrap();
+        for index in 1..=3 {
+            conn.execute(
+                "INSERT INTO local_memory_items VALUES (?1, ?2, 'fact', 'short_term', 0, ?3, ?3)",
+                params![
+                    format!("local-l1:{index}"),
+                    format!("automatic memory {index}"),
+                    format!("2026-08-2{index}T00:00:00Z")
+                ],
+            )
+            .unwrap();
+        }
+        let store = TelemetryStore {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+
+        let memories = store.local_l1_memories(2).unwrap();
+        assert_eq!(memories.len(), 3);
+        assert!(memories
+            .iter()
+            .any(|memory| memory.id == "local-user-l3:old" && memory.user_defined));
+        assert_eq!(
+            memories.iter().filter(|memory| !memory.user_defined).count(),
+            2
+        );
+    }
 
     #[test]
     fn l0_conversation_omits_assistant_thinking_before_extraction() {
@@ -4120,7 +4617,7 @@ mod tests {
         let usage = read_codex_transcript_usage(&path).unwrap();
         assert_eq!(
             (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
-            (240, 35, 100)
+            (340, 35, 100)
         );
         let _ = std::fs::remove_file(path);
     }
@@ -4152,7 +4649,7 @@ mod tests {
                 .iter()
                 .map(|record| record.input_tokens)
                 .sum::<i64>(),
-            140
+            220
         );
         assert_eq!(
             records
@@ -4315,6 +4812,12 @@ mod tests {
                occurred_at TEXT NOT NULL, model TEXT, record_kind TEXT NOT NULL,
                input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
                cached_tokens INTEGER NOT NULL, origin TEXT NOT NULL
+             );
+             CREATE TABLE usage_remote_totals (
+               device TEXT NOT NULL, day TEXT NOT NULL, source TEXT NOT NULL,
+               input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+               cached_tokens INTEGER NOT NULL DEFAULT 0, record_count INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (device, day, source)
              );",
         )
         .unwrap();
@@ -4437,15 +4940,19 @@ mod tests {
     }
 
     #[test]
-    fn native_transcript_usage_reads_workbuddy_root_usage_once_per_record() {
+    fn native_transcript_usage_reads_workbuddy_nested_usage_once_per_record() {
         let path = std::env::temp_dir().join(format!(
             "agent-manager-usage-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let rows = [
-            serde_json::json!({"id":"call-1","type":"function_call","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":70}}),
-            serde_json::json!({"id":"call-1","type":"message","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":70}}),
-            serde_json::json!({"id":"call-2","type":"message","usage":{"input_tokens":120,"output_tokens":20,"cache_read_input_tokens":90}}),
+            // 蛇形 message.usage，且缓存读取需并入输入。
+            serde_json::json!({"id":"call-1","type":"function_call","message":{"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":70}}}),
+            // 同 id 跨 type 重复，只计一次。
+            serde_json::json!({"id":"call-1","type":"message","message":{"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":70}}}),
+            serde_json::json!({"id":"call-2","type":"function_call","message":{"usage":{"input_tokens":120,"output_tokens":20,"cache_read_input_tokens":90}}}),
+            // 只有驼峰 providerData.usage，回退读取并取 inputTokensDetails 缓存。
+            serde_json::json!({"id":"call-3","type":"function_call","providerData":{"usage":{"inputTokens":50,"outputTokens":5,"inputTokensDetails":[{"cached_tokens":30}]}}}),
         ];
         std::fs::write(
             &path,
@@ -4458,8 +4965,36 @@ mod tests {
         let usage = read_workbuddy_transcript_usage(&path).unwrap();
         assert_eq!(
             (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
-            (220, 30, 160)
+            (460, 35, 190)
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn workbuddy_usage_records_read_nested_usage_and_model_from_provider() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-manager-wb-records-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let rows = [
+            serde_json::json!({"id":"call-1","type":"function_call","timestamp":"2026-08-16T08:00:00Z","message":{"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":70}},"providerData":{"requestModelName":"gpt-5"}}),
+            serde_json::json!({"id":"call-1","type":"message","message":{"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":70}},"providerData":{"requestModelName":"gpt-5"}}),
+            serde_json::json!({"id":"call-2","type":"function_call","message":{"usage":{"input_tokens":120,"output_tokens":20,"cache_read_input_tokens":90}},"providerData":{"requestModelName":"gpt-5"}}),
+        ];
+        std::fs::write(
+            &path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let records = read_workbuddy_usage_records("session-1", &path);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records.iter().map(|r| r.input_tokens).sum::<i64>(), 380);
+        assert_eq!(records.iter().map(|r| r.output_tokens).sum::<i64>(), 30);
+        assert_eq!(records.iter().map(|r| r.cached_tokens).sum::<i64>(), 160);
+        assert!(records.iter().all(|r| r.model.as_deref() == Some("gpt-5")));
         let _ = std::fs::remove_file(path);
     }
 

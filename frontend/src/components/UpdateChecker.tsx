@@ -26,9 +26,11 @@ interface UpdateCheckerProps {
   autoCheck?: boolean
   /** Show as a compact inline badge instead of a full card. */
   compact?: boolean
+  /** Compact sidebar footer: just a check button + inline status. */
+  sidebar?: boolean
 }
 
-export function UpdateChecker({ autoCheck = false, compact = false }: UpdateCheckerProps) {
+export function UpdateChecker({ autoCheck = false, compact = false, sidebar = false }: UpdateCheckerProps) {
   const { t } = useTranslation()
   const [state, setState] = useState<CheckState>('idle')
   const [info, setInfo] = useState<VersionInfo | null>(null)
@@ -86,14 +88,45 @@ export function UpdateChecker({ autoCheck = false, compact = false }: UpdateChec
     return null
   }
 
+  // ── Sidebar footer mode ──────────────────────────────────────────────
+ if (sidebar) {
+   return (
+      <div className="space-y-1">
+        <button
+          onClick={() => check()}
+          disabled={state === 'checking'}
+          className="flex items-center gap-1.5 text-xs font-bold text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${state === 'checking' ? 'animate-spin' : ''}`} />
+          {state === 'checking' ? t('updater.checking') : t('updater.checkNow')}
+        </button>
+        {state === 'done' && info?.has_update && (
+          <button
+            onClick={openRelease}
+            className="flex items-center gap-1.5 text-xs font-bold text-blue-600 hover:underline dark:text-blue-400"
+          >
+            <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
+            {t('updater.newVersionAvailable', { version: info.latest })}
+          </button>
+        )}
+        {state === 'done' && info && !info.has_update && (
+          <p className="text-xs font-bold text-gray-400 dark:text-gray-500">{t('updater.alreadyLatest')}</p>
+        )}
+        {state === 'error' && error && (
+          <p className="text-xs font-bold text-red-500 dark:text-red-400">{error}</p>
+        )}
+      </div>
+    )
+  }
+
   // ── Full card mode (used in Settings / About) ─────────────────────────
   const formattedDate = info?.published_at
     ? new Date(info.published_at).toLocaleDateString()
     : ''
 
-  return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-3">
-      {/* Header row */}
+ return (
+    <div className="space-y-3">
+     {/* Header row */}
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">

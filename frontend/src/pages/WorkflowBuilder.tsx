@@ -217,7 +217,7 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
       if (!w) return w
       const pos = nextPosition(w.nodes)
       const node: WorkflowNode = {
-        id: uid(), kind: 'llm', label: t('mcpAgent.llmNode'),
+        id: uid(), kind: 'llm', label: t('workflow.builder.llmNode'),
         server: '', tool: '', arguments: {}, prompt: '', position: pos,
       }
       return addNodeWithEdge(w, node)
@@ -306,8 +306,8 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
 
   async function save() {
     if (!editing) return
-    if (!editing.name.trim()) { setError(t('mcpAgent.workflowNameRequired')); return }
-    if (editing.nodes.length === 0) { setError(t('mcpAgent.workflowNeedsNodes')); return }
+    if (!editing.name.trim()) { setError(t('workflow.builder.workflowNameRequired')); return }
+    if (editing.nodes.length === 0) { setError(t('workflow.builder.workflowNeedsNodes')); return }
     if (editing.schedule) {
       const err = validateCron(editing.schedule)
       if (err) { setError(t('wfBuilder.cronInvalid')); return }
@@ -371,13 +371,13 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
         <div className="w-64 shrink-0 border-r border-gray-200 dark:border-gray-700 flex flex-col">
           {/* Workflow list */}
           <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-800">
-            <span className="text-xs font-medium text-gray-500">{t('mcpAgent.workflowList')}</span>
+            <span className="text-xs font-medium text-gray-500">{t('workflow.builder.workflowList')}</span>
             <button onClick={startNew} className="rounded p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
               <Plus className="h-3.5 w-3.5" />
             </button>
           </div>
           <div className="max-h-44 overflow-y-auto p-2 space-y-0.5 border-b border-gray-100 dark:border-gray-800">
-            {workflows.length === 0 && <p className="py-3 text-center text-xs text-gray-400">{t('mcpAgent.noWorkflows')}</p>}
+            {workflows.length === 0 && <p className="py-3 text-center text-xs text-gray-400">{t('workflow.builder.noWorkflows')}</p>}
             {workflows.map(w => (
               <button key={w.id} onClick={() => startEdit(w)}
                 className={`group flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
@@ -388,7 +388,7 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                 <Sparkles className="h-3.5 w-3.5 shrink-0 text-purple-400" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-xs font-medium text-gray-900 dark:text-gray-100">{w.name || '(untitled)'}</p>
-                  <p className="truncate text-xs text-gray-400">{w.nodes.length} {t('mcpAgent.step').toLowerCase()}</p>
+                  <p className="truncate text-xs text-gray-400">{w.nodes.length} {t('workflow.builder.step').toLowerCase()}</p>
                 </div>
                 <button onClick={e => { e.stopPropagation(); del(w.id) }}
                   className="shrink-0 opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-500">
@@ -416,18 +416,18 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
 
           {/* Tool palette */}
           <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-800">
-            <span className="text-xs font-medium text-gray-500">{t('mcpAgent.toolPalette')}</span>
+            <span className="text-xs font-medium text-gray-500">{t('workflow.builder.toolPalette')}</span>
           </div>
           <div className="flex-1 overflow-y-auto p-2 space-y-2">
             {enabledServers.length === 0 ? (
-              <p className="px-1 py-3 text-xs text-gray-400">{t('mcpAgent.paletteHintEnable')}</p>
+              <p className="px-1 py-3 text-xs text-gray-400">{t('workflow.builder.paletteHintEnable')}</p>
             ) : loadingTools ? (
               <div className="flex items-center gap-2 px-1 py-3 text-xs text-gray-400">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('mcpAgent.loadingTools')}
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('workflow.builder.loadingTools')}
               </div>
             ) : (
               <>
-                <p className="px-1 text-[11px] text-gray-400">{t('mcpAgent.paletteHintDrag')}</p>
+                <p className="px-1 text-[11px] text-gray-400">{t('workflow.builder.paletteHintDrag')}</p>
                 {Object.entries(groupedTools).map(([server, list]) => (
                   <div key={server} className="space-y-1">
                     <div className="flex items-center justify-between px-1">
@@ -438,7 +438,7 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                           if (srv && editing) addMcpAgentNode(srv)
                         }}
                         disabled={!editing}
-                        title={t('mcpAgent.addMcpAgentNode')}
+                        title={t('workflow.builder.addMcpAgentNode')}
                         className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-purple-500 hover:bg-purple-50 disabled:opacity-40 dark:hover:bg-purple-900/20">
                         <Bot className="h-3 w-3" />
                         <Plus className="h-2.5 w-2.5" />
@@ -463,11 +463,11 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                 <div className="flex-1 space-y-1.5">
                   <input value={editing.name}
                     onChange={e => setEditing(w => w ? { ...w, name: e.target.value } : w)}
-                    placeholder={t('mcpAgent.workflowNamePlaceholder')}
+                    placeholder={t('workflow.builder.workflowNamePlaceholder')}
                     className="field-input font-medium" />
                   <input value={editing.description}
                     onChange={e => setEditing(w => w ? { ...w, description: e.target.value } : w)}
-                    placeholder={t('mcpAgent.workflowDescPlaceholder')}
+                    placeholder={t('workflow.builder.workflowDescPlaceholder')}
                     className="field-input text-xs" />
                 </div>
                 <button onClick={() => setEditing(null)} className="mt-1 text-gray-400 hover:text-gray-600">
@@ -503,7 +503,7 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
               <div className="flex flex-wrap items-center gap-2">
                 <button onClick={addLlmNode}
                   className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800">
-                  <Sparkles className="h-3.5 w-3.5 text-purple-500" /> {t('mcpAgent.addLlmNode')}
+                  <Sparkles className="h-3.5 w-3.5 text-purple-500" /> {t('workflow.builder.addLlmNode')}
                 </button>
                 <button onClick={addAgentTaskNode}
                   className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800">
@@ -519,16 +519,15 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                 </button>
                 <button onClick={save} disabled={saving}
                   className="flex items-center gap-1.5 rounded-lg bg-gray-900 px-2.5 py-1.5 text-xs text-white hover:bg-gray-700 disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900">
-                  {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} {t('mcpAgent.saveWorkflow')}
+                  {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} {t('workflow.builder.saveWorkflow')}
                 </button>
                 <button
                   onClick={() => { setShowTestDialog(true); setTestResult(null) }}
                   disabled={testing || !editing || editing.nodes.length === 0}
                   className="flex items-center gap-1.5 rounded-lg border border-purple-200 px-2.5 py-1.5 text-xs text-purple-600 hover:bg-purple-50 disabled:opacity-40 dark:border-purple-800 dark:text-purple-400 dark:hover:bg-purple-900/20"
                 >
-                  <Play className="h-3.5 w-3.5" /> {t('mcpAgent.testRun')}
+                  <Play className="h-3.5 w-3.5" /> {t('workflow.builder.testRun')}
                 </button>
-                <span className="text-xs text-gray-400">{t('mcpAgent.workflowRunInChat')}</span>
               </div>
 
               {error && (
@@ -552,7 +551,7 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                   <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-xl dark:border-gray-700 dark:bg-gray-900 w-[480px] max-h-[80vh] flex flex-col">
                     <div className="flex items-center justify-between mb-3">
-                      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('mcpAgent.testRunTitle')}</h3>
+                      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('workflow.builder.testRunTitle')}</h3>
                       <button onClick={() => setShowTestDialog(false)} className="text-gray-400 hover:text-gray-600">
                         <X className="h-4 w-4" />
                       </button>
@@ -561,12 +560,12 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                     <div className="space-y-3 flex-1 overflow-y-auto">
                       {/* Input */}
                       <div>
-                        <label className="mb-1 block text-xs font-medium text-gray-500">{t('mcpAgent.testInput')}</label>
+                        <label className="mb-1 block text-xs font-medium text-gray-500">{t('workflow.builder.testInput')}</label>
                         <textarea
                           value={testInput}
                           onChange={e => setTestInput(e.target.value)}
                           rows={2}
-                          placeholder={t('mcpAgent.testInputPlaceholder')}
+                          placeholder={t('workflow.builder.testInputPlaceholder')}
                           className="field-input resize-none text-xs"
                         />
                       </div>
@@ -578,7 +577,7 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                         className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs text-white hover:bg-purple-500 disabled:opacity-60"
                       >
                         {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                        {testing ? t('mcpAgent.running') : t('mcpAgent.run')}
+                        {testing ? t('workflow.builder.running') : t('workflow.builder.run')}
                       </button>
 
                       {/* Results */}
@@ -602,7 +601,7 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
                           ))}
                           {testResult.finalAnswer && (
                             <div className="rounded-lg bg-green-50 dark:bg-green-900/20 px-3 py-2">
-                              <p className="text-[10px] font-mono text-green-600 mb-1">{t('mcpAgent.finalAnswer')}</p>
+                              <p className="text-[10px] font-mono text-green-600 mb-1">{t('workflow.builder.finalAnswer')}</p>
                               <p className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{testResult.finalAnswer}</p>
                             </div>
                           )}
@@ -617,7 +616,7 @@ export function WorkflowBuilder({ enabledServers, allServers, enabledNames, onTo
             <div className="flex h-full items-center justify-center text-gray-400">
               <div className="text-center space-y-2">
                 <Sparkles className="mx-auto h-10 w-10 opacity-20" />
-                <p className="text-sm">{t('mcpAgent.selectWorkflowHint')}</p>
+                <p className="text-sm">{t('workflow.builder.selectWorkflowHint')}</p>
               </div>
             </div>
           )}
@@ -686,7 +685,7 @@ function Canvas({ nodes, edges, onUpdate, onRemove, onMove, onMovePos }: {
     >
       {nodes.length === 0 ? (
         <div className="flex h-48 items-center justify-center text-center text-xs text-gray-400">
-          {t('mcpAgent.canvasEmpty')}
+          {t('workflow.builder.canvasEmpty')}
         </div>
       ) : (
         <div style={{ width: maxX + 80, height: maxY + 80, position: 'relative' }}>
@@ -772,12 +771,12 @@ function DagNode({ node, index, total, selected, onSelect, onUpdate, onRemove, o
   const isAcceptance = node.kind === 'acceptance'
   const isFanOut = node.kind === 'fan_out'
 
-  const kindLabel = isTool ? t('mcpAgent.nodeKindTool')
-    : isMcpAgent ? t('mcpAgent.nodeKindMcpAgent')
+  const kindLabel = isTool ? t('workflow.builder.nodeKindTool')
+    : isMcpAgent ? t('workflow.builder.nodeKindMcpAgent')
     : isAgentTask ? 'Agent'
     : isAcceptance ? 'Acceptance'
     : isFanOut ? 'Fan-out'
-    : t('mcpAgent.nodeKindLlm')
+    : t('workflow.builder.nodeKindLlm')
 
   const nodeIcon = isTool ? <Wrench className="h-3.5 w-3.5 text-orange-500" />
     : isMcpAgent ? <Bot className="h-3.5 w-3.5 text-purple-500" />
@@ -789,7 +788,7 @@ function DagNode({ node, index, total, selected, onSelect, onUpdate, onRemove, o
     : isAgentTask ? `🤖 ${node.label || 'agent'}`
     : isAcceptance ? '✓ Acceptance'
     : isFanOut ? '⏃ Fan-out'
-    : t('mcpAgent.llmNode')
+    : t('workflow.builder.llmNode')
 
   function onMouseDown(e: React.MouseEvent) {
     e.stopPropagation()
@@ -843,7 +842,7 @@ function DagNode({ node, index, total, selected, onSelect, onUpdate, onRemove, o
         <div className="border-t border-gray-100 dark:border-gray-800 px-2.5 py-2 space-y-1.5" onClick={e => e.stopPropagation()}>
           {isTool ? (
             <div>
-              <label className="mb-0.5 block text-[11px] font-medium text-gray-500">{t('mcpAgent.argumentsLabel')}</label>
+              <label className="mb-0.5 block text-[11px] font-medium text-gray-500">{t('workflow.builder.argumentsLabel')}</label>
               <JsonArgsEditor
                 value={node.arguments}
                 onChange={args => onUpdate(node.id, { arguments: args })}
@@ -851,10 +850,10 @@ function DagNode({ node, index, total, selected, onSelect, onUpdate, onRemove, o
             </div>
           ) : (isMcpAgent || isAgentTask) ? (
             <div>
-              <label className="mb-0.5 block text-[11px] font-medium text-gray-500">{t('mcpAgent.mcpAgentPromptLabel')}</label>
+              <label className="mb-0.5 block text-[11px] font-medium text-gray-500">{t('workflow.builder.mcpAgentPromptLabel')}</label>
               <textarea value={node.prompt}
                 onChange={e => onUpdate(node.id, { prompt: e.target.value })}
-                rows={2} placeholder={t('mcpAgent.mcpAgentPromptPlaceholder')}
+                rows={2} placeholder={t('workflow.builder.mcpAgentPromptPlaceholder')}
                 className="field-input resize-none text-xs" />
               {isAgentTask && (
                 <>
@@ -960,25 +959,25 @@ function DagNode({ node, index, total, selected, onSelect, onUpdate, onRemove, o
             </div>
           ) : (
             <div>
-              <label className="mb-0.5 block text-[11px] font-medium text-gray-500">{t('mcpAgent.promptLabel')}</label>
+              <label className="mb-0.5 block text-[11px] font-medium text-gray-500">{t('workflow.builder.promptLabel')}</label>
               <textarea value={node.prompt}
                 onChange={e => onUpdate(node.id, { prompt: e.target.value })}
-                rows={2} placeholder={t('mcpAgent.promptPlaceholder')}
+                rows={2} placeholder={t('workflow.builder.promptPlaceholder')}
                 className="field-input resize-none text-xs" />
             </div>
           )}
           <div className="flex items-center justify-between pt-1">
             <div className="flex gap-1">
               <button onClick={() => onMove(node.id, -1)} disabled={index === 0}
-                className="text-gray-300 hover:text-gray-600 disabled:opacity-30" title={t('mcpAgent.moveUp')}>
+                className="text-gray-300 hover:text-gray-600 disabled:opacity-30" title={t('workflow.builder.moveUp')}>
                 <ArrowUp className="h-3 w-3" />
               </button>
               <button onClick={() => onMove(node.id, 1)} disabled={index === total - 1}
-                className="text-gray-300 hover:text-gray-600 disabled:opacity-30" title={t('mcpAgent.moveDown')}>
+                className="text-gray-300 hover:text-gray-600 disabled:opacity-30" title={t('workflow.builder.moveDown')}>
                 <ArrowDown className="h-3 w-3" />
               </button>
             </div>
-            <button onClick={() => onRemove(node.id)} className="text-gray-300 hover:text-red-500" title={t('mcpAgent.removeNode')}>
+            <button onClick={() => onRemove(node.id)} className="text-gray-300 hover:text-red-500" title={t('workflow.builder.removeNode')}>
               <Trash2 className="h-3 w-3" />
             </button>
           </div>

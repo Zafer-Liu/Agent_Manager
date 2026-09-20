@@ -824,7 +824,7 @@ pub async fn memory_importance_refresh(
 }
 
 #[tauri::command]
-pub fn memory_importance_list(
+pub async fn memory_importance_list(
     telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
     memory_ids: Vec<String>,
 ) -> Result<Vec<MemoryImportance>, String> {
@@ -1291,7 +1291,9 @@ pub fn memory_backend_status(state: tauri::State<'_, MemoryBackend>) -> EngineSt
 }
 
 #[tauri::command]
-pub fn memory_backend_start(state: tauri::State<'_, MemoryBackend>) -> EngineStatus {
+pub async fn memory_backend_start(
+    state: tauri::State<'_, MemoryBackend>,
+) -> Result<EngineStatus, String> {
     state.ensure_started();
     // 等待组件就绪（最多 ~8s）
     for _ in 0..16 {
@@ -1310,7 +1312,7 @@ pub fn memory_backend_start(state: tauri::State<'_, MemoryBackend>) -> EngineSta
             Err(error) => eprintln!("[memory-semantic] local L1 index backfill skipped: {error}"),
         }
     }
-    status
+    Ok(status)
 }
 
 #[tauri::command]

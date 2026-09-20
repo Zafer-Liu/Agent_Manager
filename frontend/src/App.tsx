@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
 import { useAgentStore } from './store/agentStore'
@@ -8,30 +8,37 @@ import { AgentDetail } from './components/AgentDetail'
 import { AgentForm } from './components/AgentForm'
 import { TerminalPanel } from './components/TerminalPanel'
 import { PortManager } from './pages/PortManager'
-import { McpAgent } from './pages/McpAgent'
-import { Dashboard } from './pages/Dashboard'
-import { ManagerAgent, type ManagerSessionState } from './pages/ManagerAgent'
 import { ProxyManager } from './pages/ProxyManager'
 import { Settings } from './pages/Settings'
 import { MemoryCenter } from './pages/MemoryCenter'
 import { SkillLibrary } from './pages/SkillLibrary'
+import { PublishedSkills } from './pages/PublishedSkills'
+import { McpLibrary } from './pages/McpLibrary'
+import { WorkflowCenter } from './pages/WorkflowCenter'
 import { UsageAnalytics } from './pages/UsageAnalytics'
 import { PendingMemories } from './pages/PendingMemories'
 import { OrganizedConversations } from './pages/OrganizedConversations'
 import { MemoryInjection } from './pages/MemoryInjection'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { UpdateChecker } from './components/UpdateChecker'
 import { useTheme } from './theme'
 import type { AgentState } from './types/agent'
 import { useResizable } from './hooks/useResizable'
 import { NativeWebviewPanel, type OpenTab } from './components/NativeWebviewPanel'
 import {
-  Plus, RefreshCw, Bot, X, Globe, Network, Cpu,
+  Plus, RefreshCw, Bot, X, Globe, Network, Sparkles,
   Maximize2, Minimize2, TerminalSquare, Sun, Moon,
-  Crown, LayoutDashboard, Shield, Eraser, Settings2, Brain, BookOpenText,
+  Shield, Eraser, Settings2, Brain, BookOpenText, Plug,
 } from 'lucide-react'
 import logoUrl from '/logo.png'
 
-type NavPage = 'agents' | 'mcp-agent' | 'ports' | 'dashboard' | 'manager' | 'proxy' | 'settings' | 'memory' | 'skills' | 'usage' | 'pending-memories' | 'organized-conversations' | 'memory-injection'
+type NavPage = 'agents' | 'workflow' | 'ports' | 'proxy' | 'settings' | 'memory' | 'skills' | 'published-skills' | 'mcp-library' | 'usage' | 'pending-memories' | 'organized-conversations' | 'memory-injection'
+
+const MEMORY_PAGES = ['memory', 'usage', 'pending-memories', 'organized-conversations', 'memory-injection'] as const
+// Skill 库两页同样「访问过即保持挂载」：重进保留筛选/勾选状态，也免去整树重挂载。
+const SKILL_PAGES = ['skills', 'published-skills'] as const
+const MCP_PAGES = ['mcp-library'] as const
+const KEPT_PAGES: readonly string[] = [...MEMORY_PAGES, ...SKILL_PAGES, ...MCP_PAGES]
 
 export default function App() {
   const {
@@ -44,32 +51,42 @@ export default function App() {
   const { t } = useTranslation()
 
   const [page, setPage] = useState<NavPage>('agents')
+  // 记忆族页面访问过即保持挂载：返回时不再
+  // 重新挂载触发全量数据重查，消除往返卡顿。未激活时仅 CSS 隐藏。
+  const [keptPages, setKeptPages] = useState<Set<string>>(new Set())
+  useEffect(() => {
+    if (KEPT_PAGES.includes(page)) {
+      setKeptPages((previous) => previous.has(page) ? previous : new Set(previous).add(page))
+    }
+  }, [page])
   const [showForm, setShowForm] = useState(false)
   const [editingAgent, setEditingAgent] = useState<AgentState | null>(null)
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([])
   const [activeTabKey, setActiveTabKey] = useState<string | null>(null)
   const [terminalClearVersions, setTerminalClearVersions] = useState<Record<string, number>>({})
   const [panelFullscreen, setPanelFullscreen] = useState(false)
-  const [managerSession, setManagerSession] = useState<ManagerSessionState>({ messages: [], selectedProvider: '' })
+  // 从「已发布」页跳入 Skill 库时自动打开同步对话框
+  const [skillsAutoSync, setSkillsAutoSync] = useState(false)
+
+  // 页面导航回调稳定化：配合 memo 化页面，App 的 5s agent 轮询重渲染不再波及隐藏页面。
+  const openMemory = useCallback(() => setPage('memory'), [])
+  const openUsage = useCallback(() => setPage('usage'), [])
+  const openPendingMemories = useCallback(() => setPage('pending-memories'), [])
+  const openOrganizedConversations = useCallback(() => setPage('organized-conversations'), [])
+  const openMemoryInjection = useCallback(() => setPage('memory-injection'), [])
+  const openSkills = useCallback(() => setPage('skills'), [])
+  const openPublishedSkills = useCallback(() => setPage('published-skills'), [])
+  const clearSkillsAutoSync = useCallback(() => setSkillsAutoSync(false), [])
+  const goSkillSync = useCallback(() => { setSkillsAutoSync(true); setPage('skills') }, [])
 
   const { width: sidebarWidth, height: panelHeight, onColMouseDown, onRowMouseDown } = useResizable({
     minW: 200, maxW: 480, defaultW: 288,
     minH: 120, maxH: 800, defaultH: 380,
   })
 
-  // Silent update check: runs once per session; throttled to every 7 days in the component
-  const [hasUpdate, setHasUpdate] = useState(false)
+  const [appVersion, setAppVersion] = useState('1.0.0')
   useEffect(() => {
-    const LAST_CHECK_KEY = 'updater_last_check'
-    const CHECK_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
-    const last = localStorage.getItem(LAST_CHECK_KEY)
-    if (last && Date.now() - Number(last) < CHECK_INTERVAL_MS) return
-    invoke<{ has_update: boolean; latest: string }>('check_for_update')
-      .then(r => {
-        if (r.has_update) setHasUpdate(true)
-        localStorage.setItem(LAST_CHECK_KEY, String(Date.now()))
-      })
-      .catch(() => {})
+    invoke<string>('get_app_version').then(setAppVersion).catch(() => {})
   }, [])
 
   const selectedAgent = agents.find(a => a.config.id === selectedId) ?? null
@@ -191,18 +208,6 @@ export default function App() {
             <img src={logoUrl} alt={t('app.title')} className="h-7 w-7 rounded-lg" />
             <div className="flex flex-col leading-tight">
               <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('app.title')}</span>
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-400 dark:text-gray-500">v1.0.0 beta</span>
-                {hasUpdate && (
-                  <button
-                    onClick={() => setPage('settings')}
-                    className="rounded-full bg-blue-100 px-1.5 py-0 text-[9px] font-semibold text-blue-700 hover:bg-blue-200 dark:bg-blue-900/50 dark:text-blue-300"
-                    title={t('updater.newVersionAvailable', { version: '' })}
-                  >
-                    UPDATE
-                  </button>
-                )}
-              </div>
             </div>
           </div>
           <div className="flex items-center gap-0.5">
@@ -220,12 +225,11 @@ export default function App() {
         {/* Nav */}
         <div className="flex flex-col gap-0.5 p-2 border-b border-gray-200 dark:border-gray-800">
           {([
-            { id: 'dashboard', icon: <LayoutDashboard className="h-4 w-4" />, label: t('nav.dashboard') },
-            { id: 'manager',   icon: <Crown className="h-4 w-4" />,           label: t('nav.manager') },
             { id: 'agents',    icon: <Bot className="h-4 w-4" />,             label: t('nav.agents') },
             { id: 'memory',    icon: <Brain className="h-4 w-4" />,           label: t('nav.memory') },
             { id: 'skills',    icon: <BookOpenText className="h-4 w-4" />,    label: t('nav.skills') },
-            { id: 'mcp-agent', icon: <Cpu className="h-4 w-4" />,             label: t('nav.mcpAgent') },
+            { id: 'mcp-library', icon: <Plug className="h-4 w-4" />,         label: t('nav.mcpLibrary') },
+            { id: 'workflow',  icon: <Sparkles className="h-4 w-4" />,       label: t('nav.workflow') },
             { id: 'ports',     icon: <Network className="h-4 w-4" />,         label: t('nav.ports') },
             { id: 'proxy',     icon: <Shield className="h-4 w-4" />,          label: t('nav.proxy') },
             { id: 'settings',  icon: <Settings2 className="h-4 w-4" />,       label: t('nav.settings') },
@@ -277,7 +281,25 @@ export default function App() {
         </>}
 
         {page !== 'agents' && <div className="flex-1" />}
-      </aside>
+       {/* Footer: version + update check */}
+          <div className="border-t border-gray-200 px-4 py-3 space-y-2 dark:border-gray-800">
+            <div className="flex items-center justify-center gap-1 text-xs font-bold text-gray-500 dark:text-gray-400">
+              <span>v{appVersion.replace(/-beta.*$/i, ' beta')}</span>
+              <span>·</span>
+              <a
+                href="https://www.zaferliu.me"
+                target="_blank"
+                rel="noreferrer"
+                className="hover:text-gray-700 dark:hover:text-gray-200"
+              >
+                @ZaferLiu
+              </a>
+            </div>
+            <div className="flex justify-center">
+              <UpdateChecker sidebar autoCheck />
+            </div>
+          </div>
+        </aside>
 
       {/* ── Col-resize handle ──────────────────────────── */}
       <div
@@ -288,39 +310,67 @@ export default function App() {
       {/* ── Main panel ─────────────────────────────────── */}
       <main className="flex flex-1 flex-col overflow-hidden bg-gray-50 dark:bg-gray-950">
 
-        {page === 'dashboard' && (
-          <Dashboard
-            agents={agents}
-            onSelectAgent={(id) => { selectAgent(id); setPage('agents'); setPanelFullscreen(false) }}
-            onOpenAgentUI={(agent) => { openAgentUI(agent); setPage('agents'); setPanelFullscreen(false) }}
-            onStartAgent={startAgent}
-            onStopAgent={stopAgent}
-            onNavigateToAgents={() => { setPage('agents'); setPanelFullscreen(false) }}
-            onOpenManagerAgent={() => setPage('manager')}
-          />
+        {page === 'workflow' && <WorkflowCenter />}
+        {keptPages.has('memory') && (
+          <div className={`flex flex-1 flex-col overflow-hidden ${page === 'memory' ? '' : 'hidden'}`}>
+            <ErrorBoundary>
+              <MemoryCenter onOpenUsage={openUsage} onOpenPending={openPendingMemories} onOpenOrganized={openOrganizedConversations} onOpenInjection={openMemoryInjection} active={page === 'memory'} />
+            </ErrorBoundary>
+          </div>
         )}
-
-        {/* Manager is always mounted to preserve session state, just hidden when inactive */}
-        <div className={`flex flex-1 flex-col overflow-hidden ${page === 'manager' ? '' : 'hidden'}`}>
-          <ManagerAgent
-            agents={agents}
-            session={managerSession}
-            onSessionChange={setManagerSession}
-            onOpenAgentUI={openAgentUI}
-            onOpenAgentTerminal={openAgentTerminal}
-            onStartAgent={startAgent}
-            onStopAgent={stopAgent}
-            onNavigate={(p) => { setPage(p as NavPage); if (p === 'agents') setPanelFullscreen(false) }}
-          />
-        </div>
-
-        {page === 'mcp-agent' && <McpAgent />}
-        {page === 'memory' && <MemoryCenter onOpenUsage={() => setPage('usage')} onOpenPending={() => setPage('pending-memories')} onOpenOrganized={() => setPage('organized-conversations')} onOpenInjection={() => setPage('memory-injection')} />}
-        {page === 'usage' && <UsageAnalytics onBack={() => setPage('memory')} />}
-        {page === 'pending-memories' && <PendingMemories onBack={() => setPage('memory')} />}
-        {page === 'organized-conversations' && <OrganizedConversations onBack={() => setPage('memory')} />}
-        {page === 'memory-injection' && <MemoryInjection onBack={() => setPage('memory')} />}
-        {page === 'skills' && <SkillLibrary />}
+        {keptPages.has('usage') && (
+          <div className={`flex flex-1 flex-col overflow-hidden ${page === 'usage' ? '' : 'hidden'}`}>
+            <ErrorBoundary>
+              <UsageAnalytics onBack={openMemory} active={page === 'usage'} />
+            </ErrorBoundary>
+          </div>
+        )}
+        {keptPages.has('pending-memories') && (
+          <div className={`flex flex-1 flex-col overflow-hidden ${page === 'pending-memories' ? '' : 'hidden'}`}>
+            <ErrorBoundary>
+              <PendingMemories onBack={openMemory} />
+            </ErrorBoundary>
+          </div>
+        )}
+        {keptPages.has('organized-conversations') && (
+          <div className={`flex flex-1 flex-col overflow-hidden ${page === 'organized-conversations' ? '' : 'hidden'}`}>
+            <ErrorBoundary>
+              <OrganizedConversations onBack={openMemory} />
+            </ErrorBoundary>
+          </div>
+        )}
+        {keptPages.has('memory-injection') && (
+          <div className={`flex flex-1 flex-col overflow-hidden ${page === 'memory-injection' ? '' : 'hidden'}`}>
+            <ErrorBoundary>
+              <MemoryInjection onBack={openMemory} active={page === 'memory-injection'} />
+            </ErrorBoundary>
+          </div>
+        )}
+        {keptPages.has('skills') && (
+          <div className={`flex flex-1 flex-col overflow-hidden ${page === 'skills' ? '' : 'hidden'}`}>
+            <ErrorBoundary>
+              <SkillLibrary
+                onOpenPublished={openPublishedSkills}
+                autoOpenSync={skillsAutoSync}
+                onSyncOpened={clearSkillsAutoSync}
+              />
+            </ErrorBoundary>
+          </div>
+        )}
+        {keptPages.has('published-skills') && (
+          <div className={`flex flex-1 flex-col overflow-hidden ${page === 'published-skills' ? '' : 'hidden'}`}>
+            <ErrorBoundary>
+              <PublishedSkills onBack={openSkills} onGoSync={goSkillSync} />
+            </ErrorBoundary>
+          </div>
+        )}
+        {keptPages.has('mcp-library') && (
+          <div className={`flex flex-1 flex-col overflow-hidden ${page === 'mcp-library' ? '' : 'hidden'}`}>
+            <ErrorBoundary>
+              <McpLibrary active={page === 'mcp-library'} />
+            </ErrorBoundary>
+          </div>
+        )}
         {page === 'ports' && <PortManager agents={agents} />}
         {page === 'proxy' && <ProxyManager agents={agents} />}
         {page === 'settings' && (

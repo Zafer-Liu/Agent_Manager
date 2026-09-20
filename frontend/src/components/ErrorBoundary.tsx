@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from 'react'
+import i18n from '../i18n'
 
 interface Props {
   children: ReactNode
@@ -28,13 +29,13 @@ export class ErrorBoundary extends Component<Props, State> {
         this.props.fallback ?? (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
             <p className="text-sm font-medium text-red-600 dark:text-red-400">
-              {this.state.error?.message ?? '渲染出错'}
+              {this.state.error?.message ?? i18n.t('errorBoundary.renderError')}
             </p>
             <button
               onClick={() => this.setState({ hasError: false, error: null })}
               className="text-xs text-blue-600 hover:underline dark:text-blue-400"
             >
-              重试
+              {i18n.t('errorBoundary.retry')}
             </button>
           </div>
         )

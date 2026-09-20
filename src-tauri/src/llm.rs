@@ -44,7 +44,7 @@ const OLLAMA_CONFIG_SETTING_KEY: &str = "ollama_config";
 
 /// Encrypt a key with a fresh GCM nonce.  The nonce is stored alongside the
 /// ciphertext so each saved provider is independently decryptable.
-fn encrypt_api_key(plain: &str) -> Result<String, String> {
+pub(crate) fn encrypt_api_key(plain: &str) -> Result<String, String> {
     if plain.is_empty() {
         return Ok(String::new());
     }
@@ -63,7 +63,7 @@ fn encrypt_api_key(plain: &str) -> Result<String, String> {
 
 /// Decrypt v2 keys.  Legacy values remain plaintext-compatible; malformed v2
 /// data becomes empty rather than being exposed as a pretend API key.
-fn decrypt_api_key(cipher_text: &str) -> String {
+pub(crate) fn decrypt_api_key(cipher_text: &str) -> String {
     if cipher_text.is_empty() {
         return String::new();
     }

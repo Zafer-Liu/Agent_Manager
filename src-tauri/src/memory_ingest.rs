@@ -446,7 +446,7 @@ impl IngestStore {
 fn l1_extraction_messages(transcript: &str) -> Vec<Value> {
     let language = output_language_directive(transcript);
     vec![
-        json!({"role": "system", "content": format!("你是本地 Agent Manager 的高质量会话记忆整理器。每个完整会话最多输出 3 条、通常 1–2 条。第一条必须是 `summary`，且 durability 必须为 `session`；其余只保留可跨后续任务复用的事实、已确认决定、偏好候选或约束。不要逐步复述操作、工具调用、短暂报错、无结论讨论、重复表述或大段代码。每条须可独立理解，明确主体和结论；不得臆测用户偏好。\n\n必须为每条写准确 durability：`session` 仅当前会话摘要、进度或临时排查；`short_term` 是当前项目/近期任务可能持续数天到数周的决定；`long_term` 仅限用户明确表达、跨项目且 90 天后仍适用的偏好或硬约束。助手自行做出的代码修改、模型/端点/Token 配置、UI 实现、构建/测试记录一律不得标为 `long_term`。不得猜测、遗漏或自动降级：若无法明确分类，请输出 `durability: \"undetermined\"`；该整批结果会被拒绝并标记失败。{language}\n\n严格输出 JSON：{{\"memories\":[{{\"content\":\"...\",\"type\":\"summary|fact|decision|constraint|preference_candidate|open_item\",\"durability\":\"session|short_term|long_term|undetermined\"}}]}}。没有可长期复用的信息时只输出一个 summary。")}),
+        json!({"role": "system", "content": format!("你是本地 Agent Manager 的高质量会话记忆整理器。每个完整会话最多输出 3 条、通常 1–2 条。第一条必须是 `summary`，且 durability 必须为 `session`；其余只保留可跨后续任务复用的事实、已确认决定、偏好候选或约束。不要逐步复述操作、工具调用、短暂报错、无结论讨论、重复表述或大段代码。每条须可独立理解，明确主体和结论；不得臆测用户偏好。\n\n必须为每条写准确 durability：`session` 仅当前会话摘要、进度或临时排查；`short_term` 是当前项目/近期任务可能持续数天到数周的决定；`long_term` 仅限用户明确表达、跨项目且 90 天后仍适用的偏好或硬约束。助手自行做出的代码修改、模型/端点/Token 配置、UI 实现、构建/测试记录一律不得标为 `long_term`。若某条拿不准，请保守标为 `short_term`（summary 一律标 `session`），不要猜测升级。{language}\n\n严格输出 JSON：{{\"memories\":[{{\"content\":\"...\",\"type\":\"summary|fact|decision|constraint|preference_candidate|open_item\",\"durability\":\"session|short_term|long_term\"}}]}}。只输出这个 JSON，不要包裹在代码块或说明文字里。没有可长期复用的信息时只输出一个 summary。")}),
         json!({"role": "user", "content": format!("以下是一段已经结束的会话，请整体理解后整理为 L1：\n\n{transcript}")}),
     ]
 }
@@ -852,6 +852,13 @@ fn scan_native_transcripts(
             let Some(session_id) = native_session_id(source, &path) else {
                 continue;
             };
+            // ZCode 与 Claude Code 的会话互为镜像（同一 UUID 出现在两边的
+            // projects 目录）。同一会话只记第一次扫描的来源，后到的镜像
+            // 副本标记已扫但不再入账，避免对话和用量翻倍。
+            if store.native_session_recorded_by_other_source(source, &session_id)? {
+                store.record_transcript_scan(source, &path, Some(&session_id), Ok(()));
+                continue;
+            }
             let messages = match read_native_session(source, &path) {
                 Ok(messages) => messages,
                 Err(error) => {
@@ -897,6 +904,8 @@ fn read_native_session(source: &str, path: &Path) -> Result<Vec<(String, String)
     match source {
         "codex" => read_codex_session(path),
         "claude" => read_claude_session(path),
+        // ZCode 内置 Claude Code 引擎，转录与 Claude Code 同构。
+        "zcode" => read_claude_session(path),
         "qoder" => read_qoder_session(path),
         "workbuddy" => read_workbuddy_session(path),
         "minimax" => read_minimax_session(path),
@@ -1410,6 +1419,62 @@ fn codex_transcript_text(content: Option<&Value>) -> String {
     }
 }
 
+/// 模型常见别名与未标注的 durability 归一化。拿不准（undetermined/缺失）时
+/// 保守降级：summary 恒为 session，其余按 short_term 处理——宁可入库层级
+/// 偏低，也不让整批记忆因一个标签被拒绝丢失。
+fn normalize_l1_durability(raw: Option<&str>, memory_type: &str) -> String {
+    let normalized = raw
+        .map(|value| value.trim().to_ascii_lowercase().replace([' ', '-', '_'], ""))
+        .unwrap_or_default();
+    match normalized.as_str() {
+        "session" | "temporary" | "temp" => "session".into(),
+        "shortterm" => "short_term".into(),
+        "longterm" | "permanent" => "long_term".into(),
+        // undetermined / unknown / 缺失 / 无法判断：保守取 short_term。
+        _ => {
+            if memory_type == "summary" {
+                "session".into()
+            } else {
+                "short_term".into()
+            }
+        }
+    }
+}
+
+/// 从模型输出中提取 memories 数组：容忍代码块、前后说明文字、裸数组等
+/// 常见包装形态。返回 None 表示确实找不到任何数组。
+fn extract_l1_memories_value(normalized: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(normalized) {
+        if let Some(values) = value.get("memories").and_then(Value::as_array) {
+            return Some(Value::Array(values.clone()));
+        }
+        if value.is_array() {
+            return Some(value);
+        }
+        return None;
+    }
+    // 整体不是合法 JSON：截取首个 '{' 到末个 '}'（或 '[' … ']'）再试一次。
+    for (open, close) in [('{', '}'), ('[', ']')] {
+        if let (Some(start), Some(end)) = (normalized.find(open), normalized.rfind(close)) {
+            if start < end {
+                if let Ok(value) = serde_json::from_str::<Value>(&normalized[start..=end]) {
+                    if let Some(values) = value.get("memories").and_then(Value::as_array) {
+                        return Some(Value::Array(values.clone()));
+                    }
+                    if value.is_array() {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 解析 L1 输出并做**修复式**校验：模型输出轻微偏离契约（顺序、条数、
+/// durability 标签、JSON 包装）时自动修正，而不是整批拒绝——此前严格校验
+/// 导致 20 个会话永久失败且重试无益。仅在完全无法解析或没有任何可用条目
+/// 时才报错。
 fn parse_typed_l1_candidates(
     text: &str,
 ) -> Result<Vec<crate::telemetry_store::L1MemoryCandidate>, String> {
@@ -1419,55 +1484,57 @@ fn parse_typed_l1_candidates(
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    let Some(values) = serde_json::from_str::<Value>(normalized)
-        .ok()
-        .and_then(|value| value.get("memories").and_then(Value::as_array).cloned())
+    let Some(values) = extract_l1_memories_value(normalized)
+        .and_then(|value| value.as_array().cloned())
     else {
         return Err("模型输出未符合 L1 JSON 契约，缺少 memories 数组".into());
     };
-    if values.is_empty() {
-        return Err("模型未输出任何 L1 记忆".into());
-    }
-    if values.len() > 3 {
-        return Err("模型输出超过 L1 最多 3 条的契约".into());
-    }
-    let mut candidates = Vec::with_capacity(values.len());
-    for (index, value) in values.into_iter().enumerate() {
+    let mut candidates = Vec::new();
+    for value in &values {
         let content = value
             .get("content")
+            .or_else(|| value.get("memory"))
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|content| !content.is_empty())
-            .ok_or_else(|| format!("第 {} 条 L1 缺少 content", index + 1))?;
+            .filter(|content| !content.is_empty());
         let memory_type = value
             .get("type")
             .or_else(|| value.get("memory_type"))
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|memory_type| !memory_type.is_empty())
-            .ok_or_else(|| format!("第 {} 条 L1 缺少 type", index + 1))?;
-        let durability = value
-            .get("durability")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .ok_or_else(|| format!("第 {} 条 L1 漏标 durability", index + 1))?;
-        crate::telemetry_store::validate_l1_durability(durability)
-            .map_err(|error| format!("第 {} 条 L1 {error}", index + 1))?;
-        if index == 0 && memory_type != "summary" {
-            return Err("第 1 条 L1 必须为 summary".into());
-        }
-        if memory_type == "summary" && durability != "session" {
-            return Err(format!(
-                "第 {} 条 summary 的 durability 必须为 session",
-                index + 1
-            ));
+            .filter(|memory_type| !memory_type.is_empty());
+        let (Some(content), Some(memory_type)) = (content, memory_type) else {
+            continue;
+        };
+        let memory_type = memory_type.to_ascii_lowercase();
+        if !matches!(
+            memory_type.as_str(),
+            "summary" | "fact" | "decision" | "constraint" | "preference_candidate" | "open_item"
+        ) {
+            continue;
         }
         candidates.push(crate::telemetry_store::L1MemoryCandidate {
             content: content.into(),
-            memory_type: memory_type.to_ascii_lowercase(),
-            durability: durability.to_ascii_lowercase(),
+            durability: normalize_l1_durability(
+                value.get("durability").and_then(Value::as_str),
+                &memory_type,
+            ),
+            memory_type,
         });
     }
+    if candidates.is_empty() {
+        return Err("模型未输出任何可用的 L1 记忆".into());
+    }
+    // 修复 1：summary 不在首位时移到首位（契约只要求第一条是 summary）。
+    if let Some(index) = candidates
+        .iter()
+        .position(|candidate| candidate.memory_type == "summary")
+    {
+        let summary = candidates.remove(index);
+        candidates.insert(0, summary);
+    }
+    // 修复 2：超过 3 条时保留 summary + 前 2 条其余记忆。
+    candidates.truncate(3);
     Ok(candidates)
 }
 
@@ -2062,7 +2129,7 @@ pub fn memory_long_term_profile_delete_draft(
 }
 
 #[tauri::command]
-pub fn memory_layer_documents(
+pub async fn memory_layer_documents(
     telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
     layer: String,
 ) -> Result<Vec<crate::telemetry_store::MemoryLayerDocument>, String> {
@@ -2117,14 +2184,14 @@ fn hook_command(agent_type: &str) -> Result<String, String> {
     }
 }
 
-/// SessionStart 注入 hook：拉取共享记忆上下文并写到 stdout。端点已按来源
+/// SessionStart 注入 hook：仅拉取 L2 近 30 天工作记忆并写到 stdout。端点已按来源
 /// 返回 Claude 形态的结构化 JSON（hookSpecificOutput.additionalContext），
 /// curl 只需透传，harness 解析后注入模型上下文。应用未运行时 curl 静默
 /// 失败，不阻塞会话启动。URL 携带 source 标识，端点据此把注入计入记忆
 /// 注入摘要。
 fn hook_inject_command(agent_type: &str) -> String {
     let url = format!(
-        "http://127.0.0.1:{}/memory/context?source={agent_type}",
+        "http://127.0.0.1:{}/memory/context?source={agent_type}&event=SessionStart",
         crate::agent_http::AGENT_HTTP_PORT
     );
     let marker = format!(r#" -H "{HOOK_MARKER}: 1""#);
@@ -2132,6 +2199,29 @@ fn hook_inject_command(agent_type: &str) -> String {
         format!(r#"curl.exe -fsS --max-time 5 "{url}"{marker}"#)
     } else {
         format!(r#"curl -fsS --max-time 5 '{url}'{marker}"#)
+    }
+}
+
+/// UserPromptSubmit 组合 hook：先透传 stdin 事件到沉淀端点（出站），再拉取
+/// L3 长期记忆写到 stdout（入站），实现每轮提问都注入一次。两条 curl 用
+/// 分隔符串联：沉淀失败（应用未运行）不阻断注入；注入失败时 stdout 为空，
+/// harness 按无附加上下文继续，不阻塞提问。端点带 event=UserPromptSubmit，
+/// 按事件名返回协议格式并单独计入记忆注入摘要。
+fn hook_prompt_command(agent_type: &str) -> Result<String, String> {
+    let sink = hook_command(agent_type)?;
+    let inject_url = format!(
+        "http://127.0.0.1:{}/memory/context?source={agent_type}&event=UserPromptSubmit",
+        crate::agent_http::AGENT_HTTP_PORT
+    );
+    let marker = format!(r#" -H "{HOOK_MARKER}: 1""#);
+    if cfg!(windows) {
+        Ok(format!(
+            r#"{sink} & curl.exe -fsS --max-time 5 "{inject_url}"{marker}"#
+        ))
+    } else {
+        Ok(format!(
+            r#"{sink}; curl -fsS --max-time 5 '{inject_url}'{marker}"#
+        ))
     }
 }
 
@@ -2161,10 +2251,12 @@ fn install_command_hooks(agent_type: &str) -> Result<Vec<String>, String> {
 
     let command = hook_command(agent_type)?;
     let inject_command = hook_inject_command(agent_type);
+    let prompt_command = hook_prompt_command(agent_type)?;
     let mut installed = Vec::new();
-    // 出站沉淀（Agent → 本应用）与入站注入（SessionStart → 模型上下文）
+    // 出站沉淀（Agent → 本应用）与入站注入：SessionStart 只注入
+    // L2，UserPromptSubmit 用组合命令沉淀当前轮并注入 L3。
     for (event, command) in [
-        ("UserPromptSubmit", &command),
+        ("UserPromptSubmit", &prompt_command),
         ("PostToolUse", &command),
         ("Stop", &command),
         ("SessionStart", &inject_command),
@@ -2174,7 +2266,7 @@ fn install_command_hooks(agent_type: &str) -> Result<Vec<String>, String> {
         let contains_ours = serde_json::to_string(&existing)
             .map(|s| s.contains(HOOK_MARKER))
             .unwrap_or(false);
-        if contains_ours && event != "SessionStart" {
+        if contains_ours && event != "SessionStart" && event != "UserPromptSubmit" {
             continue;
         }
         let mut arr = if existing.is_array() {
@@ -2182,9 +2274,10 @@ fn install_command_hooks(agent_type: &str) -> Result<Vec<String>, String> {
         } else {
             vec![]
         };
-        // 注入命令可能随版本演进（例如补充 source 标识）；始终把我们旧版的
-        // SessionStart hook 替换为最新命令，其余事件的已有配置保持不动。
-        if event == "SessionStart" {
+        // 注入命令可能随版本演进（例如补充 source 标识、升级为每轮注入）；
+        // 始终把我们旧版的 SessionStart / UserPromptSubmit hook 替换为最新命令，
+        // 其余事件的已有配置保持不动。
+        if event == "SessionStart" || event == "UserPromptSubmit" {
             arr.retain(|item| {
                 serde_json::to_string(item)
                     .map(|s| !s.contains(HOOK_MARKER))
@@ -2261,7 +2354,7 @@ pub struct HookStatus {
 
 /// 检查某类 Agent 是否已安装记忆 hook。
 #[tauri::command]
-pub fn memory_hook_status(agent_type: String) -> HookStatus {
+pub async fn memory_hook_status(agent_type: String) -> Result<HookStatus, String> {
     if matches!(
         agent_type.as_str(),
         "claude" | "qoder" | "codex" | "workbuddy"
@@ -2269,11 +2362,11 @@ pub fn memory_hook_status(agent_type: String) -> HookStatus {
         if let Some(path) = agent_settings_path(&agent_type) {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 let Ok(settings) = serde_json::from_str::<Value>(&text) else {
-                    return HookStatus {
+                    return Ok(HookStatus {
                         installed: false,
                         agent_type,
                         events: vec![],
-                    };
+                    });
                 };
                 let events = ["UserPromptSubmit", "PostToolUse", "Stop", "SessionStart"]
                     .iter()
@@ -2288,8 +2381,10 @@ pub fn memory_hook_status(agent_type: String) -> HookStatus {
                                         .map(|item| {
                                             item.contains(HOOK_MARKER)
                                                 // 旧版注入命令不带 source 标识，无法计入
-                                                // 记忆注入摘要；视为未启用以引导升级。
-                                                && (**e != "SessionStart"
+                                                // 记忆注入摘要；旧版 UserPromptSubmit 只
+                                                // 沉淀不注入。两者均视为未启用以引导升级。
+                                                && ((**e != "SessionStart"
+                                                    && **e != "UserPromptSubmit")
                                                     || item.contains("memory/context?source="))
                                         })
                                         .unwrap_or(false)
@@ -2299,19 +2394,19 @@ pub fn memory_hook_status(agent_type: String) -> HookStatus {
                     })
                     .map(|s| s.to_string())
                     .collect::<Vec<_>>();
-                return HookStatus {
+                return Ok(HookStatus {
                     installed: !events.is_empty(),
                     agent_type,
                     events,
-                };
+                });
             }
         }
     }
-    HookStatus {
+    Ok(HookStatus {
         installed: false,
         agent_type,
         events: vec![],
-    }
+    })
 }
 
 /// 沉淀管道状态（前端展示）。
@@ -2326,16 +2421,18 @@ pub struct IngestStatus {
 }
 
 #[tauri::command]
-pub fn memory_ingest_status(state: tauri::State<'_, IngestStore>) -> IngestStatus {
+pub async fn memory_ingest_status(
+    state: tauri::State<'_, IngestStore>,
+) -> Result<IngestStatus, String> {
     let model_provider_id = crate::llm::memory_extraction_config().provider_id;
     let model_ready = crate::llm::memory_extraction_provider().is_ok();
-    IngestStatus {
+    Ok(IngestStatus {
         enabled: state.is_enabled(),
         buffered_sessions: state.buffered_sessions(),
         model_provider_id,
         model_ready,
         recent: state.recent_logs(),
-    }
+    })
 }
 
 #[tauri::command]
@@ -2569,7 +2666,7 @@ pub async fn memory_ingest_organize_session(
 /// The optional semantic service remains available for legacy/hand-written
 /// items, but its failure must never make captured conversations disappear.
 #[tauri::command]
-pub fn local_memory_list(
+pub async fn local_memory_list(
     telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
     limit: Option<u32>,
 ) -> Result<Vec<crate::telemetry_store::LocalMemory>, String> {
@@ -2577,7 +2674,7 @@ pub fn local_memory_list(
 }
 
 #[tauri::command]
-pub fn local_memory_stats(
+pub async fn local_memory_stats(
     telemetry: tauri::State<'_, crate::telemetry_store::TelemetryStore>,
 ) -> Result<crate::telemetry_store::LocalMemoryStats, String> {
     telemetry.local_l1_memory_stats()
@@ -2662,12 +2759,33 @@ pub fn start_idle_flusher(backend: Arc<MemoryBackend>, store: IngestStore) {
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_l3_profile, has_l2_final_heading, is_l2_analysis_preamble, is_usable_l3_profile,
-        normalize_l2_document, output_language_directive, parse_typed_l1_candidates,
-        read_claude_session, read_claude_turn, read_codex_session, read_codex_turn,
-        read_qoder_session, read_workbuddy_session, select_l2_evidence, strip_memory_thinking,
+        filter_l3_profile, has_l2_final_heading, hook_inject_command, hook_prompt_command,
+        is_l2_analysis_preamble, is_usable_l3_profile, normalize_l2_document,
+        output_language_directive, parse_typed_l1_candidates, read_claude_session,
+        read_claude_turn, read_codex_session, read_codex_turn, read_qoder_session,
+        read_workbuddy_session, select_l2_evidence, strip_memory_thinking,
         unwrap_markdown_document_fence,
     };
+
+    #[test]
+    fn prompt_hook_combines_sink_and_per_turn_injection() {
+        let command = hook_prompt_command("qoder").expect("command must build");
+        // 出站沉淀与入站注入必须在同一条命令里，且都带来源标识。
+        assert!(command.contains("/memory/hook?source=qoder"));
+        assert!(command.contains("/memory/context?source=qoder&event=UserPromptSubmit"));
+        assert!(command.contains("X-Agent-Manager-Hook: 1"));
+        // 沉淀失败不阻断注入：分隔符串联而非 && 短路。
+        assert!(command.contains('&') || command.contains(';'));
+    }
+
+    #[test]
+    fn session_start_and_prompt_hooks_request_distinct_context_scopes() {
+        let session = hook_inject_command("claude");
+        let prompt = hook_prompt_command("claude").expect("command must build");
+        assert!(session.contains("event=SessionStart"));
+        assert!(!session.contains("event=UserPromptSubmit"));
+        assert!(prompt.contains("event=UserPromptSubmit"));
+    }
 
     #[test]
     fn assistant_thinking_is_removed_before_l0_and_l1_processing() {
@@ -2692,15 +2810,49 @@ mod tests {
     }
 
     #[test]
-    fn typed_l1_parser_rejects_missing_or_undetermined_durability() {
-        assert!(parse_typed_l1_candidates(
-            r#"{"memories":[{"content":"会话摘要","type":"summary"}]}"#,
-        )
-        .is_err());
-        assert!(parse_typed_l1_candidates(
-            r#"{"memories":[{"content":"会话摘要","type":"summary","durability":"undetermined"}]}"#,
-        )
-        .is_err());
+    fn typed_l1_parser_repairs_common_contract_drift() {
+        // summary 不在首位 → 移到首位。
+        let memories = parse_typed_l1_candidates(
+            r#"{"memories":[{"content":"事实","type":"fact","durability":"short_term"},{"content":"摘要","type":"summary","durability":"session"}]}"#,
+        ).unwrap();
+        assert_eq!(memories[0].memory_type, "summary");
+        // 超过 3 条 → 截断为 summary + 2 条。
+        let memories = parse_typed_l1_candidates(
+            r#"{"memories":[
+                {"content":"a","type":"fact","durability":"short_term"},
+                {"content":"b","type":"fact","durability":"short_term"},
+                {"content":"c","type":"fact","durability":"short_term"},
+                {"content":"s","type":"summary","durability":"session"}]}"#,
+        ).unwrap();
+        assert_eq!(memories.len(), 3);
+        assert_eq!(memories[0].memory_type, "summary");
+        // undetermined / 缺失 durability → 保守 short_term（summary 恒为 session）。
+        let memories = parse_typed_l1_candidates(
+            r#"{"memories":[{"content":"摘要","type":"summary","durability":"undetermined"},{"content":"事实","type":"fact"}]}"#,
+        ).unwrap();
+        assert_eq!(memories[0].durability, "session");
+        assert_eq!(memories[1].durability, "short_term");
+        // 别名归一化。
+        let memories = parse_typed_l1_candidates(
+            r#"{"memories":[{"content":"长期偏好","type":"preference_candidate","durability":"Long-Term"}]}"#,
+        ).unwrap();
+        assert_eq!(memories[0].durability, "long_term");
+    }
+
+    #[test]
+    fn typed_l1_parser_tolerates_wrapped_or_bare_array_output() {
+        // 前后带说明文字 + 代码块。
+        let memories = parse_typed_l1_candidates(
+            "整理结果如下：\n```json\n{\"memories\":[{\"content\":\"摘要\",\"type\":\"summary\",\"durability\":\"session\"}]}\n```\n以上。",
+        ).unwrap();
+        assert_eq!(memories.len(), 1);
+        // 裸数组。
+        let memories = parse_typed_l1_candidates(
+            r#"[{"content":"摘要","type":"summary","durability":"session"}]"#,
+        ).unwrap();
+        assert_eq!(memories.len(), 1);
+        // 完全无法解析 → 报错。
+        assert!(parse_typed_l1_candidates("我认为这次会话没有值得记录的内容。").is_err());
     }
 
     #[test]

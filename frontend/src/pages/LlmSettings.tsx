@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { invoke } from '@tauri-apps/api/core'
-import { Plus, Trash2, CheckCircle, XCircle, Loader2, Eye, EyeOff, AlertCircle, Brain, Server } from 'lucide-react'
+import { Plus, Trash2, CheckCircle, XCircle, Loader2, Eye, EyeOff, AlertCircle, Brain } from 'lucide-react'
 
 interface LlmProvider {
   id: string
@@ -132,13 +132,13 @@ export function LlmSettings({ embedded = false }: { embedded?: boolean }) {
   const customs = providers.filter(p => p.is_custom)
 
   return (
-    <div className={embedded ? 'space-y-5' : 'flex h-full flex-col overflow-y-auto bg-gray-50 p-6 space-y-6 dark:bg-gray-950'}>
+    <div className={embedded ? 'space-y-3' : 'flex h-full flex-col overflow-y-auto bg-gray-50 p-6 space-y-6 dark:bg-gray-950'}>
       {!embedded && <div>
         <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">{t('llm.title')}</h2>
         <p className="text-xs text-gray-500 mt-0.5">{t('llm.subtitle')}</p>
       </div>}
 
-      <section className="space-y-2">
+      <section className="rounded-lg border border-gray-200 bg-white p-4 space-y-2 dark:border-gray-700 dark:bg-gray-900">
         <div className="flex items-center gap-2"><Brain size={15} className="text-violet-600 dark:text-violet-400" /><h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{t('llm.memoryModelTitle')}</h3></div>
         <p className="text-xs leading-5 text-gray-600 dark:text-gray-300">{t('llm.memoryModelHint')}</p>
         <div className="flex flex-wrap items-center gap-2">
@@ -190,7 +190,7 @@ export function LlmSettings({ embedded = false }: { embedded?: boolean }) {
         </div>
 
         {customs.map(p => (
-          <div key={p.id} className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+          <div key={p.id} className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{p.name}</p>
@@ -228,7 +228,7 @@ export function LlmSettings({ embedded = false }: { embedded?: boolean }) {
 
       {/* Custom form */}
       {showCustomForm && (
-        <div className="rounded-2xl border border-blue-200 bg-white p-5 dark:border-blue-800 dark:bg-gray-900 space-y-3">
+        <div className="rounded-lg border border-blue-200 bg-white p-5 dark:border-blue-800 dark:bg-gray-900 space-y-3">
           <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
             {editingCustom ? t('llm.editProvider', { name: editingCustom.name }) : t('llm.addCustomModel')}
           </h4>
@@ -302,7 +302,7 @@ function BuiltinCard({ provider, showKey, onToggleKey, testResult, testing, onSa
   }
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-3">
+    <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{provider.name}</span>
@@ -427,10 +427,9 @@ function OllamaPanel({ providers, onChanged }: { providers: LlmProvider[]; onCha
   }
 
   return (
-    <section className="space-y-2">
-      <div className="flex items-center gap-2"><Server size={15} className="text-emerald-600 dark:text-emerald-400" /><h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{t('llm.ollamaTitle')}</h3></div>
-      <p className="text-xs leading-5 text-gray-600 dark:text-gray-300">{t('llm.ollamaHint')}</p>
-      <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-3">
+    <div className="space-y-3">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{t('llm.ollamaTitle')}</h3>
+      <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-3">
         <div className="flex items-end gap-2">
           <div className="flex-1">
             <label className="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">{t('llm.ollamaBaseUrl')}</label>
@@ -476,7 +475,7 @@ function OllamaPanel({ providers, onChanged }: { providers: LlmProvider[]; onCha
           <p className="text-xs text-gray-400">{t('llm.ollamaNoModels')}</p>
         )}
       </div>
-    </section>
+    </div>
   )
 }
 

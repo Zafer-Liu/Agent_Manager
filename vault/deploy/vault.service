@@ -1,0 +1,23 @@
+[Unit]
+Description=Agent Manager Cloud Memory Vault
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/agent-manager-vault
+Environment=VAULT_DB=/data/vault.sqlite3
+Environment=PORT=8787
+Restart=always
+RestartSec=5
+User=vault
+Group=vault
+
+# 加固（按需调整）
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
