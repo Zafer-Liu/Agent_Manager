@@ -155,12 +155,9 @@ function CloudVaultSettings() {
   const handleTest = async () => {
     setStatus({ kind: 'working', label: t('settings.cloudVault.testing') })
     try {
-      const token = pat || (patSet ? 'saved' : '')
-      const version = await invoke<string>('cloud_vault_test_connection', { url, pat: token })
-      if (version === 'saved') {
-        setStatus({ kind: 'error', label: t('settings.cloudVault.needPat') })
-        return
-      }
+      // When the field is blank, let the native process use the encrypted PAT
+      // already stored locally.  Never send a placeholder as a bearer token.
+      const version = await invoke<string>('cloud_vault_test_connection', { url, pat: pat || null })
       setStatus({ kind: 'success', label: t('settings.cloudVault.testOk', { version }) })
     } catch (e) {
       setStatus({ kind: 'error', label: String(e) })

@@ -1260,10 +1260,29 @@ pub fn cloud_vault_save_settings(
 }
 
 #[tauri::command]
-pub async fn cloud_vault_test_connection(url: String, pat: String) -> Result<String, String> {
+pub async fn cloud_vault_test_connection(
+    telemetry: State<'_, TelemetryStore>,
+    url: String,
+    pat: Option<String>,
+) -> Result<String, String> {
     let url = url.trim().trim_end_matches('/').to_string();
     if url.is_empty() {
         return Err("请先填写服务端 URL".into());
+    }
+    let pat = match pat
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value,
+        None => {
+            let encrypted = telemetry
+                .app_setting_get::<String>(SETTING_PAT)
+                .unwrap_or_default();
+            crate::llm::decrypt_api_key(&encrypted)
+        }
+    };
+    if pat.is_empty() {
+        return Err("请填写 PAT 后再测试连接".into());
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -1278,16 +1297,13 @@ pub async fn cloud_vault_test_connection(url: String, pat: String) -> Result<Str
         return Err(format!("服务端健康检查返回 HTTP {}", health.status()));
     }
     let body: serde_json::Value = health.json().await.map_err(|e| e.to_string())?;
-    if pat.trim().is_empty() {
-        return Err("请填写 PAT 后再测试连接".into());
-    }
     // /health is public and therefore cannot prove that synchronization is
     // authorized.  Query above any realistic revision to validate the PAT
     // without downloading the encrypted vault payloads.
     let auth = client
         .get(format!("{url}/objects"))
         .query(&[("since_rev", i64::MAX.to_string())])
-        .bearer_auth(pat.trim())
+        .bearer_auth(&pat)
         .send()
         .await
         .map_err(|e| format!("PAT 验证失败: {e}"))?;
