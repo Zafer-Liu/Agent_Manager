@@ -1,8 +1,8 @@
 mod agent;
 mod agent_http;
+mod agent_sources;
 mod backup;
 mod cloud_sync;
-mod agent_sources;
 mod commands;
 mod github;
 mod llm;
@@ -258,8 +258,8 @@ pub fn run() {
             skill_set_status_bulk,
             skill_set_assignment_bulk,
             skill_publish,
-           skill_rollback_latest,
-           skill_delete,
+            skill_rollback_latest,
+            skill_delete,
             skill_drift_detail,
             skill_published_drift,
             skill_adopt_local,
@@ -281,10 +281,11 @@ pub fn run() {
             cloud_sync::cloud_vault_save_settings,
             cloud_sync::cloud_vault_test_connection,
             cloud_sync::cloud_vault_sync,
+            cloud_sync::cloud_vault_pull,
             cloud_sync::cloud_vault_status,
             cloud_sync::cloud_vault_list_conflicts,
             cloud_sync::cloud_vault_resolve_conflict,
-       ])
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -35,6 +35,7 @@ interface SyncReport {
 type Phase =
   | { kind: 'idle' }
   | { kind: 'syncing' }
+  | { kind: 'pulling' }
   | { kind: 'done'; report: SyncReport }
   | { kind: 'error'; message: string }
 
@@ -81,6 +82,19 @@ export function CloudVaultCard({ onSynced }: { onSynced?: () => void }) {
     }
   }
 
+  const handlePull = async () => {
+    setPhase({ kind: 'pulling' })
+    try {
+      const report = await invoke<SyncReport>('cloud_vault_pull')
+      setPhase({ kind: 'done', report })
+      refresh()
+      void loadConflicts()
+      onSynced?.()
+    } catch (e) {
+      setPhase({ kind: 'error', message: String(e) })
+    }
+  }
+
   const configured = status?.configured ?? false
   const enabled = status?.enabled ?? false
   const selected = conflicts.find((item) => item.object_key === selectedConflictKey) ?? null
@@ -116,7 +130,7 @@ export function CloudVaultCard({ onSynced }: { onSynced?: () => void }) {
   }
   const dotClass = !configured || !enabled
     ? 'bg-gray-400'
-    : phase.kind === 'syncing'
+    : phase.kind === 'syncing' || phase.kind === 'pulling'
       ? 'bg-blue-500 animate-pulse'
       : phase.kind === 'error'
         ? 'bg-red-500'
@@ -144,11 +158,20 @@ export function CloudVaultCard({ onSynced }: { onSynced?: () => void }) {
           <button
             type="button"
             onClick={() => { void handleSync() }}
-            disabled={!enabled || phase.kind === 'syncing'}
+            disabled={!enabled || phase.kind === 'syncing' || phase.kind === 'pulling'}
             className="inline-flex items-center gap-1.5 rounded-md bg-cyan-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
           >
             {phase.kind === 'syncing' ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
             {phase.kind === 'syncing' ? t('memory.cloudCard.syncing') : t('memory.cloudCard.syncNow')}
+          </button>
+          <button
+            type="button"
+            onClick={() => { void handlePull() }}
+            disabled={!enabled || phase.kind === 'syncing' || phase.kind === 'pulling'}
+            className="inline-flex items-center gap-1.5 rounded-md border border-cyan-300 bg-white px-2.5 py-1.5 text-xs font-medium text-cyan-800 hover:bg-cyan-50 disabled:opacity-50 dark:border-cyan-800 dark:bg-gray-800 dark:text-cyan-200 dark:hover:bg-cyan-950/40"
+          >
+            {phase.kind === 'pulling' ? <Loader2 size={13} className="animate-spin" /> : <Cloud size={13} />}
+            {phase.kind === 'pulling' ? t('memory.cloudCard.pulling') : t('memory.cloudCard.pullNow')}
           </button>
         </div>
       </div>

@@ -628,6 +628,8 @@ const en: TranslationSchema = {
       dirty: '{{count}} pending push',
       syncNow: 'Sync Now',
       syncing: 'Syncing…',
+      pullNow: 'Pull from cloud',
+      pulling: 'Pulling…',
       notConfigured: 'Not configured: set the server URL, PAT, and sync password in Settings → Cloud Memory Vault first.',
       disabled: 'Cloud sync is disabled: enable it in Settings → Cloud Memory Vault.',
       autoOn: 'Scheduled sync: runs automatically every {{min}} minutes',

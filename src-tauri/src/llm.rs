@@ -370,11 +370,7 @@ pub async fn test_ollama_connection(base_url: String) -> Result<OllamaTestResult
 
     // The version probe is best-effort: model listing below is the real
     // health check, and very old Ollama builds lack /api/version.
-    let version = match client
-        .get(format!("{base}/api/version"))
-        .send()
-        .await
-    {
+    let version = match client.get(format!("{base}/api/version")).send().await {
         Ok(resp) if resp.status().is_success() => resp
             .json::<serde_json::Value>()
             .await
@@ -504,68 +500,26 @@ pub async fn complete_text_with_limit(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
     );
-    // Both official MiniMax compatibility gateways are valid.  Network paths
-    // can intermittently prefer one DNS/CDN route over the other, so a
-    // connection failure should transparently try the sibling endpoint before
-    // surfacing an error to the user.  API/validation errors are not retried.
-    let mut urls = vec![configured_url];
-    if is_minimax {
-        let alternate_base = if provider
-            .base_url
-            .to_ascii_lowercase()
-            .contains("minimaxi.com")
-        {
-            "https://api.minimax.io/v1"
-        } else if provider
-            .base_url
-            .to_ascii_lowercase()
-            .contains("minimax.io")
-        {
-            "https://api.minimaxi.com/v1"
-        } else {
-            "https://api.minimax.io/v1"
-        };
-        let alternate = format!("{alternate_base}/chat/completions");
-        if !urls.contains(&alternate) {
-            urls.push(alternate);
-        }
-    }
-    let mut connection_errors = Vec::new();
-    let mut response = None;
-    for url in urls {
-        match client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", provider.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(120))
-            .send()
-            .await
-        {
-            Ok(value) => {
-                response = Some(value);
-                break;
-            }
-            Err(error) if error.is_connect() || error.is_timeout() => {
-                connection_errors.push(format!("{url}: {}", explain_request_error(&error)));
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-            }
-            Err(error) => {
-                return Err(format!(
-                    "记忆提取模型请求失败（{}）: {}",
-                    provider.name,
-                    explain_request_error(&error)
-                ))
-            }
-        }
-    }
-    let response = response.ok_or_else(|| {
-        format!(
-            "记忆提取模型请求失败（{}）：两个 MiniMax 官方端点均无法连接。{}",
-            provider.name,
-            connection_errors.join("；"),
-        )
-    })?;
+    // MiniMax credentials are region-bound: a key issued for minimaxi.com can
+    // be rejected by minimax.io (and vice versa) with error 2049.  The settings
+    // connection test uses the configured URL, so memory extraction must use
+    // that exact same endpoint instead of silently crossing regions.
+    let response = client
+        .post(&configured_url)
+        .header("Authorization", format!("Bearer {}", provider.api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "记忆提取模型请求失败（{}，{}）: {}",
+                provider.name,
+                configured_url,
+                explain_request_error(&error)
+            )
+        })?;
     let status = response.status();
     let value = response
         .json::<serde_json::Value>()

@@ -626,6 +626,8 @@ const zh = {
       dirty: '{{count}} 项待推送',
       syncNow: '立即同步',
       syncing: '同步中…',
+      pullNow: '从云端拉取',
+      pulling: '正在拉取…',
       notConfigured: '未配置：请先到「设置 → 云端记忆库」填写服务端 URL、PAT 与同步密码。',
       disabled: '云端同步未启用：请到「设置 → 云端记忆库」开启。',
       autoOn: '定时同步：每 {{min}} 分钟自动执行',

@@ -1,6 +1,6 @@
 [package]
 name = "agent-manager"
-version = "1.0.0"
+version = "1.0.1"
 description = "A local agent management tool"
 authors = ["you"]
 edition = "2021"
