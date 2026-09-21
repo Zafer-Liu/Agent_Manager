@@ -500,6 +500,15 @@ pub async fn complete_text_with_limit(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
     );
+    // MiniMax M3 can spend several minutes on the large map/reduce prompts
+    // used by 30-day memory consolidation.  Keep the shorter default for
+    // ordinary providers while allowing the configured MiniMax endpoint to
+    // finish its reasoning pass instead of being cut off at 120 seconds.
+    let request_timeout = if is_minimax {
+        std::time::Duration::from_secs(600)
+    } else {
+        std::time::Duration::from_secs(120)
+    };
     // MiniMax credentials are region-bound: a key issued for minimaxi.com can
     // be rejected by minimax.io (and vice versa) with error 2049.  The settings
     // connection test uses the configured URL, so memory extraction must use
@@ -509,7 +518,7 @@ pub async fn complete_text_with_limit(
         .header("Authorization", format!("Bearer {}", provider.api_key))
         .header("Content-Type", "application/json")
         .json(&body)
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(request_timeout)
         .send()
         .await
         .map_err(|error| {
