@@ -182,14 +182,25 @@ async fn delete_object(
     Path(key): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    let base_revision: i64 = match headers
+        .get("if-match")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+    {
+        Some(value) if value >= 0 => value,
+        _ => return (StatusCode::PRECONDITION_FAILED, "missing If-Match revision").into_response(),
+    };
     let device = headers
         .get("x-device-id")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    if store::delete_object(&store, &key, &device) {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        (StatusCode::NOT_FOUND, "object not found").into_response()
+    match store::delete_object(&store, &key, base_revision, &device) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "object not found").into_response(),
+        Err(CasError::Conflict { current_revision }) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "revision conflict", "current_revision": current_revision })),
+        ).into_response(),
     }
 }

@@ -282,6 +282,8 @@ pub fn run() {
             cloud_sync::cloud_vault_test_connection,
             cloud_sync::cloud_vault_sync,
             cloud_sync::cloud_vault_status,
+            cloud_sync::cloud_vault_list_conflicts,
+            cloud_sync::cloud_vault_resolve_conflict,
        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

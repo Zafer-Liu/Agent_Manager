@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
 
-use crate::telemetry_store::{TelemetryStore, UsageDayAggregate};
+use crate::telemetry_store::{CloudSyncConflict, TelemetryStore, UsageDayAggregate};
 
 const SETTING_URL: &str = "cloud_vault.url";
 const SETTING_PAT: &str = "cloud_vault.pat";
@@ -131,6 +131,7 @@ pub struct CloudVaultStatus {
     pub configured: bool,
     pub enabled: bool,
     pub dirty: u32,
+    pub conflicts: u32,
     pub last_sync_at: Option<String>,
     pub last_report: Option<String>,
     pub auto_interval_min: i64,
@@ -150,7 +151,7 @@ struct RemoteObject {
 #[derive(Deserialize)]
 struct RemoteTombstone {
     key: String,
-    #[allow(dead_code)]
+    revision: i64,
     deleted_at: String,
 }
 
@@ -248,6 +249,10 @@ fn push_layer(
     let base_revision = meta.as_ref().map(|(rev, _, _, _)| *rev).unwrap_or(0);
     let local_hash = sha256_hex(doc.content.as_bytes());
     if let Some((_, Some(hash), state, _)) = meta.as_ref() {
+        if state == "conflict" {
+            report.skipped += 1;
+            return;
+        }
         if *hash == local_hash && state == "clean" {
             report.skipped += 1;
             return;
@@ -288,51 +293,14 @@ fn push_layer(
             if let Ok(json) = resp.json::<serde_json::Value>() {
                 let rev = json["revision"].as_i64().unwrap_or(base_revision);
                 let _ = store.cloud_sync_meta_set(key, rev, Some(&local_hash), "clean");
+                let _ = store.cloud_sync_snapshot_set(key, rev, Some(&local_hash), Some(&doc.content));
             }
             report.pushed += 1;
         }
-        409 => {
-            // CAS 冲突：updated_at 较新者胜出（Phase 1 简化裁决）。
-            let current_rev: i64 = resp
-                .json::<serde_json::Value>()
-                .ok()
-                .and_then(|v| v["current_revision"].as_i64())
-                .unwrap_or(-1);
-            let remote = fetch_object(client, url, pat, key);
-            let remote_newer = remote
-                .as_ref()
-                .map(|o| parse_ts(&o.updated_at) > parse_ts(&body.updated_at))
-                .unwrap_or(false);
-            if remote_newer {
-                if apply_remote(store, layer, vault_key_bytes, remote.unwrap(), report) {
-                    report.conflicts += 1;
-                }
-            } else if current_rev >= 0 {
-                let forced = client
-                    .put(format!("{url}/objects/{key}"))
-                    .bearer_auth(pat)
-                    .header("x-device-id", device)
-                    .header("If-Match", current_rev.to_string())
-                    .json(&body)
-                    .send();
-                match forced {
-                    Ok(r) if r.status().is_success() => {
-                        let rev = r
-                            .json::<serde_json::Value>()
-                            .ok()
-                            .and_then(|v| v["revision"].as_i64())
-                            .unwrap_or(current_rev);
-                        let _ = store.cloud_sync_meta_set(key, rev, Some(&local_hash), "clean");
-                        report.pushed += 1;
-                        report.conflicts += 1;
-                    }
-                    Ok(r) => report.errors.push(format!("{key}: 强制推送失败 HTTP {}", r.status())),
-                    Err(e) => report.errors.push(format!("{key}: 强制推送失败 {e}")),
-                }
-            } else {
-                report.errors.push(format!("{key}: 冲突但无法获取远端修订号"));
-            }
-        }
+        409 => match fetch_object(client, url, pat, key) {
+            Some(remote) => { record_layer_conflict(store, layer, vault_key_bytes, remote, report); }
+            None => report.errors.push(format!("{key}: 冲突但无法读取远端版本")),
+        },
         status => report.errors.push(format!("{key}: 推送失败 HTTP {status}")),
     }
 }
@@ -352,6 +320,133 @@ fn fetch_object(
         .ok()?
         .json::<RemoteObject>()
         .ok()
+}
+
+fn decrypt_remote_content(
+    vault_key_bytes: &[u8; 32],
+    obj: &RemoteObject,
+    report: &mut CloudSyncReport,
+) -> Option<String> {
+    let blob = b64_decode(&obj.payload).or_else(|| {
+        report.errors.push(format!("{}: 远端 payload 编码损坏", obj.key));
+        None
+    })?;
+    let plain = vault_decrypt(vault_key_bytes, &blob).map_err(|e| {
+        report.errors.push(format!("{}: {e}", obj.key));
+    }).ok()?;
+    if sha256_hex(&plain) != obj.content_hash {
+        report.errors.push(format!("{}: 远端内容哈希校验失败，已跳过", obj.key));
+        return None;
+    }
+    Some(String::from_utf8_lossy(&plain).to_string())
+}
+
+fn record_layer_conflict(
+    store: &TelemetryStore,
+    layer: &str,
+    vault_key_bytes: &[u8; 32],
+    obj: RemoteObject,
+    report: &mut CloudSyncReport,
+) -> bool {
+    let key = obj.key.clone();
+    let Some(remote_content) = decrypt_remote_content(vault_key_bytes, &obj, report) else {
+        return false;
+    };
+    let local = store.active_memory_layer_document(layer).ok().flatten();
+    let conflict = CloudSyncConflict {
+        object_key: key.clone(),
+        object_kind: layer.to_string(),
+        base_content: store.cloud_sync_snapshot_content(&key).ok().flatten(),
+        local_content: local.as_ref().map(|item| item.content.clone()),
+        remote_content: Some(remote_content),
+        local_memory_type: None,
+        remote_memory_type: None,
+        remote_revision: obj.revision,
+        remote_content_hash: Some(obj.content_hash.clone()),
+        local_updated_at: local.and_then(|item| item.published_at),
+        remote_updated_at: Some(obj.updated_at),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Err(error) = store.cloud_sync_conflict_upsert(&conflict) {
+        report.errors.push(format!("{key}: 保存冲突失败 {error}"));
+        return false;
+    }
+    let _ = store.cloud_sync_meta_set(&key, obj.revision, Some(&obj.content_hash), "conflict");
+    report.conflicts += 1;
+    true
+}
+
+fn record_l1_conflict(
+    store: &TelemetryStore,
+    local: &crate::telemetry_store::LocalMemorySnapshot,
+    vault_key_bytes: &[u8; 32],
+    obj: RemoteObject,
+    report: &mut CloudSyncReport,
+) -> bool {
+    let key = obj.key.clone();
+    let Some(remote_plain) = decrypt_remote_content(vault_key_bytes, &obj, report) else {
+        return false;
+    };
+    let remote: L1Payload = match serde_json::from_str(&remote_plain) {
+        Ok(payload) => payload,
+        Err(error) => {
+            report.errors.push(format!("{key}: 远端记忆载荷无效 {error}"));
+            return false;
+        }
+    };
+    let local_plain = serde_json::to_string(&L1Payload {
+        content: local.memory.clone(), memory_type: local.memory_type.clone(), updated_at: local.updated_at.clone(),
+    }).unwrap_or_default();
+    let conflict = CloudSyncConflict {
+        object_key: key.clone(), object_kind: "l1".into(),
+        base_content: store.cloud_sync_snapshot_content(&key).ok().flatten(),
+        local_content: Some(local_plain), remote_content: Some(remote_plain),
+        local_memory_type: Some(local.memory_type.clone()), remote_memory_type: Some(remote.memory_type),
+        remote_revision: obj.revision, remote_content_hash: Some(obj.content_hash.clone()),
+        local_updated_at: Some(local.updated_at.clone()), remote_updated_at: Some(remote.updated_at),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Err(error) = store.cloud_sync_conflict_upsert(&conflict) {
+        report.errors.push(format!("{key}: 保存冲突失败 {error}"));
+        return false;
+    }
+    let _ = store.cloud_sync_meta_set(&key, obj.revision, Some(&obj.content_hash), "conflict");
+    report.conflicts += 1;
+    true
+}
+
+fn record_l1_delete_conflict(
+    store: &TelemetryStore,
+    key: &str,
+    _base_revision: i64,
+    vault_key_bytes: &[u8; 32],
+    obj: RemoteObject,
+    report: &mut CloudSyncReport,
+) -> bool {
+    let Some(remote_plain) = decrypt_remote_content(vault_key_bytes, &obj, report) else { return false; };
+    let remote: L1Payload = match serde_json::from_str(&remote_plain) {
+        Ok(payload) => payload,
+        Err(error) => {
+            report.errors.push(format!("{key}: 远端记忆载荷无效 {error}"));
+            return false;
+        }
+    };
+    let conflict = CloudSyncConflict {
+        object_key: key.to_string(), object_kind: "l1".into(),
+        base_content: store.cloud_sync_snapshot_content(key).ok().flatten(),
+        local_content: None, remote_content: Some(remote_plain),
+        local_memory_type: None, remote_memory_type: Some(remote.memory_type),
+        remote_revision: obj.revision, remote_content_hash: Some(obj.content_hash.clone()),
+        local_updated_at: None, remote_updated_at: Some(remote.updated_at),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Err(error) = store.cloud_sync_conflict_upsert(&conflict) {
+        report.errors.push(format!("{key}: 保存删除冲突失败 {error}"));
+        return false;
+    }
+    let _ = store.cloud_sync_meta_set(key, obj.revision, Some(&obj.content_hash), "conflict");
+    report.conflicts += 1;
+    true
 }
 
 fn apply_remote(
@@ -386,6 +481,7 @@ fn apply_remote(
         return false;
     }
     let _ = store.cloud_sync_meta_set(key, obj.revision, Some(&obj.content_hash), "clean");
+    let _ = store.cloud_sync_snapshot_set(key, obj.revision, Some(&obj.content_hash), Some(&content));
     report.pulled += 1;
     true
 }
@@ -425,6 +521,10 @@ fn push_l1(
         let plain = serde_json::to_string(&payload).unwrap_or_default();
         let local_hash = sha256_hex(plain.as_bytes());
         let meta = metas.iter().find(|(k, _, _, _, _)| *k == key);
+        if meta.is_some_and(|(_, _, _, state, _)| state == "conflict") {
+            report.skipped += 1;
+            continue;
+        }
         if let Some((_, _, Some(hash), state, _)) = meta {
             if *hash == local_hash && state == "clean" {
                 continue;
@@ -461,10 +561,12 @@ fn push_l1(
                 let _ = store.cloud_sync_meta_set(&key, rev, Some(&local_hash), "clean");
                 report.pushed += 1;
             }
-            // 409：远端被其他设备改过。拉取阶段（紧随其后）会做 updated_at 裁决，
-            // 本地较新时下次同步仍会以新 revision 覆盖，这里不重复处理。
             Ok(r) if r.status().as_u16() == 409 => {
-                report.conflicts += 1;
+                if let Some(remote) = fetch_object(client, url, pat, &key) {
+                    record_l1_conflict(store, item, vault_key_bytes, remote, report);
+                } else {
+                    report.errors.push(format!("{key}: 冲突但无法读取远端版本"));
+                }
             }
             Ok(r) => report.errors.push(format!("{key}: 推送失败 HTTP {}", r.status())),
             Err(e) => report.errors.push(format!("{key}: 推送失败 {e}")),
@@ -475,17 +577,29 @@ fn push_l1(
         .iter()
         .map(|item| format!("l1-user:{}", item.id))
         .collect();
-    for (key, _, _, _, _) in metas {
+    for (key, revision, _, state, _) in metas {
         if !live_ids.contains(&key) {
+            if state == "conflict" {
+                report.skipped += 1;
+                continue;
+            }
             match client
                 .delete(format!("{url}/objects/{key}"))
                 .bearer_auth(pat)
                 .header("x-device-id", device)
+                .header("If-Match", revision.to_string())
                 .send()
             {
                 Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => {
                     let _ = store.cloud_sync_meta_delete(&key);
                     report.pushed += 1;
+                }
+                Ok(r) if r.status().as_u16() == 409 => {
+                    if let Some(remote) = fetch_object(client, url, pat, &key) {
+                        record_l1_delete_conflict(store, &key, revision, vault_key_bytes, remote, report);
+                    } else {
+                        report.errors.push(format!("{key}: 删除冲突但无法读取远端版本"));
+                    }
                 }
                 Ok(r) => report.errors.push(format!("{key}: 删除推送失败 HTTP {}", r.status())),
                 Err(e) => report.errors.push(format!("{key}: 删除推送失败 {e}")),
@@ -677,17 +791,7 @@ fn pull(
         if !dirty {
             apply_remote(store, &layer, vault_key_bytes, obj, report);
         } else {
-            // 本地 dirty 但推送阶段已处理过 409 裁决；此处远端仍是更新版本时采用远端。
-            let local = store.active_memory_layer_document(&layer).ok().flatten();
-            let local_ts = local
-                .and_then(|d| d.published_at)
-                .map(|t| parse_ts(&t))
-                .unwrap_or(chrono::DateTime::UNIX_EPOCH);
-            if parse_ts(&obj.updated_at) > local_ts {
-                if apply_remote(store, &layer, vault_key_bytes, obj, report) {
-                    report.conflicts += 1;
-                }
-            }
+            record_layer_conflict(store, &layer, vault_key_bytes, obj, report);
         }
     }
     // 墓碑：其他设备删除的自定义 L1 在本地同步删除（仅 user_defined 条目）。
@@ -695,6 +799,27 @@ fn pull(
         let Some(id) = tomb.key.strip_prefix("l1-user:") else {
             continue;
         };
+        let local = store.find_user_defined_l1(id).ok().flatten();
+        let meta = store.cloud_sync_meta_row(&tomb.key).ok().flatten();
+        let locally_changed = local.as_ref().is_some_and(|item| {
+            let plain = serde_json::to_string(&L1Payload { content: item.memory.clone(), memory_type: item.memory_type.clone(), updated_at: item.updated_at.clone() }).unwrap_or_default();
+            meta.as_ref().map_or(true, |(_, hash, state, _)| state == "dirty" || hash.as_deref() != Some(&sha256_hex(plain.as_bytes())))
+        });
+        if locally_changed {
+            let conflict = CloudSyncConflict {
+                object_key: tomb.key.clone(), object_kind: "l1".into(),
+                base_content: store.cloud_sync_snapshot_content(&tomb.key).ok().flatten(),
+                local_content: local.and_then(|item| serde_json::to_string(&L1Payload { content: item.memory, memory_type: item.memory_type, updated_at: item.updated_at }).ok()),
+                remote_content: None, local_memory_type: None, remote_memory_type: None,
+                remote_revision: tomb.revision, remote_content_hash: None,
+                local_updated_at: None, remote_updated_at: Some(tomb.deleted_at), created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if store.cloud_sync_conflict_upsert(&conflict).is_ok() {
+                let _ = store.cloud_sync_meta_set(&tomb.key, tomb.revision, None, "conflict");
+                report.conflicts += 1;
+            }
+            continue;
+        }
         match store.delete_synced_l1_memory(id) {
             Ok(true) => report.pulled += 1,
             Ok(false) => {}
@@ -791,6 +916,11 @@ fn apply_remote_l1(
             return false;
         }
     };
+    let meta = store.cloud_sync_meta_row(&obj.key).ok().flatten();
+    if meta.as_ref().is_some_and(|(_, _, state, _)| state == "conflict") {
+        report.skipped += 1;
+        return false;
+    }
     // 本地已有同 hash → 只对齐水位。
     if let Ok(Some(item)) = store.find_user_defined_l1(&id) {
         let local_payload = L1Payload {
@@ -798,16 +928,22 @@ fn apply_remote_l1(
             memory_type: item.memory_type.clone(),
             updated_at: item.updated_at.clone(),
         };
-        if let Ok(local_plain) = serde_json::to_string(&local_payload) {
-            if sha256_hex(local_plain.as_bytes()) == obj.content_hash {
+        let local_plain = serde_json::to_string(&local_payload).unwrap_or_default();
+        if sha256_hex(local_plain.as_bytes()) == obj.content_hash {
                 let _ = store.cloud_sync_meta_set(&obj.key, obj.revision, Some(&obj.content_hash), "clean");
+                let _ = store.cloud_sync_snapshot_set(&obj.key, obj.revision, Some(&obj.content_hash), Some(&String::from_utf8_lossy(&plain)));
                 report.skipped += 1;
                 return true;
-            }
         }
-        // 内容不同：updated_at 较新者胜出。本地较新则保留，下次推送覆盖远端。
-        if parse_ts(&item.updated_at) > parse_ts(&payload.updated_at) {
-            report.conflicts += 1;
+        // 内容不同且本地不是已对齐的旧版本，说明双方都改过同一记忆。
+        // 保留双方，等待用户选择，绝不能拿设备时钟静默裁决。
+        let local_changed = meta.as_ref().map_or(true, |(_, known_hash, state, _)| {
+            state == "dirty" || known_hash.as_deref() != Some(&sha256_hex(local_plain.as_bytes()))
+        });
+        if local_changed {
+            return record_l1_conflict(store, &item, vault_key_bytes, obj, report);
+        }
+        if meta.as_ref().is_some_and(|(_, _, state, _)| state == "dirty") {
             return false;
         }
     }
@@ -816,6 +952,7 @@ fn apply_remote_l1(
         return false;
     }
     let _ = store.cloud_sync_meta_set(&obj.key, obj.revision, Some(&obj.content_hash), "clean");
+    let _ = store.cloud_sync_snapshot_set(&obj.key, obj.revision, Some(&obj.content_hash), Some(&String::from_utf8_lossy(&plain)));
     report.pulled += 1;
     true
 }
@@ -941,6 +1078,90 @@ pub async fn cloud_vault_sync() -> Result<CloudSyncReport, String> {
 }
 
 #[tauri::command]
+pub fn cloud_vault_list_conflicts(
+    telemetry: State<'_, TelemetryStore>,
+) -> Result<Vec<CloudSyncConflict>, String> {
+    telemetry.cloud_sync_conflicts()
+}
+
+/// Resolving is deliberately local and deterministic: it applies the selected
+/// version to this device, anchors the CAS watermark at the remote revision,
+/// and leaves the next regular sync to publish the selected local/merged copy.
+#[tauri::command]
+pub fn cloud_vault_resolve_conflict(
+    telemetry: State<'_, TelemetryStore>,
+    object_key: String,
+    resolution: String,
+    merged_content: Option<String>,
+) -> Result<(), String> {
+    let conflict = telemetry
+        .cloud_sync_conflict_get(&object_key)?
+        .ok_or("未找到待处理的云端冲突")?;
+    if !matches!(resolution.as_str(), "local" | "remote" | "merged") {
+        return Err("无效的冲突处理方式".into());
+    }
+    if conflict.object_kind == "l2" || conflict.object_kind == "l3" {
+        let selected = match resolution.as_str() {
+            "local" => conflict.local_content.clone(),
+            "remote" => conflict.remote_content.clone(),
+            _ => merged_content,
+        }.filter(|content| !content.trim().is_empty())
+            .ok_or("所选版本内容为空，无法保存")?;
+        telemetry.upsert_published_layer_content(&conflict.object_kind, &selected)?;
+        let hash = sha256_hex(selected.as_bytes());
+        if resolution == "remote" {
+            telemetry.cloud_sync_meta_set(&object_key, conflict.remote_revision, conflict.remote_content_hash.as_deref(), "clean")?;
+            telemetry.cloud_sync_snapshot_set(&object_key, conflict.remote_revision, conflict.remote_content_hash.as_deref(), Some(&selected))?;
+        } else {
+            telemetry.cloud_sync_meta_set(&object_key, conflict.remote_revision, Some(&hash), "dirty")?;
+        }
+    } else if conflict.object_kind == "l1" {
+        let id = object_key.strip_prefix("l1-user:").ok_or("无效的自定义记忆冲突 key")?;
+        let selected_payload = match resolution.as_str() {
+            "local" => conflict.local_content.clone(),
+            "remote" => conflict.remote_content.clone(),
+            _ => {
+                let local: L1Payload = serde_json::from_str(conflict.local_content.as_deref().ok_or("删除版本不能手动合并")?)
+                    .map_err(|_| "本地记忆载荷损坏")?;
+                Some(serde_json::to_string(&L1Payload {
+                    content: merged_content.filter(|value| !value.trim().is_empty()).ok_or("合并内容不能为空")?,
+                    memory_type: local.memory_type,
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                }).map_err(|error| error.to_string())?)
+            }
+        };
+        match selected_payload {
+            Some(raw) => {
+                let payload: L1Payload = serde_json::from_str(&raw).map_err(|_| "所选记忆载荷损坏")?;
+                telemetry.upsert_synced_l1_memory(id, &payload.content, &payload.memory_type, &payload.updated_at)?;
+                let hash = sha256_hex(raw.as_bytes());
+                if resolution == "remote" {
+                    telemetry.cloud_sync_meta_set(&object_key, conflict.remote_revision, conflict.remote_content_hash.as_deref(), "clean")?;
+                    telemetry.cloud_sync_snapshot_set(&object_key, conflict.remote_revision, conflict.remote_content_hash.as_deref(), Some(&raw))?;
+                } else {
+                    // A remote tombstone has no object revision to match on a
+                    // re-create; start at zero so the normal PUT creates it.
+                    let revision = if conflict.remote_content.is_some() { conflict.remote_revision } else { 0 };
+                    telemetry.cloud_sync_meta_set(&object_key, revision, Some(&hash), "dirty")?;
+                }
+            }
+            None => {
+                telemetry.delete_synced_l1_memory(id)?;
+                if conflict.remote_content.is_some() {
+                    // User chose their local delete over an edited remote item.
+                    telemetry.cloud_sync_meta_set(&object_key, conflict.remote_revision, None, "dirty")?;
+                } else {
+                    telemetry.cloud_sync_meta_delete(&object_key)?;
+                }
+            }
+        }
+    } else {
+        return Err("不支持的云端冲突类型".into());
+    }
+    telemetry.cloud_sync_conflict_delete(&object_key)
+}
+
+#[tauri::command]
 pub fn cloud_vault_status(
     telemetry: State<'_, TelemetryStore>,
 ) -> Result<CloudVaultStatus, String> {
@@ -950,10 +1171,12 @@ pub fn cloud_vault_status(
         .iter()
         .filter(|(_, _, _, state, _)| state == "dirty")
         .count() as u32;
+    let conflicts = telemetry.cloud_sync_conflicts()?.len() as u32;
     Ok(CloudVaultStatus {
         configured: !url.is_empty() && !pat.is_empty() && !password.is_empty(),
         enabled,
         dirty,
+        conflicts,
         last_sync_at: telemetry.app_setting_get(SETTING_LAST_SYNC),
         last_report: telemetry.app_setting_get("cloud_vault.last_report"),
         auto_interval_min: telemetry

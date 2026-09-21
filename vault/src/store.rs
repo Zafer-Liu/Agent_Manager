@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS objects (
 );
 CREATE TABLE IF NOT EXISTS tombstones (
   key TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL DEFAULT 0,
   deleted_at TEXT NOT NULL,
   device_id TEXT NOT NULL
 );
@@ -70,6 +71,7 @@ fn b64_encode(data: &[u8]) -> String {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Tombstone {
     pub key: String,
+    pub revision: i64,
     pub deleted_at: String,
     pub device_id: String,
 }
@@ -88,6 +90,10 @@ pub fn open(path: &str) -> Result<Store, String> {
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| e.to_string())?;
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    // Existing vaults predate tombstone revisions.  A revision makes delete
+    // participate in the same CAS protocol as edits, rather than allowing a
+    // stale device to erase a newer remote change.
+    let _ = conn.execute("ALTER TABLE tombstones ADD COLUMN revision INTEGER NOT NULL DEFAULT 0", []);
     Ok(Store {
         conn: Mutex::new(conn),
     })
@@ -227,23 +233,24 @@ pub fn put_object(
     Ok(new_rev)
 }
 
-pub fn delete_object(store: &Store, key: &str, device_id: &str) -> bool {
+pub fn delete_object(store: &Store, key: &str, base_revision: i64, device_id: &str) -> Result<bool, CasError> {
     let mut conn = store.conn.lock().unwrap();
-    if let Ok(tx) = conn.transaction() {
-        let n = tx.execute("DELETE FROM objects WHERE key = ?1", [key]).unwrap_or(0);
-        if n > 0 {
-            let _ = tx.execute(
-                "INSERT INTO tombstones (key, deleted_at, device_id) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(key) DO UPDATE SET deleted_at = ?2, device_id = ?3",
-                rusqlite::params![key, now_rfc3339(), device_id],
-            );
-            let _ = tx.execute("UPDATE meta SET rev = rev + 1", []);
-            let _ = tx.commit();
-            return true;
-        }
-        let _ = tx.commit();
+    let tx = conn.transaction().map_err(|_| CasError::Conflict { current_revision: 0 })?;
+    let current: Option<i64> = tx.query_row("SELECT revision FROM objects WHERE key = ?1", [key], |r| r.get(0)).ok();
+    let Some(current_revision) = current else { return Ok(false); };
+    if current_revision != base_revision {
+        return Err(CasError::Conflict { current_revision });
     }
-    false
+    tx.execute("DELETE FROM objects WHERE key = ?1", [key]).map_err(|_| CasError::Conflict { current_revision })?;
+    tx.execute("UPDATE meta SET rev = rev + 1", []).map_err(|_| CasError::Conflict { current_revision })?;
+    let revision: i64 = tx.query_row("SELECT rev FROM meta", [], |r| r.get(0)).map_err(|_| CasError::Conflict { current_revision })?;
+    tx.execute(
+        "INSERT INTO tombstones (key, revision, deleted_at, device_id) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(key) DO UPDATE SET revision = ?2, deleted_at = ?3, device_id = ?4",
+        rusqlite::params![key, revision, now_rfc3339(), device_id],
+    ).map_err(|_| CasError::Conflict { current_revision })?;
+    tx.commit().map_err(|_| CasError::Conflict { current_revision })?;
+    Ok(true)
 }
 
 pub fn objects_since(
@@ -271,14 +278,15 @@ pub fn objects_since(
         .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default();
     let mut stmt = conn
-        .prepare("SELECT key, deleted_at, device_id FROM tombstones")
+        .prepare("SELECT key, revision, deleted_at, device_id FROM tombstones WHERE revision > ?1 ORDER BY revision")
         .unwrap();
     let tombstones = stmt
-        .query_map([], |r| {
+        .query_map([since_rev], |r| {
             Ok(Tombstone {
                 key: r.get(0)?,
-                deleted_at: r.get(1)?,
-                device_id: r.get(2)?,
+                revision: r.get(1)?,
+                deleted_at: r.get(2)?,
+                device_id: r.get(3)?,
             })
         })
         .map(|rows| rows.filter_map(Result::ok).collect())
@@ -325,7 +333,7 @@ mod tests {
     fn delete_writes_tombstone() {
         let store = tmp_store();
         put_object(&store, "l3:published", 0, "h".into(), b"c".to_vec(), "t", "a").unwrap();
-        assert!(delete_object(&store, "l3:published", "a"));
+        assert!(delete_object(&store, "l3:published", 1, "a").unwrap());
         let (_, tombs, _) = objects_since(&store, 0);
         assert_eq!(tombs.len(), 1);
         assert_eq!(tombs[0].key, "l3:published");

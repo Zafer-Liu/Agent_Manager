@@ -376,6 +376,26 @@ pub struct MemoryImportance {
     pub updated_at: String,
 }
 
+/// A local-only, evidence-preserving record of a cloud object that both this
+/// device and another device changed after their last common revision.  The
+/// Vault never receives these plaintext comparison copies.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CloudSyncConflict {
+    pub object_key: String,
+    pub object_kind: String,
+    pub base_content: Option<String>,
+    pub local_content: Option<String>,
+    pub remote_content: Option<String>,
+    pub local_memory_type: Option<String>,
+    pub remote_memory_type: Option<String>,
+    pub remote_revision: i64,
+    pub remote_content_hash: Option<String>,
+    pub local_updated_at: Option<String>,
+    pub remote_updated_at: Option<String>,
+    pub created_at: String,
+}
+
 /// Audit record for a connected Agent's memory injection (shared-memory MCP
 /// tools and SessionStart hook injections).  By explicit product decision the
 /// ledger keeps the full exchanged content (query arguments, returned memory
@@ -549,6 +569,30 @@ impl TelemetryStore {
                cached_tokens INTEGER NOT NULL DEFAULT 0,
                record_count INTEGER NOT NULL DEFAULT 0,
                PRIMARY KEY (device, day, source)
+             );
+             -- Last common plaintext is retained only on this device.  It is
+             -- the base for a human-readable three-way merge when a CAS
+             -- conflict occurs; the cloud Vault still stores ciphertext only.
+             CREATE TABLE IF NOT EXISTS cloud_sync_snapshots (
+               object_key TEXT PRIMARY KEY,
+               revision INTEGER NOT NULL,
+               content_hash TEXT,
+               content TEXT,
+               updated_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS cloud_sync_conflicts (
+               object_key TEXT PRIMARY KEY,
+               object_kind TEXT NOT NULL,
+               base_content TEXT,
+               local_content TEXT,
+               remote_content TEXT,
+               local_memory_type TEXT,
+               remote_memory_type TEXT,
+               remote_revision INTEGER NOT NULL,
+               remote_content_hash TEXT,
+               local_updated_at TEXT,
+               remote_updated_at TEXT,
+               created_at TEXT NOT NULL
              );",
         )
         .map_err(|e| e.to_string())?;
@@ -1828,6 +1872,88 @@ impl TelemetryStore {
             params![object_key, revision, content_hash, sync_state, now],
         )
         .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Stores the last common version of an object locally.  This is never
+    /// uploaded; it exists solely so a simultaneous edit can be resolved with
+    /// an honest three-way comparison instead of a timestamp guess.
+    pub fn cloud_sync_snapshot_set(
+        &self,
+        object_key: &str,
+        revision: i64,
+        content_hash: Option<&str>,
+        content: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.execute(
+            "INSERT INTO cloud_sync_snapshots (object_key, revision, content_hash, content, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(object_key) DO UPDATE SET revision = ?2, content_hash = ?3, content = ?4, updated_at = ?5",
+            params![object_key, revision, content_hash, content, chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn cloud_sync_snapshot_content(&self, object_key: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.query_row(
+            "SELECT content FROM cloud_sync_snapshots WHERE object_key = ?1",
+            [object_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn cloud_sync_conflict_upsert(&self, conflict: &CloudSyncConflict) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.execute(
+            "INSERT INTO cloud_sync_conflicts
+               (object_key, object_kind, base_content, local_content, remote_content, local_memory_type,
+                remote_memory_type, remote_revision, remote_content_hash, local_updated_at, remote_updated_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(object_key) DO UPDATE SET
+               object_kind = ?2, base_content = ?3, local_content = ?4, remote_content = ?5,
+               local_memory_type = ?6, remote_memory_type = ?7, remote_revision = ?8,
+               remote_content_hash = ?9, local_updated_at = ?10, remote_updated_at = ?11, created_at = ?12",
+            params![
+                conflict.object_key, conflict.object_kind, conflict.base_content, conflict.local_content,
+                conflict.remote_content, conflict.local_memory_type, conflict.remote_memory_type,
+                conflict.remote_revision, conflict.remote_content_hash, conflict.local_updated_at,
+                conflict.remote_updated_at, conflict.created_at,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn cloud_sync_conflicts(&self) -> Result<Vec<CloudSyncConflict>, String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT object_key, object_kind, base_content, local_content, remote_content, local_memory_type,
+                    remote_memory_type, remote_revision, remote_content_hash, local_updated_at,
+                    remote_updated_at, created_at
+               FROM cloud_sync_conflicts ORDER BY created_at DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| Ok(CloudSyncConflict {
+            object_key: row.get(0)?, object_kind: row.get(1)?, base_content: row.get(2)?,
+            local_content: row.get(3)?, remote_content: row.get(4)?, local_memory_type: row.get(5)?,
+            remote_memory_type: row.get(6)?, remote_revision: row.get(7)?, remote_content_hash: row.get(8)?,
+            local_updated_at: row.get(9)?, remote_updated_at: row.get(10)?, created_at: row.get(11)?,
+        })).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn cloud_sync_conflict_get(&self, object_key: &str) -> Result<Option<CloudSyncConflict>, String> {
+        Ok(self.cloud_sync_conflicts()?.into_iter().find(|item| item.object_key == object_key))
+    }
+
+    pub fn cloud_sync_conflict_delete(&self, object_key: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.execute("DELETE FROM cloud_sync_conflicts WHERE object_key = ?1", [object_key])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
