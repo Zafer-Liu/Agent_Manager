@@ -451,7 +451,10 @@ async fn route(
                     let _ = store.try_record_mcp_access(
                         crate::agent_sources::agent_label(source),
                         "prompt_inject",
-                        &format!("每轮提问注入 L3 长期记忆（{} 字符）", context.chars().count()),
+                        &format!(
+                            "每轮提问注入 L3 长期记忆（{} 字符）",
+                            context.chars().count()
+                        ),
                         Some(&context),
                         true,
                     );
@@ -459,7 +462,10 @@ async fn route(
                     let _ = store.try_record_mcp_access(
                         crate::agent_sources::agent_label(source),
                         "session_start_inject",
-                        &format!("会话首次启动注入 L2 近 30 天工作记忆（{} 字符）", context.chars().count()),
+                        &format!(
+                            "会话首次启动注入 L2 近 30 天工作记忆（{} 字符）",
+                            context.chars().count()
+                        ),
                         Some(&context),
                         true,
                     );
@@ -763,14 +769,8 @@ mod tests {
             let body = hook_inject_body(source, "SessionStart", "记忆正文".to_string());
             let value: serde_json::Value =
                 serde_json::from_str(&body).expect("envelope must be valid JSON");
-            assert_eq!(
-                value["hookSpecificOutput"]["hookEventName"],
-                "SessionStart"
-            );
-            assert_eq!(
-                value["hookSpecificOutput"]["additionalContext"],
-                "记忆正文"
-            );
+            assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
+            assert_eq!(value["hookSpecificOutput"]["additionalContext"], "记忆正文");
         }
     }
 

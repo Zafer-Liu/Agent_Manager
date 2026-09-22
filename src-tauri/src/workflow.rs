@@ -1800,7 +1800,10 @@ async fn execute_agent_task_node(node: &WorkflowNode, current_input: &mut String
         };
     }
 
-    let callback_url = format!("http://localhost:{}/agent/submit", crate::agent_http::AGENT_HTTP_PORT);
+    let callback_url = format!(
+        "http://localhost:{}/agent/submit",
+        crate::agent_http::AGENT_HTTP_PORT
+    );
     let store = crate::agent_http::get_store();
 
     let mut last_error = String::new();

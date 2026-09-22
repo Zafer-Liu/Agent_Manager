@@ -49,7 +49,15 @@ pub struct MemoryMcpStatus {
 fn supported_agent(agent_type: &str) -> bool {
     matches!(
         agent_type,
-        "codex_cli" | "claude_cli" | "codex_desktop" | "claude_desktop" | "qoder" | "workbuddy" | "minimax" | "kimi" | "zcode"
+        "codex_cli"
+            | "claude_cli"
+            | "codex_desktop"
+            | "claude_desktop"
+            | "qoder"
+            | "workbuddy"
+            | "minimax"
+            | "kimi"
+            | "zcode"
     )
 }
 
@@ -191,7 +199,8 @@ fn resolve_agent_cli(agent_type: &str) -> Result<PathBuf, String> {
                 let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !prefix.is_empty() {
                     for extension in ["cmd", "exe", "bat"] {
-                        let candidate = PathBuf::from(&prefix).join(format!("{agent_type}.{extension}"));
+                        let candidate =
+                            PathBuf::from(&prefix).join(format!("{agent_type}.{extension}"));
                         if candidate.is_file() {
                             return Ok(candidate);
                         }
@@ -213,7 +222,10 @@ fn resolve_agent_cli(agent_type: &str) -> Result<PathBuf, String> {
     ))
 }
 
-pub(crate) fn run_agent_cli(agent_type: &str, args: &[String]) -> Result<std::process::Output, String> {
+pub(crate) fn run_agent_cli(
+    agent_type: &str,
+    args: &[String],
+) -> Result<std::process::Output, String> {
     let executable = resolve_agent_cli(agent_type)?;
     let mut command = if executable
         .extension()
@@ -363,7 +375,10 @@ fn write_file_config(agent_type: &str, executable: &str) -> Result<MemoryMcpStat
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .unwrap_or_else(|| json!({}));
     let servers = servers_map_mut(&mut config, agent_type)?;
-    servers.insert(SERVER_NAME.into(), file_server_entry(agent_type, executable));
+    servers.insert(
+        SERVER_NAME.into(),
+        file_server_entry(agent_type, executable),
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -653,7 +668,10 @@ fn render_shared_context(
         }
     }
 
-    if matches!(scope, SharedContextScope::Full | SharedContextScope::SessionStart) {
+    if matches!(
+        scope,
+        SharedContextScope::Full | SharedContextScope::SessionStart
+    ) {
         instructions.push_str("\n\n## Recent working memory\n");
         instructions.push_str(&truncate_injection(
             context
@@ -871,7 +889,12 @@ fn mcp_call_summary(tool_name: &str, value: Option<&Value>, success: bool) -> St
     }
 }
 
-fn record_mcp_tool_call(tool_name: &str, detail: Option<String>, value: Option<&Value>, success: bool) {
+fn record_mcp_tool_call(
+    tool_name: &str,
+    detail: Option<String>,
+    value: Option<&Value>,
+    success: bool,
+) {
     let store = match crate::telemetry_store::TelemetryStore::new() {
         Ok(store) => store,
         Err(error) => {
@@ -926,8 +949,7 @@ fn handle_request(request: Value) -> Option<Value> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| "缺少工具名称".to_string());
             match name.and_then(|tool_name| {
-                call_tool(tool_name, &arguments)
-                    .map(|value| (tool_name, value))
+                call_tool(tool_name, &arguments).map(|value| (tool_name, value))
             }) {
                 Ok((tool_name, value)) => {
                     // 审计保留完整交换内容：查询参数 + 返回的记忆/Skill 正文。
@@ -1046,7 +1068,11 @@ mod tests {
     fn truncation_preserves_readable_prefix_for_cjk_content() {
         // 中文 L2 文档曾被 decode 失败吞成空正文：截断结果必须保留可读前缀，
         // 而不是只剩标题加截断标记。
-        let text = format!("{}{}", "当前焦点：验证记忆注入链路。", "决策条目内容。".repeat(400));
+        let text = format!(
+            "{}{}",
+            "当前焦点：验证记忆注入链路。",
+            "决策条目内容。".repeat(400)
+        );
         let compact = truncate_injection(&text, 50);
         assert!(compact.starts_with("当前焦点"));
         assert!(compact.contains("initialization budget"));
@@ -1057,10 +1083,12 @@ mod tests {
         // 预算为 10000 cl100k token：token 数以内的中文文档应完整注入、
         // 不被截断；超出预算时则保留可读前缀并附截断标记。
         let within_budget = "工作记忆条目。".repeat(600); // 4200 字符，远低于 10000 token 预算
-        assert!(truncate_injection(&within_budget, super::MEMORY_LAYER_INJECTION_TOKENS)
-            .chars()
-            .count()
-                >= within_budget.chars().count());
+        assert!(
+            truncate_injection(&within_budget, super::MEMORY_LAYER_INJECTION_TOKENS)
+                .chars()
+                .count()
+                >= within_budget.chars().count()
+        );
         let over_budget = "工作记忆条目。".repeat(20_000);
         let compact = truncate_injection(&over_budget, super::MEMORY_LAYER_INJECTION_TOKENS);
         assert!(compact.starts_with("工作记忆条目"));

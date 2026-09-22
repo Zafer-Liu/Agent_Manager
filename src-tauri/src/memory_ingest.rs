@@ -209,7 +209,14 @@ impl IngestStore {
         Ok(json!({"status": "ok"}))
     }
 
-    fn push_message(&self, session_id: &str, agent_id: &str, source: &str, role: &str, content: &str) {
+    fn push_message(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        source: &str,
+        role: &str,
+        content: &str,
+    ) {
         let content = strip_memory_thinking(role, content);
         if content.is_empty() {
             return;
@@ -813,84 +820,84 @@ fn scan_native_transcripts(
     // 转录根目录来自统一的 Agent 数据源注册表，支持按设备覆盖。
     for source in crate::agent_sources::AGENT_SOURCE_IDS {
         for root in crate::agent_sources::transcript_roots(source) {
-        let mut pending = vec![root];
-        let mut visited = 0usize;
-        let mut candidates = Vec::new();
-        while let Some(directory) = pending.pop() {
-            if visited >= NATIVE_SCAN_MAX_ENTRIES {
-                break;
+            let mut pending = vec![root];
+            let mut visited = 0usize;
+            let mut candidates = Vec::new();
+            while let Some(directory) = pending.pop() {
+                if visited >= NATIVE_SCAN_MAX_ENTRIES {
+                    break;
+                }
+                let Ok(entries) = fs::read_dir(directory) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    visited += 1;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        pending.push(path);
+                        continue;
+                    }
+                    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    let modified = entry
+                        .metadata()
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    candidates.push((modified, path));
+                }
             }
-            let Ok(entries) = fs::read_dir(directory) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                visited += 1;
-                let path = entry.path();
-                if path.is_dir() {
-                    pending.push(path);
+            candidates.sort_by(|left, right| right.0.cmp(&left.0));
+            for (_, path) in candidates
+                .into_iter()
+                .take(NATIVE_SCAN_MAX_FILES_PER_SOURCE)
+            {
+                if !store.should_scan_transcript(source, &path, retry_failed) {
                     continue;
                 }
-                if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+                let Some(session_id) = native_session_id(source, &path) else {
+                    continue;
+                };
+                // ZCode 与 Claude Code 的会话互为镜像（同一 UUID 出现在两边的
+                // projects 目录）。同一会话只记第一次扫描的来源，后到的镜像
+                // 副本标记已扫但不再入账，避免对话和用量翻倍。
+                if store.native_session_recorded_by_other_source(source, &session_id)? {
+                    store.record_transcript_scan(source, &path, Some(&session_id), Ok(()));
                     continue;
                 }
-                let modified = entry
-                    .metadata()
+                let messages = match read_native_session(source, &path) {
+                    Ok(messages) => messages,
+                    Err(error) => {
+                        eprintln!(
+                            "[memory-ingest] {source} transcript read failed ({}): {error}",
+                            path.display()
+                        );
+                        store.record_transcript_scan(source, &path, Some(&session_id), Err(&error));
+                        continue;
+                    }
+                };
+                if messages.is_empty() {
+                    store.record_transcript_scan(source, &path, Some(&session_id), Ok(()));
+                    continue;
+                }
+                let occurred_at = fs::metadata(&path)
                     .ok()
                     .and_then(|metadata| metadata.modified().ok())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                candidates.push((modified, path));
-            }
-        }
-        candidates.sort_by(|left, right| right.0.cmp(&left.0));
-        for (_, path) in candidates
-            .into_iter()
-            .take(NATIVE_SCAN_MAX_FILES_PER_SOURCE)
-        {
-            if !store.should_scan_transcript(source, &path, retry_failed) {
-                continue;
-            }
-            let Some(session_id) = native_session_id(source, &path) else {
-                continue;
-            };
-            // ZCode 与 Claude Code 的会话互为镜像（同一 UUID 出现在两边的
-            // projects 目录）。同一会话只记第一次扫描的来源，后到的镜像
-            // 副本标记已扫但不再入账，避免对话和用量翻倍。
-            if store.native_session_recorded_by_other_source(source, &session_id)? {
-                store.record_transcript_scan(source, &path, Some(&session_id), Ok(()));
-                continue;
-            }
-            let messages = match read_native_session(source, &path) {
-                Ok(messages) => messages,
-                Err(error) => {
-                    eprintln!(
-                        "[memory-ingest] {source} transcript read failed ({}): {error}",
-                        path.display()
-                    );
-                    store.record_transcript_scan(source, &path, Some(&session_id), Err(&error));
-                    continue;
+                    .map(chrono::DateTime::<chrono::Utc>::from)
+                    .map(|time| time.to_rfc3339())
+                    .unwrap_or_else(now_str);
+                if store.record_native_conversation(
+                    source,
+                    &session_id,
+                    &path,
+                    &occurred_at,
+                    &messages,
+                )? {
+                    imported += 1;
                 }
-            };
-            if messages.is_empty() {
                 store.record_transcript_scan(source, &path, Some(&session_id), Ok(()));
-                continue;
             }
-            let occurred_at = fs::metadata(&path)
-                .ok()
-                .and_then(|metadata| metadata.modified().ok())
-                .map(chrono::DateTime::<chrono::Utc>::from)
-                .map(|time| time.to_rfc3339())
-                .unwrap_or_else(now_str);
-            if store.record_native_conversation(
-                source,
-                &session_id,
-                &path,
-                &occurred_at,
-                &messages,
-            )? {
-                imported += 1;
-            }
-            store.record_transcript_scan(source, &path, Some(&session_id), Ok(()));
-        }
         }
     }
     Ok(imported)
@@ -1424,7 +1431,12 @@ fn codex_transcript_text(content: Option<&Value>) -> String {
 /// 偏低，也不让整批记忆因一个标签被拒绝丢失。
 fn normalize_l1_durability(raw: Option<&str>, memory_type: &str) -> String {
     let normalized = raw
-        .map(|value| value.trim().to_ascii_lowercase().replace([' ', '-', '_'], ""))
+        .map(|value| {
+            value
+                .trim()
+                .to_ascii_lowercase()
+                .replace([' ', '-', '_'], "")
+        })
         .unwrap_or_default();
     match normalized.as_str() {
         "session" | "temporary" | "temp" => "session".into(),
@@ -1484,8 +1496,8 @@ fn parse_typed_l1_candidates(
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    let Some(values) = extract_l1_memories_value(normalized)
-        .and_then(|value| value.as_array().cloned())
+    let Some(values) =
+        extract_l1_memories_value(normalized).and_then(|value| value.as_array().cloned())
     else {
         return Err("模型输出未符合 L1 JSON 契约，缺少 memories 数组".into());
     };
@@ -2154,8 +2166,7 @@ fn agent_settings_path(agent_type: &str) -> Option<PathBuf> {
     if agent_type == "qoder" {
         // Qoder 国际版在 ~/.qoder，国内版在 ~/.qoder-cn；由注册表按实际
         // 活动目录（含用户覆盖）选出配置主目录。
-        return crate::agent_sources::config_home("qoder")
-            .map(|home| home.join("settings.json"));
+        return crate::agent_sources::config_home("qoder").map(|home| home.join("settings.json"));
     }
     let relative = match agent_type {
         "claude" => CLAUDE_SETTINGS,
@@ -2823,7 +2834,8 @@ mod tests {
                 {"content":"b","type":"fact","durability":"short_term"},
                 {"content":"c","type":"fact","durability":"short_term"},
                 {"content":"s","type":"summary","durability":"session"}]}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(memories.len(), 3);
         assert_eq!(memories[0].memory_type, "summary");
         // undetermined / 缺失 durability → 保守 short_term（summary 恒为 session）。
@@ -2849,7 +2861,8 @@ mod tests {
         // 裸数组。
         let memories = parse_typed_l1_candidates(
             r#"[{"content":"摘要","type":"summary","durability":"session"}]"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(memories.len(), 1);
         // 完全无法解析 → 报错。
         assert!(parse_typed_l1_candidates("我认为这次会话没有值得记录的内容。").is_err());

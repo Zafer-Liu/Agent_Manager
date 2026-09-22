@@ -6,7 +6,6 @@
 
 use crate::thinking::strip_thinking_blocks;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use tauri::Emitter;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -14,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use tauri::Emitter;
 
 static SHARED: OnceLock<Arc<TelemetryStore>> = OnceLock::new();
 
@@ -630,11 +630,7 @@ impl TelemetryStore {
             "TEXT NOT NULL DEFAULT 'short_term'",
         )?;
         // 用户自定义记忆标记：旧库升级后默认 0（自动提取），仅手动添加置 1。
-        add_local_memory_column_if_missing(
-            &conn,
-            "user_defined",
-            "INTEGER NOT NULL DEFAULT 0",
-        )?;
+        add_local_memory_column_if_missing(&conn, "user_defined", "INTEGER NOT NULL DEFAULT 0")?;
         // Older releases created one TranscriptSync event for every append to
         // the same native session. Keep only the newest revision's memories;
         // its transcript already contains the prior turns.
@@ -1103,8 +1099,9 @@ impl TelemetryStore {
             .conn
             .lock()
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
-        let mut statement = conn.prepare(
-            "SELECT event_key, source, session_id, occurred_at, conversation_message_count,
+        let mut statement = conn
+            .prepare(
+                "SELECT event_key, source, session_id, occurred_at, conversation_message_count,
                     l1_state, l1_error_detail, substr(conversation_text, 1, 160)
                FROM agent_events
               WHERE conversation_state = 'full'
@@ -1112,7 +1109,8 @@ impl TelemetryStore {
                 AND conversation_text IS NOT NULL AND conversation_text != ''
               ORDER BY CASE l1_state WHEN 'failed' THEN 0 WHEN 'retrying' THEN 1 ELSE 2 END,
                        id DESC LIMIT ?1",
-        ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
         let rows = statement
             .query_map([limit.min(500)], |row| {
                 Ok(PendingMemorySession {
@@ -1143,15 +1141,17 @@ impl TelemetryStore {
             .conn
             .lock()
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
-        let mut statement = conn.prepare(
-            "SELECT event_key, source, session_id, occurred_at, conversation_message_count,
+        let mut statement = conn
+            .prepare(
+                "SELECT event_key, source, session_id, occurred_at, conversation_message_count,
                     l1_state, l1_error_detail, substr(conversation_text, 1, 160)
                FROM agent_events
               WHERE conversation_state = 'full'
                 AND l1_state = 'stored'
                 AND conversation_text IS NOT NULL AND conversation_text != ''
               ORDER BY id DESC LIMIT ?1",
-        ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
         let rows = statement
             .query_map([limit.min(500)], |row| {
                 Ok(PendingMemorySession {
@@ -1748,7 +1748,10 @@ impl TelemetryStore {
         if layer != "l3" {
             return Err("只有 L3 Profile 草案需要人工发布".into());
         }
-        if let Some(content) = content_override.map(str::trim).filter(|text| !text.is_empty()) {
+        if let Some(content) = content_override
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
             tx.execute(
                 "UPDATE memory_layer_documents SET content = ?1 WHERE id = ?2",
                 params![content, id],
@@ -1782,12 +1785,12 @@ impl TelemetryStore {
         if content.trim().is_empty() {
             return Err("记忆内容不能为空".into());
         }
-       let token_estimate = estimate_transcript_tokens(&content);
+        let token_estimate = estimate_transcript_tokens(&content);
         let conn = self
-           .conn
-           .lock()
-           .map_err(|_| "telemetry store lock poisoned".to_string())?;
-       let updated = conn
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let updated = conn
             .execute(
                 "UPDATE memory_layer_documents SET content = ?1, token_estimate = ?2 WHERE id = ?3 AND state = 'published'",
                 params![content, token_estimate, id],
@@ -1799,7 +1802,11 @@ impl TelemetryStore {
         // 已发布正文被人工编辑 → 云端同步水位置 dirty（同一连接内直接落库，避免重入锁）。
         let now = chrono::Utc::now().to_rfc3339();
         let layer: String = conn
-            .query_row("SELECT layer FROM memory_layer_documents WHERE id = ?1", [id], |r| r.get(0))
+            .query_row(
+                "SELECT layer FROM memory_layer_documents WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
             .map_err(|e| e.to_string())?;
         let _ = conn.execute(
             "INSERT INTO cloud_sync_meta (object_key, revision, content_hash, sync_state, updated_at)
@@ -1819,23 +1826,30 @@ impl TelemetryStore {
     pub fn cloud_sync_meta_rows(
         &self,
     ) -> Result<Vec<(String, i64, Option<String>, String, Option<String>)>, String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let mut stmt = conn
             .prepare("SELECT object_key, revision, content_hash, sync_state, updated_at FROM cloud_sync_meta")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     /// 云端记忆库：按 id 查找用户自定义 L1（远端落地前的本地比对）。
-    pub fn find_user_defined_l1(
-        &self,
-        id: &str,
-    ) -> Result<Option<LocalMemorySnapshot>, String> {
+    pub fn find_user_defined_l1(&self, id: &str) -> Result<Option<LocalMemorySnapshot>, String> {
         self.user_defined_l1_memories()
             .map(|items| items.into_iter().find(|item| item.id == id))
     }
@@ -1845,7 +1859,10 @@ impl TelemetryStore {
         &self,
         object_key: &str,
     ) -> Result<Option<(i64, Option<String>, String, Option<String>)>, String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         conn.query_row(
             "SELECT revision, content_hash, sync_state, updated_at FROM cloud_sync_meta WHERE object_key = ?1",
             [object_key],
@@ -1863,7 +1880,10 @@ impl TelemetryStore {
         content_hash: Option<&str>,
         sync_state: &str,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO cloud_sync_meta (object_key, revision, content_hash, sync_state, updated_at)
@@ -1885,7 +1905,10 @@ impl TelemetryStore {
         content_hash: Option<&str>,
         content: Option<&str>,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         conn.execute(
             "INSERT INTO cloud_sync_snapshots (object_key, revision, content_hash, content, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1897,7 +1920,10 @@ impl TelemetryStore {
     }
 
     pub fn cloud_sync_snapshot_content(&self, object_key: &str) -> Result<Option<String>, String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         conn.query_row(
             "SELECT content FROM cloud_sync_snapshots WHERE object_key = ?1",
             [object_key],
@@ -1908,7 +1934,10 @@ impl TelemetryStore {
     }
 
     pub fn cloud_sync_conflict_upsert(&self, conflict: &CloudSyncConflict) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         conn.execute(
             "INSERT INTO cloud_sync_conflicts
                (object_key, object_kind, base_content, local_content, remote_content, local_memory_type,
@@ -1930,38 +1959,73 @@ impl TelemetryStore {
     }
 
     pub fn cloud_sync_conflicts(&self) -> Result<Vec<CloudSyncConflict>, String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let mut stmt = conn.prepare(
             "SELECT object_key, object_kind, base_content, local_content, remote_content, local_memory_type,
                     remote_memory_type, remote_revision, remote_content_hash, local_updated_at,
                     remote_updated_at, created_at
                FROM cloud_sync_conflicts ORDER BY created_at DESC",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |row| Ok(CloudSyncConflict {
-            object_key: row.get(0)?, object_kind: row.get(1)?, base_content: row.get(2)?,
-            local_content: row.get(3)?, remote_content: row.get(4)?, local_memory_type: row.get(5)?,
-            remote_memory_type: row.get(6)?, remote_revision: row.get(7)?, remote_content_hash: row.get(8)?,
-            local_updated_at: row.get(9)?, remote_updated_at: row.get(10)?, created_at: row.get(11)?,
-        })).map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(CloudSyncConflict {
+                    object_key: row.get(0)?,
+                    object_kind: row.get(1)?,
+                    base_content: row.get(2)?,
+                    local_content: row.get(3)?,
+                    remote_content: row.get(4)?,
+                    local_memory_type: row.get(5)?,
+                    remote_memory_type: row.get(6)?,
+                    remote_revision: row.get(7)?,
+                    remote_content_hash: row.get(8)?,
+                    local_updated_at: row.get(9)?,
+                    remote_updated_at: row.get(10)?,
+                    created_at: row.get(11)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
-    pub fn cloud_sync_conflict_get(&self, object_key: &str) -> Result<Option<CloudSyncConflict>, String> {
-        Ok(self.cloud_sync_conflicts()?.into_iter().find(|item| item.object_key == object_key))
+    pub fn cloud_sync_conflict_get(
+        &self,
+        object_key: &str,
+    ) -> Result<Option<CloudSyncConflict>, String> {
+        Ok(self
+            .cloud_sync_conflicts()?
+            .into_iter()
+            .find(|item| item.object_key == object_key))
     }
 
     pub fn cloud_sync_conflict_delete(&self, object_key: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
-        conn.execute("DELETE FROM cloud_sync_conflicts WHERE object_key = ?1", [object_key])
-            .map_err(|e| e.to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.execute(
+            "DELETE FROM cloud_sync_conflicts WHERE object_key = ?1",
+            [object_key],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     /// 云端记忆库：本地最高对齐修订号，作为增量拉取水位线。
     pub fn cloud_sync_max_revision(&self) -> Result<i64, String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
-        conn.query_row("SELECT COALESCE(MAX(revision), 0) FROM cloud_sync_meta", [], |r| r.get(0))
-            .map_err(|e| e.to_string())
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.query_row(
+            "SELECT COALESCE(MAX(revision), 0) FROM cloud_sync_meta",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// 云端拉取落地：写入某层的发布版正文。本地已有发布版则覆盖；
@@ -1974,7 +2038,10 @@ impl TelemetryStore {
         }
         let token_estimate = estimate_transcript_tokens(&content);
         let now = chrono::Utc::now().to_rfc3339();
-        let mut conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let existing_id: Option<String> = tx
             .query_row(
@@ -2018,7 +2085,10 @@ impl TelemetryStore {
     /// Profiles are intentionally excluded so the active MCP context cannot
     /// be removed by the draft-management UI.
     pub fn delete_l3_draft(&self, id: &str) -> Result<(), String> {
-        let mut conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let changed = tx.execute(
             "DELETE FROM memory_layer_documents WHERE id = ?1 AND layer = 'l3' AND state IN ('draft', 'archived')",
@@ -2028,8 +2098,11 @@ impl TelemetryStore {
             return Err("未找到可删除的 L3 Profile 草案或归档版".into());
         }
         // 同步清理该草案的来源关联，避免残留孤儿记录。
-        tx.execute("DELETE FROM memory_layer_sources WHERE document_id = ?1", [id])
-            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM memory_layer_sources WHERE document_id = ?1",
+            [id],
+        )
+        .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -2292,9 +2365,15 @@ impl TelemetryStore {
 
     /// 云端记忆库：删除某对象 key 的本地水位行（本地删除已推成墓碑后清理）。
     pub fn cloud_sync_meta_delete(&self, object_key: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
-        conn.execute("DELETE FROM cloud_sync_meta WHERE object_key = ?1", [object_key])
-            .map_err(|e| e.to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
+        conn.execute(
+            "DELETE FROM cloud_sync_meta WHERE object_key = ?1",
+            [object_key],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -2336,7 +2415,8 @@ impl TelemetryStore {
                 })
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     /// 云端记忆库（Token 用量）：整设备覆盖式落地远端总量统计。
@@ -2351,8 +2431,11 @@ impl TelemetryStore {
             .lock()
             .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM usage_remote_totals WHERE device = ?1", [device])
-            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM usage_remote_totals WHERE device = ?1",
+            [device],
+        )
+        .map_err(|e| e.to_string())?;
         for row in rows {
             tx.execute(
                 "INSERT OR REPLACE INTO usage_remote_totals
@@ -2587,8 +2670,8 @@ impl TelemetryStore {
             })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
-           .map_err(|e| e.to_string())
-   }
+            .map_err(|e| e.to_string())
+    }
 
     pub fn importance_evidence(
         &self,
@@ -3042,7 +3125,10 @@ impl TelemetryStore {
                 ) latest WHERE rank = 1
                     AND occurred_at >= ?1 AND occurred_at <= ?2
                     AND event_type NOT IN ('Stop', 'TranscriptSync', 'session_end', 'session_usage')";
-        let conn = self.conn.lock().map_err(|_| "telemetry store lock poisoned".to_string())?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "telemetry store lock poisoned".to_string())?;
         let mut status = conn.query_row(
             &format!(
                 "WITH sessions AS (
@@ -3073,7 +3159,9 @@ impl TelemetryStore {
         ).map_err(|e| e.to_string())?;
         if status.active_sessions > 0 {
             let mut statement = conn
-                .prepare(&format!("SELECT DISTINCT source FROM {ACTIVE_SESSION_FILTER} ORDER BY source"))
+                .prepare(&format!(
+                    "SELECT DISTINCT source FROM {ACTIVE_SESSION_FILTER} ORDER BY source"
+                ))
                 .map_err(|e| e.to_string())?;
             status.active_sources = statement
                 .query_map([&recent_cutoff, &now], |row| row.get::<_, String>(0))
@@ -3212,9 +3300,21 @@ impl TelemetryStore {
                                    AND (?2 IS NULL OR occurred_at < ?2)
                                    AND (?3 IS NULL OR source = ?3) ";
         let totals_sql = format!("{FEED} SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(CASE WHEN origin LIKE 'estimated%' THEN input_tokens + output_tokens ELSE 0 END), 0) FROM usage_feed {FILTER}");
-        let (record_count, input_tokens, output_tokens, cached_tokens, estimated_tokens): (i64, i64, i64, i64, i64) = conn
+        let (record_count, input_tokens, output_tokens, cached_tokens, estimated_tokens): (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn
             .query_row(&totals_sql, params![start_at, end_at, source], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
             .map_err(|e| e.to_string())?;
 
@@ -3738,8 +3838,8 @@ fn codex_usage(value: &Value) -> Option<TranscriptUsage> {
     if input.is_none() && output.is_none() {
         return None;
     }
-    let cache_read = get_i64(value, &["cache_read_input_tokens", "cached_input_tokens"])
-        .unwrap_or(0);
+    let cache_read =
+        get_i64(value, &["cache_read_input_tokens", "cached_input_tokens"]).unwrap_or(0);
     let cache_write = get_i64(value, &["cache_creation_input_tokens"]).unwrap_or(0);
     Some(TranscriptUsage {
         input_tokens: input.unwrap_or(0) + cache_read + cache_write,
@@ -4042,9 +4142,9 @@ fn read_workbuddy_usage_records(session_id: &str, path: &Path) -> Vec<Transcript
                         .map(str::to_string),
                     model: get_str(&entry, &["model", "model_name"])
                         .or_else(|| {
-                            entry
-                                .get("providerData")
-                                .and_then(|provider| get_str(provider, &["requestModelName", "model"]))
+                            entry.get("providerData").and_then(|provider| {
+                                get_str(provider, &["requestModelName", "model"])
+                            })
                         })
                         .map(str::to_string),
                     input_tokens: usage.input_tokens,
@@ -4232,7 +4332,9 @@ fn read_minimax_usage_records(session_id: &str, path: &Path) -> Vec<TranscriptUs
                         chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
                     })
                     .map(|time| time.to_rfc3339())
-                    .or_else(|| get_str(&entry, &["timestamp", "occurred_at", "time"]).map(str::to_string)),
+                    .or_else(|| {
+                        get_str(&entry, &["timestamp", "occurred_at", "time"]).map(str::to_string)
+                    }),
                 model: get_str(message, &["model", "model_name"]).map(str::to_string),
                 input_tokens,
                 output_tokens,
@@ -4474,8 +4576,7 @@ fn transcript_value_text(value: Option<&Value>) -> String {
 fn estimate_transcript_tokens(text: &str) -> i64 {
     // Building the BPE ranks is expensive (~100ms); transcripts hold thousands
     // of messages, so the encoding must be constructed once and reused.
-    static ENCODING: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> =
-        std::sync::OnceLock::new();
+    static ENCODING: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
     let encoding = ENCODING.get_or_init(|| tiktoken_rs::cl100k_base().ok());
     if let Some(encoding) = encoding {
         return encoding.encode_with_special_tokens(text).len() as i64;
@@ -4629,7 +4730,11 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO local_memory_items VALUES (?1, ?2, 'fact', 'long_term', 1, ?3, ?3)",
-            params!["local-user-l3:old", "older custom memory", "2020-01-01T00:00:00Z"],
+            params![
+                "local-user-l3:old",
+                "older custom memory",
+                "2020-01-01T00:00:00Z"
+            ],
         )
         .unwrap();
         for index in 1..=3 {
@@ -4653,7 +4758,10 @@ mod tests {
             .iter()
             .any(|memory| memory.id == "local-user-l3:old" && memory.user_defined));
         assert_eq!(
-            memories.iter().filter(|memory| !memory.user_defined).count(),
+            memories
+                .iter()
+                .filter(|memory| !memory.user_defined)
+                .count(),
             2
         );
     }
@@ -5292,11 +5400,20 @@ mod tests {
         assert_eq!(rows[0].error.as_deref(), Some("模型超时"));
         assert_eq!(rows[0].message_count, 3);
         assert!(rows[1].excerpt.contains("待整理会话"));
-        let one = store.conversation_by_event_key("k-pending").unwrap().unwrap();
+        let one = store
+            .conversation_by_event_key("k-pending")
+            .unwrap()
+            .unwrap();
         assert!(one.conversation_text.contains("待整理会话"));
         // 已整理完成的会话不允许通过单会话整理重复提取。
-        assert!(store.conversation_by_event_key("k-stored").unwrap().is_none());
-        assert!(store.conversation_by_event_key("k-empty").unwrap().is_none());
+        assert!(store
+            .conversation_by_event_key("k-stored")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .conversation_by_event_key("k-empty")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

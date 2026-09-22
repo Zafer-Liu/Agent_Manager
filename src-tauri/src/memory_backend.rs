@@ -1013,8 +1013,8 @@ pub async fn memory_consolidate(
     // run is no longer cut short by the old fixed 75s ceiling, yet stays
     // bounded so a stuck provider can never hang consolidation indefinitely.
     let total_batches = candidate_batches.len();
-    let total_budget = Duration::from_secs(240u64.max(total_batches as u64 * 150))
-        .min(Duration::from_secs(1200));
+    let total_budget =
+        Duration::from_secs(240u64.max(total_batches as u64 * 150)).min(Duration::from_secs(1200));
     let deadline = Instant::now() + total_budget;
     // 用户自定义记忆只有用户能删改：不进入巩固的已知集合，任何合并
     // 计划都无法把它们当作保留项改写或被合并项删除（前端候选已按

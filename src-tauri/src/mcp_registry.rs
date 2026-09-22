@@ -77,7 +77,15 @@ pub struct McpImportCandidate {
 fn is_mcp_target(agent: &str) -> bool {
     matches!(
         agent,
-        "codex_cli" | "claude_cli" | "codex_desktop" | "claude_desktop" | "qoder" | "workbuddy" | "minimax" | "kimi" | "zcode"
+        "codex_cli"
+            | "claude_cli"
+            | "codex_desktop"
+            | "claude_desktop"
+            | "qoder"
+            | "workbuddy"
+            | "minimax"
+            | "kimi"
+            | "zcode"
     )
 }
 
@@ -110,9 +118,7 @@ fn valid_name(name: &str) -> bool {
 
 fn read_catalog() -> Vec<McpCatalogEntry> {
     crate::telemetry_store::shared_store()
-        .and_then(|store| {
-            store.app_setting_get::<Vec<McpCatalogEntry>>(MCP_CATALOG_SETTING_KEY)
-        })
+        .and_then(|store| store.app_setting_get::<Vec<McpCatalogEntry>>(MCP_CATALOG_SETTING_KEY))
         .unwrap_or_default()
 }
 
@@ -343,7 +349,8 @@ fn value_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Object(x), Value::Object(y)) => {
             x.len() == y.len()
-                && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| value_equal(v, w)))
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| value_equal(v, w)))
         }
         _ => a == b,
     }
@@ -393,7 +400,11 @@ fn remove_json_entry(agent: &str, name: &str) -> Result<(), String> {
 /// claude/codex CLI 型装备：先移除旧配置再 add（覆盖式，与
 /// memory_mcp_install 一致）。env 走 `-e K=V`，远程走 `--transport`。
 fn cli_equip(agent: &str, entry: &McpCatalogEntry) -> Result<(), String> {
-    let cli = if agent.starts_with("codex") { "codex" } else { "claude" };
+    let cli = if agent.starts_with("codex") {
+        "codex"
+    } else {
+        "claude"
+    };
     let transport = normalize_transport(&entry.transport);
     let _ = run_agent_cli(cli, &["mcp".into(), "remove".into(), entry.name.clone()]);
     let mut args = vec!["mcp".into(), "add".into()];
@@ -444,7 +455,11 @@ fn apply_equip(agent: &str, entry: &McpCatalogEntry) -> Result<(), String> {
 
 fn apply_unequip(agent: &str, name: &str) -> Result<(), String> {
     if agent == "claude_cli" || agent.starts_with("codex") {
-        let cli = if agent.starts_with("codex") { "codex" } else { "claude" };
+        let cli = if agent.starts_with("codex") {
+            "codex"
+        } else {
+            "claude"
+        };
         let output = run_agent_cli(cli, &["mcp".into(), "remove".into(), name.to_string()])?;
         if !output.status.success() {
             return Err(format!(
@@ -642,7 +657,11 @@ pub async fn mcp_sync_agent(agent: String) -> Result<(), String> {
     let mut errors = Vec::new();
     for entry in &assigned {
         if !supports_transport(&agent, normalize_transport(&entry.transport)) {
-            errors.push(format!("{}：{} 不支持该 transport", entry.name, agent_label(&agent)));
+            errors.push(format!(
+                "{}：{} 不支持该 transport",
+                entry.name,
+                agent_label(&agent)
+            ));
             continue;
         }
         if let Err(error) = apply_equip(&agent, entry) {

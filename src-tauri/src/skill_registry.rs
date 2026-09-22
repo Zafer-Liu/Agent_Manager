@@ -168,11 +168,7 @@ fn ensure_kimi_skill_plugin() -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
-    let Some(home) = plugin_root
-        .ancestors()
-        .nth(3)
-        .map(Path::to_path_buf)
-    else {
+    let Some(home) = plugin_root.ancestors().nth(3).map(Path::to_path_buf) else {
         return Err("cannot resolve kimi home from plugin root".into());
     };
     let installed_path = home.join("plugins").join("installed.json");
@@ -180,7 +176,11 @@ fn ensure_kimi_skill_plugin() -> Result<(), String> {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| serde_json::json!({"version": 1, "plugins": []}));
-    if installed.get("plugins").and_then(|p| p.as_array()).is_none() {
+    if installed
+        .get("plugins")
+        .and_then(|p| p.as_array())
+        .is_none()
+    {
         installed["plugins"] = serde_json::json!([]);
     }
     let plugins = installed["plugins"].as_array_mut().unwrap();
@@ -197,14 +197,18 @@ fn ensure_kimi_skill_plugin() -> Result<(), String> {
         });
     let mut merged = existing;
     {
-        let obj = merged.as_object_mut().ok_or("installed.json 插件项格式异常")?;
+        let obj = merged
+            .as_object_mut()
+            .ok_or("installed.json 插件项格式异常")?;
         let now = chrono::Utc::now().to_rfc3339();
         let root_string = plugin_root.to_string_lossy().to_string();
         obj.insert("root".into(), serde_json::json!(root_string.clone()));
         obj.insert("enabled".into(), serde_json::json!(true));
         obj.insert("updatedAt".into(), serde_json::json!(now.clone()));
-        obj.entry("installedAt".to_string()).or_insert_with(|| serde_json::json!(now));
-        obj.entry("originalSource".to_string()).or_insert_with(|| serde_json::json!(root_string));
+        obj.entry("installedAt".to_string())
+            .or_insert_with(|| serde_json::json!(now));
+        obj.entry("originalSource".to_string())
+            .or_insert_with(|| serde_json::json!(root_string));
     }
     match plugins
         .iter()
@@ -256,7 +260,11 @@ fn skill_dir_files(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     Ok(files)
 }
 
-fn collect_dir_files_inner(root: &Path, dir: &Path, output: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+fn collect_dir_files_inner(
+    root: &Path,
+    dir: &Path,
+    output: &mut Vec<(String, PathBuf)>,
+) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
@@ -279,10 +287,7 @@ fn collect_dir_files_inner(root: &Path, dir: &Path, output: &mut Vec<(String, Pa
             }
             collect_dir_files_inner(root, &path, output)?;
         } else if let Some(relative) = path.strip_prefix(root).ok() {
-            output.push((
-                relative.to_string_lossy().replace('\\', "/"),
-                path.clone(),
-            ));
+            output.push((relative.to_string_lossy().replace('\\', "/"), path.clone()));
         }
     }
     Ok(())
@@ -314,7 +319,8 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<(), String> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::fs::copy(&path, &target).map_err(|e| format!("copy {} → {}：{e}", path.display(), target.display()))?;
+        std::fs::copy(&path, &target)
+            .map_err(|e| format!("copy {} → {}：{e}", path.display(), target.display()))?;
     }
     Ok(())
 }
@@ -517,9 +523,11 @@ fn refresh_skill_cache() -> Result<Vec<SkillItem>, String> {
 /// rollback) so that `skill_list` stays consistent across sessions.
 fn cache_upsert_skill(item: &SkillItem) {
     if let Some(store) = crate::telemetry_store::shared_store() {
-        if let Some(mut skills) = store.app_setting_get::<Vec<SkillItem>>(SKILL_CATALOG_SETTING_KEY) {
-            if let Some(existing) =
-                skills.iter_mut().find(|s| s.source == item.source && s.name == item.name)
+        if let Some(mut skills) = store.app_setting_get::<Vec<SkillItem>>(SKILL_CATALOG_SETTING_KEY)
+        {
+            if let Some(existing) = skills
+                .iter_mut()
+                .find(|s| s.source == item.source && s.name == item.name)
             {
                 *existing = item.clone();
             } else {
@@ -536,21 +544,24 @@ fn cache_upsert_skill(item: &SkillItem) {
 pub async fn skill_scan() -> Result<Vec<SkillItem>, String> {
     let root = shared_root();
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-   let mut imported = Vec::new();
-   for (source, roots) in scan_roots() {
-       let mut files = Vec::new();
-       for scan_root in &roots {
-           collect_skill_files(scan_root, &mut files)?;
-       }
-       for path in files {
-           let skill = match parse_skill(&path, source) {
+    let mut imported = Vec::new();
+    for (source, roots) in scan_roots() {
+        let mut files = Vec::new();
+        for scan_root in &roots {
+            collect_skill_files(scan_root, &mut files)?;
+        }
+        for path in files {
+            let skill = match parse_skill(&path, source) {
                 Ok(skill) => skill,
                 Err(error) => {
                     eprintln!("[skill] 跳过无法解析的 {}：{error}", path.display());
                     continue;
                 }
             };
-            let skill_dir = path.parent().ok_or("SKILL.md has no parent directory")?.to_path_buf();
+            let skill_dir = path
+                .parent()
+                .ok_or("SKILL.md has no parent directory")?
+                .to_path_buf();
             let target_dir = root.join(source).join(&skill.name);
             let target = target_dir.join("SKILL.md");
             std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
@@ -637,13 +648,19 @@ pub async fn skill_sync_apply(target: String, overwrite: bool) -> Result<SkillSy
     let destination_root = target_root(&target)?;
     // create 与 missing 都属于「本地无副本、应补齐」的部署语义，一并下发。
     for skill in preview.create.iter().chain(preview.missing.iter()) {
-        let source = PathBuf::from(&skill.path).parent().unwrap_or(Path::new(&skill.path)).to_path_buf();
+        let source = PathBuf::from(&skill.path)
+            .parent()
+            .unwrap_or(Path::new(&skill.path))
+            .to_path_buf();
         let dest = destination_root.join(&skill.name);
         deploy_shared_skill(&target, &source, &dest)?;
     }
     if overwrite {
         for skill in preview.update.iter().chain(preview.conflict.iter()) {
-            let source = PathBuf::from(&skill.path).parent().unwrap_or(Path::new(&skill.path)).to_path_buf();
+            let source = PathBuf::from(&skill.path)
+                .parent()
+                .unwrap_or(Path::new(&skill.path))
+                .to_path_buf();
             let dest = destination_root.join(&skill.name);
             deploy_shared_skill(&target, &source, &dest)?;
         }
@@ -655,13 +672,24 @@ pub async fn skill_sync_apply(target: String, overwrite: bool) -> Result<SkillSy
 /// 只返回两侧哈希不同或仅一侧存在的文件；文本内容双侧给出，供前端做
 /// 行级 diff；二进制或缺失侧为 None。
 #[tauri::command]
-pub async fn skill_drift_detail(target: String, source: String, name: String) -> Result<Vec<SkillDriftFile>, String> {
+pub async fn skill_drift_detail(
+    target: String,
+    source: String,
+    name: String,
+) -> Result<Vec<SkillDriftFile>, String> {
     let _ = target_root(&target)?;
     let shared_skill_path = managed_skill_path(&source, &name)?;
-    let shared_dir = shared_skill_path.parent().unwrap_or(&shared_skill_path).to_path_buf();
+    let shared_dir = shared_skill_path
+        .parent()
+        .unwrap_or(&shared_skill_path)
+        .to_path_buf();
     let local_dir = target_root(&target)?.join(safe_name(&name));
     let shared_files = skill_dir_files(&shared_dir)?;
-    let local_files = if local_dir.exists() { skill_dir_files(&local_dir)? } else { Vec::new() };
+    let local_files = if local_dir.exists() {
+        skill_dir_files(&local_dir)?
+    } else {
+        Vec::new()
+    };
     let mut result = Vec::new();
     for (relative, shared_path) in &shared_files {
         let local_entry = local_files.iter().find(|(rel, _)| rel == relative);
@@ -705,7 +733,9 @@ pub struct SkillAdoptResult {
 }
 
 fn read_text_optional(path: &Path) -> Option<String> {
-    std::fs::read(path).ok().and_then(|bytes| String::from_utf8(bytes).ok())
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
 }
 
 /// 采纳目标 Agent 的本地副本：快照共享库当前版本后，用本地内容整体替换
@@ -713,14 +743,24 @@ fn read_text_optional(path: &Path) -> Option<String> {
 /// 向其他已装备 Agent 推送新版本，但**只覆盖那些本地副本与采纳前共享库一致
 /// 的 Agent**；本地自己也改过的 Agent 会被跳过，避免覆盖其未采纳的改动。
 #[tauri::command]
-pub async fn skill_adopt_local(target: String, source: String, name: String) -> Result<SkillAdoptResult, String> {
+pub async fn skill_adopt_local(
+    target: String,
+    source: String,
+    name: String,
+) -> Result<SkillAdoptResult, String> {
     let _ = target_root(&target)?;
     let local_dir = target_root(&target)?.join(safe_name(&name));
     if !local_dir.join("SKILL.md").is_file() {
-        return Err(format!("目标 Agent 本地不存在该 Skill：{}", local_dir.display()));
+        return Err(format!(
+            "目标 Agent 本地不存在该 Skill：{}",
+            local_dir.display()
+        ));
     }
     let shared_skill_path = managed_skill_path(&source, &name)?;
-    let shared_dir = shared_skill_path.parent().unwrap_or(&shared_skill_path).to_path_buf();
+    let shared_dir = shared_skill_path
+        .parent()
+        .unwrap_or(&shared_skill_path)
+        .to_path_buf();
     let item = parse_skill(&shared_skill_path, &source)?;
     let mut manifest = read_manifest(&shared_skill_path, &item.hash);
     // 采纳前共享库的哈希就是「旧基线」。其他 Agent 本地等于基线即未改过。
@@ -754,7 +794,10 @@ pub async fn skill_adopt_local(target: String, source: String, name: String) -> 
         }
         let dest = match target_root(agent) {
             Ok(root) => root.join(safe_name(&name)),
-            Err(_) => { skipped.push(agent.clone()); continue; }
+            Err(_) => {
+                skipped.push(agent.clone());
+                continue;
+            }
         };
         let local_unmodified = dest.join("SKILL.md").is_file()
             && dir_hash(&dest).map(|h| h == baseline_hash).unwrap_or(false);
@@ -767,15 +810,27 @@ pub async fn skill_adopt_local(target: String, source: String, name: String) -> 
             Err(_) => skipped.push(agent.clone()),
         }
     }
-    Ok(SkillAdoptResult { item, adopted_agent: target, synced, skipped })
+    Ok(SkillAdoptResult {
+        item,
+        adopted_agent: target,
+        synced,
+        skipped,
+    })
 }
 
 /// 单条覆盖部署：把共享库里某个 Skill 部署到目标 Agent（本地被改后丢弃
 /// Agent 改动、恢复为共享库版本）。不牵连同一 Agent 的其他待更新项。
 #[tauri::command]
-pub async fn skill_sync_apply_one(target: String, source: String, name: String) -> Result<SkillItem, String> {
+pub async fn skill_sync_apply_one(
+    target: String,
+    source: String,
+    name: String,
+) -> Result<SkillItem, String> {
     let shared_skill_path = managed_skill_path(&source, &name)?;
-    let shared_dir = shared_skill_path.parent().unwrap_or(&shared_skill_path).to_path_buf();
+    let shared_dir = shared_skill_path
+        .parent()
+        .unwrap_or(&shared_skill_path)
+        .to_path_buf();
     let dest = target_root(&target)?.join(safe_name(&name));
     deploy_shared_skill(&target, &shared_dir, &dest)?;
     let item = managed_skill_item(&source, &name)?;
@@ -809,42 +864,74 @@ pub struct SkillPublishedDrift {
 #[tauri::command]
 pub async fn skill_published_drift() -> Result<Vec<SkillPublishedDrift>, String> {
     let mut result = Vec::new();
-    for item in shared_skills()?.into_iter().filter(|s| s.status == "published") {
-        let shared_dir = PathBuf::from(&item.path).parent().unwrap_or(Path::new(&item.path)).to_path_buf();
+    for item in shared_skills()?
+        .into_iter()
+        .filter(|s| s.status == "published")
+    {
+        let shared_dir = PathBuf::from(&item.path)
+            .parent()
+            .unwrap_or(Path::new(&item.path))
+            .to_path_buf();
         let shared_files = skill_dir_files(&shared_dir)?;
         let mut agents = Vec::new();
         for agent in &item.assigned_agents {
             if agent == &item.source {
                 continue;
             }
-            let Ok(root) = target_root(agent) else { continue };
+            let Ok(root) = target_root(agent) else {
+                continue;
+            };
             let local_dir = root.join(safe_name(&item.name));
             if !local_dir.join("SKILL.md").is_file() {
-                agents.push(SkillDriftAgent { agent: agent.clone(), state: "missing".into(), changed_files: 0 });
+                agents.push(SkillDriftAgent {
+                    agent: agent.clone(),
+                    state: "missing".into(),
+                    changed_files: 0,
+                });
                 continue;
             }
             let local_hash = dir_hash(&local_dir)?;
             if local_hash == item.hash {
-                agents.push(SkillDriftAgent { agent: agent.clone(), state: "in_sync".into(), changed_files: 0 });
+                agents.push(SkillDriftAgent {
+                    agent: agent.clone(),
+                    state: "in_sync".into(),
+                    changed_files: 0,
+                });
                 continue;
             }
             let local_files = skill_dir_files(&local_dir)?;
-            let changed = shared_files.iter()
-                .filter(|(rel, shared_path)| {
-                    match local_files.iter().find(|(r, _)| r == rel) {
+            let changed = shared_files
+                .iter()
+                .filter(
+                    |(rel, shared_path)| match local_files.iter().find(|(r, _)| r == rel) {
                         Some((_, local_file)) => {
-                            let a = std::fs::read(shared_path).map(|b| hash(&b)).unwrap_or_default();
-                            let b = std::fs::read(local_file).map(|b| hash(&b)).unwrap_or_default();
+                            let a = std::fs::read(shared_path)
+                                .map(|b| hash(&b))
+                                .unwrap_or_default();
+                            let b = std::fs::read(local_file)
+                                .map(|b| hash(&b))
+                                .unwrap_or_default();
                             a != b
                         }
                         None => true,
-                    }
-                })
+                    },
+                )
                 .count()
-                + local_files.iter().filter(|(rel, _)| !shared_files.iter().any(|(r, _)| r == rel)).count();
-            agents.push(SkillDriftAgent { agent: agent.clone(), state: "modified".into(), changed_files: changed });
+                + local_files
+                    .iter()
+                    .filter(|(rel, _)| !shared_files.iter().any(|(r, _)| r == rel))
+                    .count();
+            agents.push(SkillDriftAgent {
+                agent: agent.clone(),
+                state: "modified".into(),
+                changed_files: changed,
+            });
         }
-        result.push(SkillPublishedDrift { source: item.source, name: item.name, agents });
+        result.push(SkillPublishedDrift {
+            source: item.source,
+            name: item.name,
+            agents,
+        });
     }
     Ok(result)
 }
@@ -879,17 +966,28 @@ fn apply_status(source: &str, name: &str, status: &str) -> Result<SkillItem, Str
 }
 
 /// 把某个 Skill 对目标 Agent 的装备状态写入 manifest（不含缓存刷新）。
-fn apply_assignment(source: &str, name: &str, target: &str, equipped: bool) -> Result<SkillItem, String> {
+fn apply_assignment(
+    source: &str,
+    name: &str,
+    target: &str,
+    equipped: bool,
+) -> Result<SkillItem, String> {
     let path = managed_skill_path(source, name)?;
     let item = parse_skill(&path, source)?;
     let mut manifest = read_manifest(&path, &item.hash);
     if equipped {
-        if !manifest.assigned_agents.iter().any(|agent| agent.as_str() == target) {
+        if !manifest
+            .assigned_agents
+            .iter()
+            .any(|agent| agent.as_str() == target)
+        {
             manifest.assigned_agents.push(target.to_string());
             manifest.assigned_agents.sort();
         }
     } else {
-        manifest.assigned_agents.retain(|agent| agent.as_str() != target);
+        manifest
+            .assigned_agents
+            .retain(|agent| agent.as_str() != target);
     }
     manifest.updated_at = chrono::Utc::now().to_rfc3339();
     write_manifest(&path, &manifest)?;
@@ -897,7 +995,11 @@ fn apply_assignment(source: &str, name: &str, target: &str, equipped: bool) -> R
 }
 
 #[tauri::command]
-pub async fn skill_set_status(source: String, name: String, status: String) -> Result<SkillItem, String> {
+pub async fn skill_set_status(
+    source: String,
+    name: String,
+    status: String,
+) -> Result<SkillItem, String> {
     if !matches!(status.as_str(), "draft" | "published") {
         return Err("skill status must be draft or published".into());
     }
@@ -928,7 +1030,10 @@ pub struct SkillBulkRef {
 }
 
 #[tauri::command]
-pub async fn skill_set_status_bulk(items: Vec<SkillBulkRef>, status: String) -> Result<Vec<SkillItem>, String> {
+pub async fn skill_set_status_bulk(
+    items: Vec<SkillBulkRef>,
+    status: String,
+) -> Result<Vec<SkillItem>, String> {
     if !matches!(status.as_str(), "draft" | "published") {
         return Err("skill status must be draft or published".into());
     }
@@ -936,7 +1041,10 @@ pub async fn skill_set_status_bulk(items: Vec<SkillBulkRef>, status: String) -> 
     for item in &items {
         match apply_status(&item.source, &item.name, &status) {
             Ok(skill) => updated.push(skill),
-            Err(error) => eprintln!("[skill] 批量设置状态跳过 {}:{}：{error}", item.source, item.name),
+            Err(error) => eprintln!(
+                "[skill] 批量设置状态跳过 {}:{}：{error}",
+                item.source, item.name
+            ),
         }
     }
     if updated.is_empty() && !items.is_empty() {
@@ -957,7 +1065,10 @@ pub async fn skill_set_assignment_bulk(
     for item in &items {
         match apply_assignment(&item.source, &item.name, &target, equipped) {
             Ok(skill) => updated.push(skill),
-            Err(error) => eprintln!("[skill] 批量装备跳过 {}:{}：{error}", item.source, item.name),
+            Err(error) => eprintln!(
+                "[skill] 批量装备跳过 {}:{}：{error}",
+                item.source, item.name
+            ),
         }
     }
     if updated.is_empty() && !items.is_empty() {
@@ -1004,7 +1115,8 @@ pub async fn skill_rollback_latest(source: String, name: String) -> Result<Skill
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            name.starts_with('v') && (path.is_dir() || path.extension().and_then(|e| e.to_str()) == Some("md"))
+            name.starts_with('v')
+                && (path.is_dir() || path.extension().and_then(|e| e.to_str()) == Some("md"))
         })
         .map(|path| {
             let stem = path.file_stem().and_then(|n| n.to_str()).unwrap_or("");
@@ -1023,7 +1135,8 @@ pub async fn skill_rollback_latest(source: String, name: String) -> Result<Skill
     if snapshot.is_dir() {
         // 先把当前内容备份为新版本目录，再就地把快照内容写回（保留
         // manifest.json 与 .versions/）。
-        let backup = version_root(&path).join(format!("v{}-{}", manifest.version, &current_hash[..12]));
+        let backup =
+            version_root(&path).join(format!("v{}-{}", manifest.version, &current_hash[..12]));
         copy_dir_contents(&skill_dir, &backup)?;
         replace_contents_within(&snapshot, &skill_dir)?;
     } else {
@@ -1038,11 +1151,11 @@ pub async fn skill_rollback_latest(source: String, name: String) -> Result<Skill
     manifest.version += 1;
     manifest.status = "draft".into();
     manifest.current_hash = dir_hash(&skill_dir)?;
-   manifest.updated_at = chrono::Utc::now().to_rfc3339();
-   write_manifest(&path, &manifest)?;
-   let item = managed_skill_item(&source, &name)?;
-   cache_upsert_skill(&item);
-   Ok(item)
+    manifest.updated_at = chrono::Utc::now().to_rfc3339();
+    write_manifest(&path, &manifest)?;
+    let item = managed_skill_item(&source, &name)?;
+    cache_upsert_skill(&item);
+    Ok(item)
 }
 
 /// 删除共享库中的一个 Skill：整个目录（SKILL.md、附属脚本、manifest、
@@ -1055,7 +1168,8 @@ pub async fn skill_delete(source: String, name: String) -> Result<(), String> {
         .map_err(|e| format!("删除 {} 失败：{e}", skill_dir.display()))?;
     // 缓存同步移除该条目，避免 skill_list 仍返回已删除的 Skill。
     if let Some(store) = crate::telemetry_store::shared_store() {
-        if let Some(mut skills) = store.app_setting_get::<Vec<SkillItem>>(SKILL_CATALOG_SETTING_KEY) {
+        if let Some(mut skills) = store.app_setting_get::<Vec<SkillItem>>(SKILL_CATALOG_SETTING_KEY)
+        {
             let before = skills.len();
             skills.retain(|s| !(s.source == source && s.name == name));
             if skills.len() != before {

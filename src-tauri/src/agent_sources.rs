@@ -10,8 +10,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// 全部受支持的会话/Token 来源。
-pub const AGENT_SOURCE_IDS: [&str; 8] =
-    ["codex", "claude", "qoder", "workbuddy", "minimax", "kimi", "copilot", "zcode"];
+pub const AGENT_SOURCE_IDS: [&str; 8] = [
+    "codex",
+    "claude",
+    "qoder",
+    "workbuddy",
+    "minimax",
+    "kimi",
+    "copilot",
+    "zcode",
+];
 
 pub fn is_supported_source(id: &str) -> bool {
     AGENT_SOURCE_IDS.contains(&id)

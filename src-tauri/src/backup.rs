@@ -54,7 +54,11 @@ fn add_dir_to_zip<W: Write + std::io::Seek>(
         let zip_name = if zip_prefix.is_empty() {
             rel.to_string_lossy().replace('\\', "/")
         } else {
-            format!("{}/{}", zip_prefix, rel.to_string_lossy().replace('\\', "/"))
+            format!(
+                "{}/{}",
+                zip_prefix,
+                rel.to_string_lossy().replace('\\', "/")
+            )
         };
         if entry.is_dir() {
             zip.add_directory(&zip_name, options)
@@ -111,8 +115,8 @@ pub fn config_export(
     }
 
     // Create the ZIP at a temp path first, then move to the target.
-    let tmp = tempfile::NamedTempFile::new()
-        .map_err(|e| format!("failed to create temp file: {e}"))?;
+    let tmp =
+        tempfile::NamedTempFile::new().map_err(|e| format!("failed to create temp file: {e}"))?;
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -172,8 +176,7 @@ pub fn config_export(
 
     // Move temp file to destination (handles cross-volume via copy fallback).
     if fs::rename(tmp.path(), &dest_path).is_err() {
-        fs::copy(tmp.path(), &dest_path)
-            .map_err(|e| format!("failed to write output: {e}"))?;
+        fs::copy(tmp.path(), &dest_path).map_err(|e| format!("failed to write output: {e}"))?;
         let _ = fs::remove_file(tmp.path());
     }
 
@@ -204,8 +207,7 @@ pub fn config_import(
     // copy its contents into the live connection.
     let mut tables_restored = 0usize;
     if let Ok(mut entry) = archive.by_name(DB_FILENAME) {
-        let tmp = tempfile::NamedTempFile::new()
-            .map_err(|e| format!("temp file: {e}"))?;
+        let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("temp file: {e}"))?;
         let mut out = fs::File::create(tmp.path()).map_err(|e| e.to_string())?;
         let mut buf = [0u8; 65536];
         loop {
@@ -230,13 +232,12 @@ pub fn config_import(
             .map_err(|e| e.to_string())?;
         tables_restored = count as usize;
 
-       // Use SQLite Online Backup API to replace live DB contents.
+        // Use SQLite Online Backup API to replace live DB contents.
         let mut dst_conn = store
             .conn
             .lock()
             .map_err(|_| "database lock poisoned".to_string())?;
-        let backup = backup::Backup::new(&src_conn, &mut *dst_conn)
-            .map_err(|e| e.to_string())?;
+        let backup = backup::Backup::new(&src_conn, &mut *dst_conn).map_err(|e| e.to_string())?;
         backup
             .run_to_completion(100, std::time::Duration::from_millis(250), None)
             .map_err(|e| e.to_string())?;
@@ -283,9 +284,7 @@ fn extract_dir<R: Read + std::io::Seek>(
     fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
 
     for name in &names {
-        let rel = name
-            .strip_prefix(&format!("{}/", prefix))
-            .unwrap_or("");
+        let rel = name.strip_prefix(&format!("{}/", prefix)).unwrap_or("");
         if rel.is_empty() {
             continue;
         }
@@ -316,4 +315,3 @@ fn extract_dir<R: Read + std::io::Seek>(
 
     Ok(count)
 }
-
