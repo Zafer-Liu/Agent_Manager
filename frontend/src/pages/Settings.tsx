@@ -58,7 +58,7 @@ export function Settings() {
         <Card>
         <div className="space-y-2">
           <AboutRow label={t('settings.aboutName')} value={t('app.title')} />
-          <AboutRow label={t('settings.aboutLicense')} value="MIT License" />
+          <AboutRow label={t('settings.aboutLicense')} value="Apache 2.0" />
           <AboutRow
             label={t('settings.aboutSource')}
             value="GitHub"

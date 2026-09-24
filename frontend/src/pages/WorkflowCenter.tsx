@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { WorkflowBuilder } from './WorkflowBuilder'
+import type { McpServer } from '../components/McpServersManager'
 
 // 与旧 mcpAgentStore 相同的 localStorage 键，沿用用户已启用的服务器选择
 const LS_ENABLED_SERVERS = 'mcp-enabled-servers'
-
-interface McpServer {
-  name: string; command: string; args: string[]; env: Record<string, string>
-  transport?: string; url?: string; headers?: Record<string, string>; description?: string
-}
 
 function loadEnabledServers(): string[] {
   try {

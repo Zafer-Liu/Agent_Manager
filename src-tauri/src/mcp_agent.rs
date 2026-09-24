@@ -1,5 +1,6 @@
 use crate::llm::LlmProvider;
 use crate::mcp::McpServer;
+use crate::process_util::no_window;
 use reqwest::blocking::Client as HttpClient;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -113,6 +114,7 @@ impl McpClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        no_window(&mut cmd);
         for (k, v) in &server.env {
             cmd.env(k, v);
         }

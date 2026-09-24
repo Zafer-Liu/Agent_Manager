@@ -1,3 +1,4 @@
+use crate::process_util::no_window;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -69,15 +70,15 @@ pub fn detect_system_proxy() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn read_wininet_proxy() -> Option<String> {
-    let output = std::process::Command::new("reg")
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "ProxyServer",
-        ])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("reg");
+    cmd.args([
+        "query",
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        "/v",
+        "ProxyServer",
+    ]);
+    no_window(&mut cmd);
+    let output = cmd.output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines() {
         if line.trim_start().starts_with("ProxyServer") {
@@ -389,6 +390,7 @@ pub async fn github_clone_repo(
 
     let mut cmd = std::process::Command::new("git");
     cmd.args(["clone", "--depth", "1", &clone_url, &dest_str]);
+    no_window(&mut cmd);
 
     // Inject proxy into git subprocess
     if let Some(proxy_url) = detect_system_proxy() {
@@ -412,9 +414,10 @@ pub async fn github_clone_repo(
 
 #[tauri::command]
 pub fn github_check_git() -> bool {
-    std::process::Command::new("git")
-        .arg("--version")
-        .output()
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("--version");
+    no_window(&mut cmd);
+    cmd.output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }

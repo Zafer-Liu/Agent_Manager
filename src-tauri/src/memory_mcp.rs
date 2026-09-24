@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
+use crate::process_util::no_window;
+
 const SERVER_NAME: &str = "agent-manager-memory";
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 static MCP_CLIENT_NAME: OnceLock<Mutex<String>> = OnceLock::new();
@@ -167,13 +169,14 @@ fn resolve_agent_cli(agent_type: &str) -> Result<PathBuf, String> {
     // GUI 进程可能未继承交互式 shell 的 PATH：用 `where`（其内部会合并
     // 用户与系统环境变量）兜底解析。
     if cfg!(windows) {
-        if let Ok(output) = Command::new("cmd.exe")
+        let mut where_cmd = Command::new("cmd.exe");
+        where_cmd
             .args(["/d", "/s", "/c", &format!("where {agent_type}")])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-        {
+            .stderr(Stdio::null());
+        no_window(&mut where_cmd);
+        if let Ok(output) = where_cmd.output() {
             if output.status.success() {
                 if let Some(line) = String::from_utf8_lossy(&output.stdout)
                     .lines()
@@ -188,13 +191,14 @@ fn resolve_agent_cli(agent_type: &str) -> Result<PathBuf, String> {
         }
         // 最后探测 npm 的全局 prefix：CLI 装在自定义 prefix 且未加入系统
         // PATH 时仍能定位到启动器。
-        if let Ok(output) = Command::new("cmd.exe")
+        let mut npm_cmd = Command::new("cmd.exe");
+        npm_cmd
             .args(["/d", "/s", "/c", "npm prefix -g"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-        {
+            .stderr(Stdio::null());
+        no_window(&mut npm_cmd);
+        if let Ok(output) = npm_cmd.output() {
             if output.status.success() {
                 let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !prefix.is_empty() {
@@ -240,6 +244,7 @@ pub(crate) fn run_agent_cli(
     } else {
         Command::new(&executable)
     };
+    no_window(&mut command);
     command
         .args(args)
         .stdin(Stdio::null())

@@ -41,6 +41,13 @@ const en: TranslationSchema = {
     ports: 'Port Manager',
     proxy: 'Proxy',
     settings: 'Settings',
+    memoryOverview: 'Overview',
+    memoryPending: 'Pending',
+    memoryOrganized: 'Organized',
+    memoryInjection: 'Injection',
+    memoryUsage: 'Usage',
+    skillsLocal: 'Local Skills',
+    skillsPublished: 'Published',
   },
   app: {
     title: 'Agent Manager',
@@ -1220,6 +1227,33 @@ const en: TranslationSchema = {
       run: 'Run',
       finalAnswer: 'Final Answer',
       argumentsLabel: 'Arguments',
+    },
+  },
+  onboarding: {
+    skip: 'Skip',
+    welcome: {
+      title: 'Welcome to Agent Manager',
+      pitch: 'Manage all your AI agents\' memories, skills, and MCP servers in one window.',
+      start: 'Get Started',
+    },
+    agents: {
+      title: 'Detected Agents',
+      desc: 'Here are the agents detected on your machine:',
+      empty: 'No agents detected. You can add them later from the main interface.',
+      next: 'Next',
+    },
+    llm: {
+      title: 'Configure LLM',
+      desc: 'Memory extraction requires an LLM. Choose a provider and enter your API key, or use local Ollama.',
+      apiKey: 'API Key',
+      test: 'Test Connection',
+      saveAndNext: 'Save & Continue',
+      skip: 'Skip for now',
+    },
+    done: {
+      title: 'All Set',
+      desc: 'You can now start managing your agents.',
+      enter: 'Open Agent Manager',
     },
   },
   wfBuilder: {

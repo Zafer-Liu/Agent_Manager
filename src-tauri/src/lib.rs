@@ -13,6 +13,7 @@ mod memory_backend;
 mod memory_ingest;
 mod memory_mcp;
 mod ports;
+mod process_util;
 mod proxy;
 mod pty;
 mod skill_registry;

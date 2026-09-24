@@ -3,6 +3,7 @@
 //! Agent Manager 将长期记忆能力作为原生功能内置：引擎组件随应用启动时自动拉起
 //! （已在运行则复用），退出时由应用停止由本模块拉起的进程。API 细节对用户隐藏。
 
+use crate::process_util::no_window;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -241,6 +242,7 @@ impl MemoryBackend {
                 let mut cmd = Command::new(&exe);
                 cmd.current_dir(&qdir);
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                no_window(&mut cmd);
                 self.spawn("qdrant", cmd);
             } else {
                 eprintln!("[memory-engine] qdrant.exe not found at {}", exe.display());
@@ -273,6 +275,7 @@ impl MemoryBackend {
                     cmd.env("JAVA_HOME", &java_home);
                 }
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                no_window(&mut cmd);
                 self.spawn("neo4j", cmd);
             } else {
                 eprintln!("[memory-engine] neo4j.bat not found at {}", bat.display());
@@ -288,6 +291,7 @@ impl MemoryBackend {
                 cmd.current_dir(self.root.join(".devtools"));
                 cmd.env("EMBED_PROXY_PORT", EMBED_PORT.to_string());
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                no_window(&mut cmd);
                 self.spawn("embedding", cmd);
             } else {
                 eprintln!(
@@ -325,6 +329,7 @@ impl MemoryBackend {
                 cmd.env("MINDMEMOS_NEO4J_USERNAME", "neo4j");
                 cmd.env("MINDMEMOS_NEO4J_PASSWORD", "mindmemos_dev_password");
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                no_window(&mut cmd);
                 self.spawn("api", cmd);
             }
         } else if !self.children.lock().unwrap().contains_key("api") {

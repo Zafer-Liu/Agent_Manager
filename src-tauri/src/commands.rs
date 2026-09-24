@@ -1,4 +1,5 @@
 use crate::agent::*;
+use crate::process_util::no_window;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,11 +90,12 @@ fn push_log(
 #[cfg(windows)]
 fn kill_process_tree(child: &mut std::process::Child) {
     let pid = child.id();
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::null());
+    no_window(&mut cmd);
+    let _ = cmd.status();
     // 兜底：确保直接子进程也被 kill
     let _ = child.kill();
 }
@@ -419,10 +421,10 @@ fn spawn_agent_with_arcs(
             && !resolved_command.to_lowercase().ends_with(".bat")
             && resolve_npm_global(&config.command).is_none()
         {
-            if let Ok(output) = std::process::Command::new("where.exe")
-                .arg(&config.command)
-                .output()
-            {
+            let mut where_cmd = std::process::Command::new("where.exe");
+            where_cmd.arg(&config.command);
+            no_window(&mut where_cmd);
+            if let Ok(output) = where_cmd.output() {
                 if output.status.success() {
                     let where_result = String::from_utf8_lossy(&output.stdout);
                     // 取第一个结果，但跳过 Windows Store stub
@@ -478,6 +480,7 @@ fn spawn_agent_with_arcs(
         .args(&config.args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    no_window(&mut cmd);
 
     if !config.working_dir.is_empty() {
         cmd.current_dir(&config.working_dir);
@@ -1361,7 +1364,10 @@ pub fn resolve_npm_global(cmd: &str) -> Option<std::path::PathBuf> {
     // `std::process::Command` does not apply PATHEXT like an interactive
     // Windows shell does. `where npm` commonly returns both an extensionless
     // shim and npm.cmd, so explicitly select a runnable command wrapper.
-    if let Ok(output) = std::process::Command::new("where.exe").arg(cmd).output() {
+    let mut where_cmd = std::process::Command::new("where.exe");
+    where_cmd.arg(cmd);
+    no_window(&mut where_cmd);
+    if let Ok(output) = where_cmd.output() {
         if output.status.success() {
             if let Some(path) =
                 select_windows_command_wrapper(&String::from_utf8_lossy(&output.stdout))
@@ -1506,7 +1512,10 @@ fn find_bin_entry(node_modules: &std::path::Path, cmd: &str) -> Option<String> {
 #[cfg(windows)]
 pub fn find_node_exe_path() -> String {
     // 1. where.exe node
-    if let Ok(out) = std::process::Command::new("where.exe").arg("node").output() {
+    let mut where_cmd = std::process::Command::new("where.exe");
+    where_cmd.arg("node");
+    no_window(&mut where_cmd);
+    if let Ok(out) = where_cmd.output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(first) = s.lines().next() {

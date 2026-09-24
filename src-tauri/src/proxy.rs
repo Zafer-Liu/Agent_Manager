@@ -1,5 +1,6 @@
 /// proxy.rs — Caddy 反向代理管理
 /// 负责：用户账号管理、Caddyfile 生成、Caddy 进程控制
+use crate::process_util::no_window;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -87,7 +88,10 @@ fn find_caddy(cfg: &ProxyConfig) -> Option<String> {
     let candidates = ["caddy"];
 
     for c in &candidates {
-        if let Ok(out) = Command::new("where").arg(c).output() {
+        let mut where_cmd = Command::new("where");
+        where_cmd.arg(c);
+        no_window(&mut where_cmd);
+        if let Ok(out) = where_cmd.output() {
             if out.status.success() {
                 let s = String::from_utf8_lossy(&out.stdout);
                 if let Some(line) = s.lines().next() {
@@ -96,7 +100,10 @@ fn find_caddy(cfg: &ProxyConfig) -> Option<String> {
             }
         }
         // Unix / Mac: which
-        if let Ok(out) = Command::new("which").arg(c).output() {
+        let mut which_cmd = Command::new("which");
+        which_cmd.arg(c);
+        no_window(&mut which_cmd);
+        if let Ok(out) = which_cmd.output() {
             if out.status.success() {
                 let s = String::from_utf8_lossy(&out.stdout);
                 if let Some(line) = s.lines().next() {
@@ -218,9 +225,10 @@ pub fn proxy_check_caddy() -> Option<String> {
 /// 用 Caddy 为给定明文密码生成 bcrypt 哈希
 #[tauri::command]
 pub fn proxy_hash_password(caddy_path: String, plaintext: String) -> Result<String, String> {
-    let out = Command::new(&caddy_path)
-        .args(["hash-password", "--plaintext", &plaintext])
-        .output()
+    let mut cmd = Command::new(&caddy_path);
+    cmd.args(["hash-password", "--plaintext", &plaintext]);
+    no_window(&mut cmd);
+    let out = cmd.output()
         .map_err(|e| format!("无法运行 caddy: {e}"))?;
 
     if !out.status.success() {
@@ -255,17 +263,18 @@ pub fn proxy_apply(config: ProxyConfig) -> Result<String, String> {
 
     // 4. 先尝试 reload（如果 Caddy 已运行）
     let admin_port = config.admin_port.unwrap_or(2019);
-    let reload = Command::new(&caddy)
-        .args([
-            "reload",
-            "--config",
-            cf_path.to_str().unwrap(),
-            "--adapter",
-            "caddyfile",
-            "--address",
-            &format!("localhost:{admin_port}"),
-        ])
-        .output();
+    let mut reload_cmd = Command::new(&caddy);
+    reload_cmd.args([
+        "reload",
+        "--config",
+        cf_path.to_str().unwrap(),
+        "--adapter",
+        "caddyfile",
+        "--address",
+        &format!("localhost:{admin_port}"),
+    ]);
+    no_window(&mut reload_cmd);
+    let reload = reload_cmd.output();
 
     match reload {
         Ok(out) if out.status.success() => {
@@ -277,18 +286,19 @@ pub fn proxy_apply(config: ProxyConfig) -> Result<String, String> {
     }
 
     // 5. 启动 Caddy（后台运行）
-    Command::new(&caddy)
-        .args([
-            "run",
-            "--config",
-            cf_path.to_str().unwrap(),
-            "--adapter",
-            "caddyfile",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    let mut run_cmd = Command::new(&caddy);
+    run_cmd.args([
+        "run",
+        "--config",
+        cf_path.to_str().unwrap(),
+        "--adapter",
+        "caddyfile",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    no_window(&mut run_cmd);
+    run_cmd.spawn()
         .map_err(|e| format!("无法启动 Caddy: {e}"))?;
 
     Ok("Caddy 已启动".to_string())
@@ -301,9 +311,10 @@ pub fn proxy_stop() -> Result<String, String> {
     let caddy = find_caddy(&cfg).ok_or("未找到 Caddy")?;
     let admin_port = cfg.admin_port.unwrap_or(2019);
 
-    let out = Command::new(&caddy)
-        .args(["stop", "--address", &format!("localhost:{admin_port}")])
-        .output()
+    let mut stop_cmd = Command::new(&caddy);
+    stop_cmd.args(["stop", "--address", &format!("localhost:{admin_port}")]);
+    no_window(&mut stop_cmd);
+    let out = stop_cmd.output()
         .map_err(|e| format!("无法运行 caddy stop: {e}"))?;
 
     if out.status.success() {
@@ -400,7 +411,10 @@ fn find_cloudflared() -> Option<String> {
     #[cfg(not(windows))]
     let cmd = "which";
 
-    if let Ok(out) = Command::new(cmd).arg("cloudflared").output() {
+    let mut find_cmd = Command::new(cmd);
+    find_cmd.arg("cloudflared");
+    no_window(&mut find_cmd);
+    if let Ok(out) = find_cmd.output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(line) = s.lines().next() {
@@ -448,6 +462,7 @@ pub fn tunnel_start(
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::piped());
+    no_window(&mut cmd);
 
     // 注意：故意【不】注入系统代理。
     // cloudflared 能直连 Cloudflare 边缘节点，注入 HTTP 代理反而会让所有

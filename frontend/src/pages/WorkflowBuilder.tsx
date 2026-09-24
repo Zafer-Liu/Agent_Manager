@@ -9,13 +9,9 @@ import {
   ArrowUp, ArrowDown, AlertCircle, ChevronDown, ChevronRight, X, Bot, Play, GitBranch, Shuffle,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import type { McpServer } from '../components/McpServersManager'
 
 // ── Types (mirror backend workflow.rs) ───────────────────────────────────────
-
-interface McpServer {
-  name: string; command: string; args: string[]; env: Record<string, string>
-  transport?: string; url?: string; headers?: Record<string, string>; description?: string
-}
 
 interface McpToolInfo {
   server: string

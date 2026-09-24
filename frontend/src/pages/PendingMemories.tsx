@@ -6,6 +6,7 @@ import {
 import { useMemoryStore } from '../store/memoryStore'
 import type { MemoryConversationDetail, PendingMemorySession } from '../types/memory'
 import { ConversationDialog, STATE_META, displayTime, sourceLabel } from '../components/ConversationDialog'
+import { MemoryBreadcrumb } from '../components/MemoryBreadcrumb'
 
 type StateFilter = 'all' | 'pending' | 'retrying' | 'failed'
 
@@ -124,7 +125,8 @@ export const PendingMemories = memo(function PendingMemories({ onBack }: { onBac
         <div className="flex items-start gap-3">
           <button type="button" onClick={onBack} className="mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white" aria-label={t('memory.pending.back')}><ArrowLeft size={19} /></button>
           <div>
-            <h1 className="text-2xl font-bold tracking-[-0.025em]">{t('memory.pending.title')}</h1>
+            <MemoryBreadcrumb currentKey="memory.pending.title" onBack={onBack} />
+            <h1 className="mt-1 text-2xl font-bold tracking-[-0.025em]">{t('memory.pending.title')}</h1>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t('memory.pending.desc')}</p>
           </div>
         </div>

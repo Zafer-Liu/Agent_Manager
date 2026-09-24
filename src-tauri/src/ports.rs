@@ -1,3 +1,4 @@
+use crate::process_util::no_window;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
@@ -25,7 +26,10 @@ pub fn list_listening_ports() -> Vec<PortInfo> {
 #[cfg(windows)]
 fn list_ports_windows() -> Vec<PortInfo> {
     // netstat -ano 拿到端口+PID，再用 tasklist 查进程名
-    let netstat = Command::new("netstat").args(["-ano"]).output().ok();
+    let mut netstat_cmd = Command::new("netstat");
+    netstat_cmd.args(["-ano"]);
+    no_window(&mut netstat_cmd);
+    let netstat = netstat_cmd.output().ok();
 
     let mut ports: Vec<PortInfo> = vec![];
 
@@ -69,10 +73,10 @@ fn list_ports_windows() -> Vec<PortInfo> {
     }
 
     // 批量查进程名
-    let tasklist = Command::new("tasklist")
-        .args(["/fo", "csv", "/nh"])
-        .output()
-        .ok();
+    let mut tasklist_cmd = Command::new("tasklist");
+    tasklist_cmd.args(["/fo", "csv", "/nh"]);
+    no_window(&mut tasklist_cmd);
+    let tasklist = tasklist_cmd.output().ok();
 
     let mut pid_name: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     if let Some(out) = tasklist {
@@ -155,10 +159,10 @@ pub fn kill_port(port: u16) -> Result<String, String> {
     #[cfg(windows)]
     {
         // 找到 PID
-        let out = Command::new("netstat")
-            .args(["-ano"])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut netstat_cmd = Command::new("netstat");
+        netstat_cmd.args(["-ano"]);
+        no_window(&mut netstat_cmd);
+        let out = netstat_cmd.output().map_err(|e| e.to_string())?;
         let text = String::from_utf8_lossy(&out.stdout);
         let mut pid: Option<u32> = None;
         for line in text.lines() {
@@ -182,10 +186,10 @@ pub fn kill_port(port: u16) -> Result<String, String> {
             }
         }
         let pid = pid.ok_or_else(|| format!("No process listening on port {}", port))?;
-        let result = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut taskkill_cmd = Command::new("taskkill");
+        taskkill_cmd.args(["/PID", &pid.to_string(), "/F"]);
+        no_window(&mut taskkill_cmd);
+        let result = taskkill_cmd.output().map_err(|e| e.to_string())?;
         if result.status.success() {
             Ok(format!("Killed PID {} on port {}", pid, port))
         } else {

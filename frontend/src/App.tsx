@@ -21,6 +21,7 @@ import { OrganizedConversations } from './pages/OrganizedConversations'
 import { MemoryInjection } from './pages/MemoryInjection'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { UpdateChecker } from './components/UpdateChecker'
+import { Onboarding } from './components/Onboarding'
 import { useTheme } from './theme'
 import type { AgentState } from './types/agent'
 import { useResizable } from './hooks/useResizable'
@@ -29,6 +30,7 @@ import {
   Plus, RefreshCw, Bot, X, Globe, Network, Sparkles,
   Maximize2, Minimize2, TerminalSquare, Sun, Moon,
   Shield, Eraser, Settings2, Brain, BookOpenText, Plug,
+  ChevronDown, ChevronRight,
 } from 'lucide-react'
 import logoUrl from '/logo.png'
 
@@ -67,6 +69,18 @@ export default function App() {
   const [panelFullscreen, setPanelFullscreen] = useState(false)
   // 从「已发布」页跳入 Skill 库时自动打开同步对话框
   const [skillsAutoSync, setSkillsAutoSync] = useState(false)
+  // 侧边栏分组展开状态：默认展开记忆中心和 Skill 库，让子页面可发现
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set(['memory', 'skills']))
+  // 导航到子页面时自动展开所属分组
+  useEffect(() => {
+    const groupMap: Record<string, string> = {}
+    for (const p of MEMORY_PAGES) groupMap[p] = 'memory'
+    for (const p of SKILL_PAGES) groupMap[p] = 'skills'
+    const group = groupMap[page]
+    if (group) {
+      setExpandedGroups(prev => prev.has(group) ? prev : new Set(prev).add(group))
+    }
+  }, [page])
 
   // 页面导航回调稳定化：配合 memo 化页面，App 的 5s agent 轮询重渲染不再波及隐藏页面。
   const openMemory = useCallback(() => setPage('memory'), [])
@@ -224,16 +238,154 @@ export default function App() {
 
         {/* Nav */}
         <div className="flex flex-col gap-0.5 p-2 border-b border-gray-200 dark:border-gray-800">
+          {/* 智能体 */}
+          <button
+            onClick={() => setPage('agents')}
+            className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-left ${
+              page === 'agents'
+                ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/20 dark:text-blue-400'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+            }`}
+          >
+            <Bot className="h-4 w-4" />{t('nav.agents')}
+          </button>
+
+          {/* 记忆中心（分组） */}
+          {(() => {
+            const isActive = MEMORY_PAGES.includes(page as typeof MEMORY_PAGES[number])
+            const isExpanded = expandedGroups.has('memory')
+            return (
+              <div>
+                <button
+                  onClick={() => {
+                    setExpandedGroups(prev => {
+                      const next = new Set(prev)
+                      if (next.has('memory')) { next.delete('memory') } else { next.add('memory') }
+                      return next
+                    })
+                    if (!isActive) setPage('memory')
+                  }}
+                  className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-left ${
+                    isActive
+                      ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/20 dark:text-blue-400'
+                      : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+                  }`}
+                >
+                  <Brain className="h-4 w-4" />{t('nav.memory')}
+                  {isExpanded
+                    ? <ChevronDown className="ml-auto h-3.5 w-3.5 opacity-50" />
+                    : <ChevronRight className="ml-auto h-3.5 w-3.5 opacity-50" />}
+                </button>
+                {isExpanded && (
+                  <div className="mt-0.5 flex flex-col gap-0.5">
+                    {([
+                      { id: 'memory' as NavPage, label: t('nav.memoryOverview'), onClick: openMemory },
+                      { id: 'pending-memories' as NavPage, label: t('nav.memoryPending'), onClick: openPendingMemories },
+                      { id: 'organized-conversations' as NavPage, label: t('nav.memoryOrganized'), onClick: openOrganizedConversations },
+                      { id: 'memory-injection' as NavPage, label: t('nav.memoryInjection'), onClick: openMemoryInjection },
+                      { id: 'usage' as NavPage, label: t('nav.memoryUsage'), onClick: openUsage },
+                    ]).map(sub => (
+                      <button
+                        key={sub.id}
+                        onClick={sub.onClick}
+                        className={`rounded-lg py-1.5 pl-9 pr-3 text-left text-[13px] transition-colors ${
+                          page === sub.id
+                            ? 'bg-blue-50 text-blue-600 font-medium dark:bg-blue-600/20 dark:text-blue-400'
+                            : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+                        }`}
+                      >
+                        {sub.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+
+          {/* Skill 库（分组） */}
+          {(() => {
+            const isActive = SKILL_PAGES.includes(page as typeof SKILL_PAGES[number])
+            const isExpanded = expandedGroups.has('skills')
+            return (
+              <div>
+                <button
+                  onClick={() => {
+                    setExpandedGroups(prev => {
+                      const next = new Set(prev)
+                      if (next.has('skills')) { next.delete('skills') } else { next.add('skills') }
+                      return next
+                    })
+                    if (!isActive) setPage('skills')
+                  }}
+                  className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-left ${
+                    isActive
+                      ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/20 dark:text-blue-400'
+                      : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+                  }`}
+                >
+                  <BookOpenText className="h-4 w-4" />{t('nav.skills')}
+                  {isExpanded
+                    ? <ChevronDown className="ml-auto h-3.5 w-3.5 opacity-50" />
+                    : <ChevronRight className="ml-auto h-3.5 w-3.5 opacity-50" />}
+                </button>
+                {isExpanded && (
+                  <div className="mt-0.5 flex flex-col gap-0.5">
+                    {([
+                      { id: 'skills' as NavPage, label: t('nav.skillsLocal'), onClick: openSkills },
+                      { id: 'published-skills' as NavPage, label: t('nav.skillsPublished'), onClick: openPublishedSkills },
+                    ]).map(sub => (
+                      <button
+                        key={sub.id}
+                        onClick={sub.onClick}
+                        className={`rounded-lg py-1.5 pl-9 pr-3 text-left text-[13px] transition-colors ${
+                          page === sub.id
+                            ? 'bg-blue-50 text-blue-600 font-medium dark:bg-blue-600/20 dark:text-blue-400'
+                            : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+                        }`}
+                      >
+                        {sub.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+
+          {/* MCP 服务 */}
+          <button
+            onClick={() => setPage('mcp-library')}
+            className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-left ${
+              page === 'mcp-library'
+                ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/20 dark:text-blue-400'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+            }`}
+          >
+            <Plug className="h-4 w-4" />{t('nav.mcpLibrary')}
+          </button>
+
+          {/* 工作流 */}
+          <button
+            onClick={() => setPage('workflow')}
+            className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-left ${
+              page === 'workflow'
+                ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/20 dark:text-blue-400'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+            }`}
+          >
+            <Sparkles className="h-4 w-4" />{t('nav.workflow')}
+          </button>
+
+          {/* 分隔线 */}
+          <div className="my-1 border-t border-gray-200 dark:border-gray-700" />
+
+          {/* 工具区 */}
           {([
-            { id: 'agents',    icon: <Bot className="h-4 w-4" />,             label: t('nav.agents') },
-            { id: 'memory',    icon: <Brain className="h-4 w-4" />,           label: t('nav.memory') },
-            { id: 'skills',    icon: <BookOpenText className="h-4 w-4" />,    label: t('nav.skills') },
-            { id: 'mcp-library', icon: <Plug className="h-4 w-4" />,         label: t('nav.mcpLibrary') },
-            { id: 'workflow',  icon: <Sparkles className="h-4 w-4" />,       label: t('nav.workflow') },
-            { id: 'ports',     icon: <Network className="h-4 w-4" />,         label: t('nav.ports') },
-            { id: 'proxy',     icon: <Shield className="h-4 w-4" />,          label: t('nav.proxy') },
-            { id: 'settings',  icon: <Settings2 className="h-4 w-4" />,       label: t('nav.settings') },
-          ] as const).map(nav => (
+            { id: 'ports' as NavPage,    icon: <Network className="h-4 w-4" />,   label: t('nav.ports') },
+            { id: 'proxy' as NavPage,    icon: <Shield className="h-4 w-4" />,    label: t('nav.proxy') },
+            { id: 'settings' as NavPage, icon: <Settings2 className="h-4 w-4" />, label: t('nav.settings') },
+          ]).map(nav => (
             <button
               key={nav.id}
               onClick={() => setPage(nav.id)}
@@ -544,6 +696,8 @@ export default function App() {
           onClose={() => setShowForm(false)}
         />
       )}
+
+      <Onboarding />
     </div>
   )
 }

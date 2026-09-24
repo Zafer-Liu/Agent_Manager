@@ -1,3 +1,4 @@
+use crate::process_util::no_window;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -92,7 +93,10 @@ fn find_powershell() -> String {
         }
     }
     // Try PATH via where.exe
-    if let Ok(out) = std::process::Command::new("where.exe").arg("pwsh").output() {
+    let mut where_cmd = std::process::Command::new("where.exe");
+    where_cmd.arg("pwsh");
+    no_window(&mut where_cmd);
+    if let Ok(out) = where_cmd.output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(line) = s.lines().next() {
